@@ -1,0 +1,253 @@
+{
+  "original_txt": "Hunting For TamperedChef Infostealer\nWhat if that innocent-looking “free PDF editor” you downloaded wasn’t really what it claimed to be? What if, weeks later, it quietly reached back to the attacker, stole your passwords, and set up camp on your system?\nThat’s the story of TamperedChef — a recently observed infostealer that dresses up as helpful software, only to reveal its true colors later.\nSecurity researchers found TamperedChef bundled in malicious installers (like fake PDF editors), spread through malvertising campaigns and poisoned download sites. The clever twist? It often sleeps for weeks before going live, letting it spread silently and then activate when no one’s watching.\nIn further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as:\ntotalusermanuals\n, manualreaderpro\n, allmanualsreader\n, justaskjacky\n, AllManualsReader\n, etc.\nHow Does It Work?\nTamperedChef is delivered via user-initiated downloads. It comes bundled with seemingly legitimate software like PDF editors or manual readers.\nOnce executed, it silently triggers Node.js (node.exe) via the Windows command line. Node.js executes a JavaScript payload dropped in the user’s temporary folder.\n“C:\\Windows\\System32\\cmd.exe” /C start “” /min “C:\\Users\\<user_name>\\AppData\\Local\\Programs\\AllManualsReader\\node\\node.exe” “C:\\Users\\<user_name>\\AppData\\Local\\Programs\\AllManualsReader\\2d4d7602–8032–4207-a03f-be08e68d1094.js”\nBreaking it Down\ncmd.exe /c start \"\" /min\n– Runs a minimized command prompt silently.node.exe\n– Node.js runtime executes the JavaScript payload.- Payload Location — The\n[GUID]of.js\nfile in%TEMP%\ncontains routines to harvest data and communicate with the attacker.\nPayload Naming Convention\n- Typically named with a GUID suffix ending with “or”, “ro”, or “of”.\n- Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.\nPersistence\nTamperedChef creates a scheduled task to remain active across reboots:\nC:\\windows\\system32\\cmd.exe /d /s /c “schtasks /Create /TN “sys_component_health_{UID}” /TR “\\”C:\\Windows\\system32\\cmd.exe\\” /c start \\”\\” /min \\”%^LOCALAPPDATA^%\\Programs\\AllManualsReader\\2d4d7602–8032–4207-a03f-be08e68d1094.js\\”” /SC DAILY /ST 10:51 /RI 240 /DU 24:00 /F”\nBreaking it down:\n/TN \"sys_component_health_{UID}\"\n– Uses a legitimate-sounding task name./TR\n– Runs Node.js to execute the payload in minimized mode./SC DAILY /ST 10:51 /RI 240 /DU 24:00\n– Executes daily with a repetition interval of 240 minutes./F\n– Overwrites existing tasks with the same name.\nThis ensures TamperedChef maintains stealthy persistence, enabling long-term data exfiltration.\nReconnaissance\nTamperedChef actively surveys the system to identify browsers and security software.\n1. WMI for Process Enumeration\nThe malware uses Windows Management Instrumentation (WMI) to check if browsers like Chrome or Edge are running:\nC:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘chrome.exe’ }””\nC:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘msedge.exe’ }””\nThis helps target credentials and active sessions.\n2. Software Enumeration via Registry\nIt queries the registry to enumerate installed security and antivirus software, often searching for uninstall strings or configuration keys:\nreg query “hkcu\\software\\microsoft\\windows\\currentversion\\uninstall\\episoftware epibrowser” /v “uninstallstring”\nreg query “hkcu\\software\\zillya\\zillya antivirus”\nreg query “hkcu\\software\\kasperskylabsetup”\nreg query “hklm\\software\\fortinet”\nreg query “hkcu\\software\\checkpoint\\zang”\nreg query “hklm\\software\\classes\\g data antivirus”\nreg query “hklm\\software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall\\g data antivirus” /v “uninstallstring”\nreg query “hklm\\software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall\\{4073cd02–7996–48d7-b68e-297676c27ca6}” /v “uninstallstring”\nreg query “hklm\\software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall\\rec” /v “uninstallstring”\nreg query “hklm\\software\\microsoft\\windows\\currentversion\\uninstall\\bitdefender” /v “uninstallstring”\nreg query “hklm\\software\\microsoft\\windows\\currentversion\\run\\bitdefender” /v “uninstallstring”\nreg query “hklm\\software\\microsoft\\windows\\currentversion\\uninstall\\{96a251bd-7532–4cf9-b87d-158fc685dbc4}” /v “uninstallstring”\nBy gathering this information, TamperedChef maps the system’s security landscape, allowing it to avoid or disable defenses.\nCredential Harvesting\nTargets include:\n- Browser SQLite databases —\nLogin Data\nandWeb Data\nfrom Chrome and Edge. - Windows DPAPI secrets — Local system-level encrypted data.\n- Local password managers — Any stored credentials accessible to the user context.\nTo facilitate extraction, the malware may forcibly terminate browser processes:\ntaskkill /F /IM msedge.exe\ntaskkill /IM msedge.exe\ntaskkill /F /IM chrome.exe\ntaskkill /IM chrome.exe\nFile Duplication for Credential Extraction:\nCopies of key browser files are created with \"Sync\"\nappended:\nC:\\Users\\<user_name>\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data Sync\nC:\\Users\\<user_name>\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Preferences Sync\nC:\\Users\\<user_name>\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Preferences Sync\nThis allows attackers to extract credentials without corrupting original files.\nCommand & Control (C2)\nTamperedChef communicates with attacker-controlled servers:\n- Domains:\napi.[random18].com\n- Ports: 8080, 443 (uncommon for typical apps)\nThis traffic delivers harvested credentials and may receive updated payloads or instructions.\nMITRE ATT&CK Mapping\n- Execution: T1059 — Command & Scripting Interpreter\n- Credential Access: T1555 — Credentials from Password Stores, T1003 — OS Credential Dumping\n- Defense Evasion: T1218 — Signed Binary Proxy Execution, T1036 — Masquerading\n- Persistence: T1053 — Scheduled Task/Job\n- Discovery: T1082 — System Information Discovery, T1012 — Query Registry\nHunting Queries\n- Execution of javascript through\nnode.exe\nexecuted bycmd.exe\nprocessCmd:node.exe AND eventId: 1 AND processCmd:cmd.exe AND ProcessCmd:start\n- Registry Enumeration:\ncommandline:\"*reg query*\" AND commandline:(\"*kasperskylabsetup*\" OR \"*bitdefender*\" OR \"*cryptography*\" OR \"*antivirus*\")\n- Browser Termination:\ncommandline:\"*taskkill*\" AND commandline:(\"*msedge.exe*\" OR \"*chrome.exe*\")\n- File Access (Web Data / Login Data in temp folder)\n- Outbound Traffic:\nlogs\n| where tostring(url) matches regex @\"api\\.[a-zA-Z0–9]{18}\\.com\"\n| extend Domain = extract(@\"api\\.([a-zA-Z0–9]{18})\\.com\", 1, tostring(url))\n| where Domain matches regex @\".*\\d.*\"\n| project tostring(url)\nIoCs:\nC2 Domains:\napi[.]cjby76nlcynrc4jvrb[.]com\napi[.]j6vmldsufhwx8zn69z[.]com\napi[.]k2ioeasm874fnacr9x[.]com\napi[.]pyej17uw09d1bqlndg[.]com\napi[.]vtqgo0729ilnmyxs9q[.]com",
+  "sanitized_txt": "Hunting For TamperedChef Infostealer What if that innocent-looking “free PDF editor” you downloaded wasn’t really what it claimed to be? What if, weeks later, it quietly reached back to the attacker, stole your passwords, and set up camp on your system?\nThat’s the story of TamperedChef — a recently observed infostealer that dresses up as helpful software, only to reveal its true colors later.\nSecurity researchers found TamperedChef bundled in malicious installers (like fake PDF editors), spread through malvertising campaigns and poisoned download sites. The clever twist? It often sleeps for weeks before going live, letting it spread silently and then activate when no one’s watching.\nIn further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as:\ntotalusermanuals , manualreaderpro , allmanualsreader , justaskjacky , AllManualsReader , etc.\nHow Does It Work?\nTamperedChef is delivered via user-initiated downloads. It comes bundled with seemingly legitimate software like PDF editors or manual readers.\nOnce executed, it silently triggers Node.js (node.exe) via the Windows command line. Node.js executes a JavaScript payload dropped in the user’s temporary folder.\n“C:\\Windows\\System32\\cmd.exe” /C start “” /min “C:\\Users\\<user_name>\\AppData\\Local\\Programs\\AllManualsReader\\node\\node.exe” “C:\\Users\\<user_name>\\AppData\\Local\\Programs\\AllManualsReader\\2d4d7602–8032–4207-a03f-be08e68d1094.js” Breaking it Down cmd.exe /c start \"\" /min – Runs a minimized command prompt silently.node.exe – Node.js runtime executes the JavaScript payload.- Payload Location — The [GUID]of.js file in%TEMP% contains routines to harvest data and communicate with the attacker.\nPayload Naming Convention - Typically named with a GUID suffix ending with “or”, “ro”, or “of”.\n- Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.\nPersistence TamperedChef creates a scheduled task to remain active across reboots:\nC:\\windows\\system32\\cmd.exe /d /s /c “schtasks /Create /TN “sys_component_health_{UID}” /TR “\\”C:\\Windows\\system32\\cmd.exe\\” /c start \\”\\” /min \\”%^LOCALAPPDATA^%\\Programs\\AllManualsReader\\2d4d7602–8032–4207-a03f-be08e68d1094.js\\”” /SC DAILY /ST 10:51 /RI 240 /DU 24:00 /F” Breaking it down:\n/TN \"sys_component_health_{UID}\" – Uses a legitimate-sounding task name./TR – Runs Node.js to execute the payload in minimized mode./SC DAILY /ST 10:51 /RI 240 /DU 24:00 – Executes daily with a repetition interval of 240 minutes./F – Overwrites existing tasks with the same name.\nThis ensures TamperedChef maintains stealthy persistence, enabling long-term data exfiltration.\nReconnaissance TamperedChef actively surveys the system to identify browsers and security software.\n1. WMI for Process Enumeration The malware uses Windows Management Instrumentation (WMI) to check if browsers like Chrome or Edge are running:\nC:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘chrome.exe’ }”” C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘msedge.exe’ }”” This helps target credentials and active sessions.\n2. Software Enumeration via Registry It queries the registry to enumerate installed security and antivirus software, often searching for uninstall strings or configuration keys:\nreg query “hkcu\\software\\microsoft\\windows\\currentversion\\uninstall\\episoftware epibrowser” /v “uninstallstring” reg query “hkcu\\software\\zillya\\zillya antivirus” reg query “hkcu\\software\\kasperskylabsetup” reg query “hklm\\software\\fortinet” reg query “hkcu\\software\\checkpoint\\zang” reg query “hklm\\software\\classes\\g data antivirus” reg query “hklm\\software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall\\g data antivirus” /v “uninstallstring” reg query “hklm\\software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall\\{4073cd02–7996–48d7-b68e-297676c27ca6}” /v “uninstallstring” reg query “hklm\\software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall\\rec” /v “uninstallstring” reg query “hklm\\software\\microsoft\\windows\\currentversion\\uninstall\\bitdefender” /v “uninstallstring” reg query “hklm\\software\\microsoft\\windows\\currentversion\\run\\bitdefender” /v “uninstallstring” reg query “hklm\\software\\microsoft\\windows\\currentversion\\uninstall\\{96a251bd-7532–4cf9-b87d-158fc685dbc4}” /v “uninstallstring” By gathering this information, TamperedChef maps the system’s security landscape, allowing it to avoid or disable defenses.\nCredential Harvesting Targets include:\n- Browser SQLite databases — Login Data andWeb Data from Chrome and Edge. - Windows DPAPI secrets — Local system-level encrypted data.\n- Local password managers — Any stored credentials accessible to the user context.\nTo facilitate extraction, the malware may forcibly terminate browser processes:\ntaskkill /F /IM msedge.exe taskkill /IM msedge.exe taskkill /F /IM chrome.exe taskkill /IM chrome.exe File Duplication for Credential Extraction:\nCopies of key browser files are created with \"Sync\" appended:\nC:\\Users\\<user_name>\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Web Data Sync C:\\Users\\<user_name>\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Preferences Sync C:\\Users\\<user_name>\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Preferences Sync This allows attackers to extract credentials without corrupting original files.\nCommand & Control (C2) TamperedChef communicates with attacker-controlled servers:\n- Domains:\napi.[random18].com - Ports: 8080, 443 (uncommon for typical apps) This traffic delivers harvested credentials and may receive updated payloads or instructions.\ncommandline:\"*reg query*\" AND commandline:(\"*kasperskylabsetup*\" OR \"*bitdefender*\" OR \"*cryptography*\" OR \"*antivirus*\") - Browser Termination:\ncommandline:\"*taskkill*\" AND commandline:(\"*msedge.exe*\" OR \"*chrome.exe*\") - File Access (Web Data / Login Data in temp folder) - Outbound Traffic:\nlogs | where tostring(url) matches regex @\"api\\.[a-zA-Z0–9]{18}\\.com\" | extend Domain = extract(@\"api\\.([a-zA-Z0–9]{18})\\.com\", 1, tostring(url)) | where Domain matches regex @\".*\\d.*\" | project tostring(url) IoCs:\nC2 Domains:\napi[.]cjby76nlcynrc4jvrb[.]com api[.]j6vmldsufhwx8zn69z[.]com api[.]k2ioeasm874fnacr9x[.]com api[.]pyej17uw09d1bqlndg[.]com api[.]vtqgo0729ilnmyxs9q[.]com",
+  "ID_list": [
+    "T1003",
+    "T1012",
+    "T1036",
+    "T1053",
+    "T1059",
+    "T1082",
+    "T1218",
+    "T1555"
+  ],
+  "Name_list": [
+    "Exfiltration",
+    "Persistence",
+    "PowerShell"
+  ],
+  "TTP_sentences": {
+    "T1036": [
+      {
+        "sentence": "Hunting For TamperedChef Infostealer What if that innocent-looking “free PDF editor” you downloaded wasn’t really what it claimed to be?",
+        "score": 0.5123
+      },
+      {
+        "sentence": "That’s the story of TamperedChef — a recently observed infostealer that dresses up as helpful software, only to reveal its true colors later.",
+        "score": 0.6981
+      },
+      {
+        "sentence": "Security researchers found TamperedChef bundled in malicious installers (like fake PDF editors), spread through malvertising campaigns and poisoned download sites.",
+        "score": 0.4771
+      },
+      {
+        "sentence": "In further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as: totalusermanuals , manualreaderpro , allmanualsreader , justaskjacky , AllManualsReader , etc.",
+        "score": 0.3338
+      },
+      {
+        "sentence": "It comes bundled with seemingly legitimate software like PDF editors or manual readers.",
+        "score": 0.548
+      },
+      {
+        "sentence": "Payload Naming Convention - Typically named with a GUID suffix ending with “or”, “ro”, or “of”. - Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.",
+        "score": 0.519
+      }
+    ],
+    "T1059": [
+      {
+        "sentence": "Hunting For TamperedChef Infostealer What if that innocent-looking “free PDF editor” you downloaded wasn’t really what it claimed to be?",
+        "score": 0.3622
+      },
+      {
+        "sentence": "What if, weeks later, it quietly reached back to the attacker, stole your passwords, and set up camp on your system?",
+        "score": 0.3027
+      },
+      {
+        "sentence": "Security researchers found TamperedChef bundled in malicious installers (like fake PDF editors), spread through malvertising campaigns and poisoned download sites.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "The clever twist?",
+        "score": 0.3327
+      },
+      {
+        "sentence": "In further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as: totalusermanuals , manualreaderpro , allmanualsreader , justaskjacky , AllManualsReader , etc.",
+        "score": 0.413
+      },
+      {
+        "sentence": "How Does It Work?",
+        "score": 0.3695
+      },
+      {
+        "sentence": "TamperedChef is delivered via user-initiated downloads.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "It comes bundled with seemingly legitimate software like PDF editors or manual readers.",
+        "score": 0.3464
+      },
+      {
+        "sentence": "Once executed, it silently triggers Node.js (node.exe) via the Windows command line.",
+        "score": 0.6761
+      },
+      {
+        "sentence": "Payload Naming Convention - Typically named with a GUID suffix ending with “or”, “ro”, or “of”. - Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.",
+        "score": 0.3486
+      },
+      {
+        "sentence": "WMI for Process Enumeration The malware uses Windows Management Instrumentation (WMI) to check if browsers like Chrome or Edge are running: C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘chrome.exe’ }”” C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘msedge.exe’ }”” This helps target credentials and active sessions.",
+        "score": 0.3832
+      },
+      {
+        "sentence": "Command & Control (C2) TamperedChef communicates with attacker-controlled servers: - Domains: api.[random18].com - Ports: 8080, 443 (uncommon for typical apps) This traffic delivers harvested credentials and may receive updated payloads or instructions.",
+        "score": 0.3868
+      }
+    ],
+    "T1218": [
+      {
+        "sentence": "Hunting For TamperedChef Infostealer What if that innocent-looking “free PDF editor” you downloaded wasn’t really what it claimed to be?",
+        "score": 0.5307
+      },
+      {
+        "sentence": "That’s the story of TamperedChef — a recently observed infostealer that dresses up as helpful software, only to reveal its true colors later.",
+        "score": 0.5216
+      },
+      {
+        "sentence": "Security researchers found TamperedChef bundled in malicious installers (like fake PDF editors), spread through malvertising campaigns and poisoned download sites.",
+        "score": 0.5408
+      },
+      {
+        "sentence": "The clever twist?",
+        "score": 0.32
+      },
+      {
+        "sentence": "In further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as: totalusermanuals , manualreaderpro , allmanualsreader , justaskjacky , AllManualsReader , etc.",
+        "score": 0.4124
+      },
+      {
+        "sentence": "TamperedChef is delivered via user-initiated downloads.",
+        "score": 0.3743
+      },
+      {
+        "sentence": "It comes bundled with seemingly legitimate software like PDF editors or manual readers.",
+        "score": 0.5052
+      },
+      {
+        "sentence": "Once executed, it silently triggers Node.js (node.exe) via the Windows command line.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "Payload Naming Convention - Typically named with a GUID suffix ending with “or”, “ro”, or “of”. - Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.",
+        "score": 0.4361
+      },
+      {
+        "sentence": "WMI for Process Enumeration The malware uses Windows Management Instrumentation (WMI) to check if browsers like Chrome or Edge are running: C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘chrome.exe’ }”” C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘msedge.exe’ }”” This helps target credentials and active sessions.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "Command & Control (C2) TamperedChef communicates with attacker-controlled servers: - Domains: api.[random18].com - Ports: 8080, 443 (uncommon for typical apps) This traffic delivers harvested credentials and may receive updated payloads or instructions.",
+        "score": 0.3507
+      }
+    ],
+    "T1003": [
+      {
+        "sentence": "What if, weeks later, it quietly reached back to the attacker, stole your passwords, and set up camp on your system?",
+        "score": 0.5684
+      },
+      {
+        "sentence": "In further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as: totalusermanuals , manualreaderpro , allmanualsreader , justaskjacky , AllManualsReader , etc.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "Payload Naming Convention - Typically named with a GUID suffix ending with “or”, “ro”, or “of”. - Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "This ensures TamperedChef maintains stealthy persistence, enabling long-term data exfiltration.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "Reconnaissance TamperedChef actively surveys the system to identify browsers and security software.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "WMI for Process Enumeration The malware uses Windows Management Instrumentation (WMI) to check if browsers like Chrome or Edge are running: C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘chrome.exe’ }”” C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘msedge.exe’ }”” This helps target credentials and active sessions.",
+        "score": 0.4198
+      },
+      {
+        "sentence": "Credential Harvesting Targets include: - Browser SQLite databases — Login Data andWeb Data from Chrome and Edge. - Windows DPAPI secrets — Local system-level encrypted data. - Local password managers — Any stored credentials accessible to the user context.",
+        "score": 0.754
+      },
+      {
+        "sentence": "Command & Control (C2) TamperedChef communicates with attacker-controlled servers: - Domains: api.[random18].com - Ports: 8080, 443 (uncommon for typical apps) This traffic delivers harvested credentials and may receive updated payloads or instructions.",
+        "score": 0.5292
+      }
+    ],
+    "T1555": [
+      {
+        "sentence": "What if, weeks later, it quietly reached back to the attacker, stole your passwords, and set up camp on your system?",
+        "score": 0.5369
+      },
+      {
+        "sentence": "In further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as: totalusermanuals , manualreaderpro , allmanualsreader , justaskjacky , AllManualsReader , etc.",
+        "score": 0.3306
+      },
+      {
+        "sentence": "This ensures TamperedChef maintains stealthy persistence, enabling long-term data exfiltration.",
+        "score": 0.31
+      },
+      {
+        "sentence": "Credential Harvesting Targets include: - Browser SQLite databases — Login Data andWeb Data from Chrome and Edge. - Windows DPAPI secrets — Local system-level encrypted data. - Local password managers — Any stored credentials accessible to the user context.",
+        "score": 0.8096
+      },
+      {
+        "sentence": "Command & Control (C2) TamperedChef communicates with attacker-controlled servers: - Domains: api.[random18].com - Ports: 8080, 443 (uncommon for typical apps) This traffic delivers harvested credentials and may receive updated payloads or instructions.",
+        "score": 0.4008
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "In further investigation, I observed that it’s not limited to PDF tools, but extended to applications such as: totalusermanuals , manualreaderpro , allmanualsreader , justaskjacky , AllManualsReader , etc.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "Payload Naming Convention - Typically named with a GUID suffix ending with “or”, “ro”, or “of”. - Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.",
+        "score": 0.4361
+      },
+      {
+        "sentence": "This ensures TamperedChef maintains stealthy persistence, enabling long-term data exfiltration.",
+        "score": 0.3242
+      },
+      {
+        "sentence": "Reconnaissance TamperedChef actively surveys the system to identify browsers and security software.",
+        "score": 0.5132
+      },
+      {
+        "sentence": "WMI for Process Enumeration The malware uses Windows Management Instrumentation (WMI) to check if browsers like Chrome or Edge are running: C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘chrome.exe’ }”” C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘msedge.exe’ }”” This helps target credentials and active sessions.",
+        "score": 0.5499
+      },
+      {
+        "sentence": "Credential Harvesting Targets include: - Browser SQLite databases — Login Data andWeb Data from Chrome and Edge. - Windows DPAPI secrets — Local system-level encrypted data. - Local password managers — Any stored credentials accessible to the user context.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "Command & Control (C2) TamperedChef communicates with attacker-controlled servers: - Domains: api.[random18].com - Ports: 8080, 443 (uncommon for typical apps) This traffic delivers harvested credentials and may receive updated payloads or instructions.",
+        "score": 0.3813
+      }
+    ],
+    "T1053": [
+      {
+        "sentence": "Payload Naming Convention - Typically named with a GUID suffix ending with “or”, “ro”, or “of”. - Consistently observed in internal investigations and public malware samples, making it a useful hunting indicator.",
+        "score": 0.3907
+      },
+      {
+        "sentence": "Command & Control (C2) TamperedChef communicates with attacker-controlled servers: - Domains: api.[random18].com - Ports: 8080, 443 (uncommon for typical apps) This traffic delivers harvested credentials and may receive updated payloads or instructions.",
+        "score": 0.3014
+      }
+    ],
+    "T1012": [
+      {
+        "sentence": "Reconnaissance TamperedChef actively surveys the system to identify browsers and security software.",
+        "score": 0.5376
+      },
+      {
+        "sentence": "WMI for Process Enumeration The malware uses Windows Management Instrumentation (WMI) to check if browsers like Chrome or Edge are running: C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘chrome.exe’ }”” C:\\windows\\system32\\cmd.exe /d /s /c “powershell.exe “Get-WmiObject Win32_Process | Where-Object { $_.Name -eq ‘msedge.exe’ }”” This helps target credentials and active sessions.",
+        "score": 0.4533
+      },
+      {
+        "sentence": "Credential Harvesting Targets include: - Browser SQLite databases — Login Data andWeb Data from Chrome and Edge. - Windows DPAPI secrets — Local system-level encrypted data. - Local password managers — Any stored credentials accessible to the user context.",
+        "score": 0.4285
+      }
+    ]
+  }
+}

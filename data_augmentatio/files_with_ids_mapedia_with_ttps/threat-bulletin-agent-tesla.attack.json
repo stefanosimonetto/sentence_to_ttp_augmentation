@@ -1,0 +1,503 @@
+{
+  "original_txt": "Agent Tesla is a spyware that has been around since 2014. It’s in active development, constantly being updated and improved with new features, obfuscation, and encryption methods. The malware is sold as a service with a relatively cheap licensing model, which makes it particularly easy to use and can explain its distribution on such a wide scale. At the time of writing two versions of Agent Tesla can still be found in the wild – version 2 and 3. Version 3 comes with some updates and additional features and is currently the most prevalent.\nAgent Tesla’s most common and successful delivery method is through email, either in the form of spam or more targeted campaigns (OPEC+, COVID-19, ISPS), where the malware is bundled as an attachment, usually in the form of a document or a compressed archive (Figure 1).\nIn the following Threat Bulletin, we’ll explore the delivery process of an Agent Tesla sample and some of the differences and similarities between different versions of Agent Tesla. With that in mind, we begin by looking into a fairly recent sample of Agent Tesla (v3) delivered as an email attachment (Figure 1).\nAgent Tesla – Initial Stages\nThe email arrives with an attachment posing as an invoice with the .doc extension but is actually an RTF document. When it’s opened, it exploits CVE-2017-11882 to execute further stages. The shellcode used in the exploitation of the Equation Editor (eqnedt32.exe) is responsible for downloading and executing the next stage (Figure 2).\nView the VMRay Analyzer Report for Agent Tesla v3 (INVOICE-6754.doc.rtf)\nInterestingly, with this delivery, the threat actors leverage the CMSTP.exe to launch further stages (Figure 3).\nCMSTP is usually used to install Connection Manager service profiles. It takes an .INF file’s path as argument. It describes the profile’s characteristics and the steps to be taken when installing it. This can be abused to start another executable by a legitimate, signed binary or used as a UAC bypass. It’s one of the Living Off The Land techniques. In this case, the .INF file itself seems to have been taken from a public example (by Tyler Applebaum) (Figure 4). It extends the installation with a RunPreSetupCommandsSection which allows one to run commands before the profile is installed. The malicious actor leverages this to run the malware.\nDuring the following steps of the execution, we observe how Agent Tesla makes sure that it’s not easily discovered by adding its image path as an exclusion for Windows Defender (Figure 5). Additionally, it also disables the UAC dialog by overwriting the corresponding settings in the registry. Doing this, the user won’t be notified or prompted for permission if an elevated (requiring administrator access token) action is taken. Thus, Agent Tesla is silently installed.\nFinally, the actual Agent Tesla payload is extracted and injected using the process hollowing method (Figure 6). We have observed many samples using this approach however there were also cases using .NET in-memory reflective loading or a similar method. The process of delivering and loading Agent Tesla varies greatly but the actual payload has many similarities even between versions.\nAgent Tesla – Execution Flow\nEven though Agent Tesla has been in development for at least 7 years, the overall execution flow hasn’t changed much. Some new features were added to the newer versions of Agent Tesla, but the behavior has remained fairly similar. The following section summarizes the high-level execution steps it usually performs. In some cases, we have observed that the order changes slightly but it doesn’t impact the behavior. It also highlights additions made in the newer version of Agent Tesla (v3).\nAt the beginning of its execution, Agent Tesla often uses certain methods to evade automatic analyses. Some of the common evasion techniques include the introduction of an execution delay, which can evade sandboxes that have a limited monitoring duration, and checking the user and computer name for certain hard-coded values that could indicate it’s being analyzed (Figure 7). The spyware also makes sure that no other processes with the same name are currently running. It iterates over all processes with the same name and kills any which aren’t the current process.\nEach infected system is identified by a unique ID generated from different hardware information. There are different ways Agent Tesla can achieve this. It applies the MD5 hashing algorithm on a string created by concatenating different hardware properties:\n- System Serial Number,\n- CPU identification value retrieved from the processorID property of the Win32_Processor WMI management class,\n- The MAC address is taken from the MACAddress property of the Win32_NetworkAdapterConfiguration WMI class. It takes the MAC address of a network adapter that is currently connected.\nThe hardware ID is generated at the beginning of the execution but appears to be only used during the HTTP communication.\nAnother common “evasion” between versions, that Agent Tesla uses at the beginning of its execution, is the GetLastInputInfo function. If no input event was detected in the last 10 minutes a configuration variable is set (Figure 7).\nIts next step is usually to copy itself to a less obvious location (an installation folder) like %appdata% which is also configurable and might not be used at all. The config file also indicates if the file should have the hidden and system attributes set. Persistence is achieved by installing itself as a startup application in the registry. In this case, Agent Tesla also enables the corresponding startup entry via \\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run by setting the value 02 00 00 00 00 00 (Figure 8).\nFurthermore, it also deletes the ZoneIdentifier from the base image. A ZoneIdentifier is an Alternate Data Stream created (when a file is downloaded and saved from the internet). This information is used by Windows and various security products. Deleting it makes the malware look as if it wasn’t downloaded from the internet. Depending on the configuration Agent Tesla is able to take screenshots periodically. It uses a timer that will invoke the registered callback function according to a specified interval which is also configurable. One difference between versions is in the choice of protocols the malware can use to exfiltrate the collected information. Version 2 and 3 are both capable of using HTTP, SMTP, and FTP. On top of that, v3 comes with another possibility which is sending a document to a Telegram channel (Figure 9).\nA new addition that came with Agent Tesla v3 is the ability to collect clipboard data and the external IP of the infected host (Figure 10).\nView the VMRay Analyzer Report for Agent Tesla v3 (External IP Check)\nFurthermore, v3 comes with the option to use the Tor proxy for its HTTP communication. This is a newer addition which isn’t found in the previous versions (Figure 11). If the corresponding configuration is set, Agent Tesla first tries to kill all currently running Tor instances and then download and set up the Tor client.\nWith HTTP communication set-up, Agent Tesla starts one of its main tasks – credential-stealing (Figure 12). Agent Tesla v3 has some additions to the application list that it targets.\nBoth versions are also able to function as a keylogger. The keylogging functionality is again implemented with the help of timers. The set interval specifies how often the logs are collected and exfiltrated (Figure 13). The hook itself is installed using the native SetWindowsHookExA function with idHook WH_KEYBOARD_LL which takes an application-defined hook.\nString and Config Decryption\nAll strings that are used by Agent Tesla are encrypted by default and mostly used on demand. The ability to decrypt Agent Tesla’s strings, allows one to extract parts of the configuration information like the c2 server, the passwords used, or other data related to network connections. Appendix B contains a small list of extracted network information from different Agent Tesla samples.\nVersion 2\nAgent Tesla v2’s encrypted strings are usually located in the .text segment of the PE file. To be exact, they start 0x50 bytes past the beginning of the section. The strings are encrypted using AES in CBC mode (Figure 14). Each string is encrypted with its own Key and IV. Strings are stored in an array of objects, where each object is an array of units. The decryption routine takes an encoded offset into the array which is then decoded at runtime to extract the corresponding string.\nInvestigating the object in dnSpy shows that the static object array corresponds to the token 0x04000001 (Figure 15 left). It describes the Field table (0x4) and its first row (0x000001). Each element in the array is described by its own token (Figure 15 right). dnSpy already provides us with the corresponding RVA and file offset. However, this information can also be extracted manually from the FieldRVA table in the metadata stream of the PE file by looking up the corresponding row number. This information would allow to statically parse the file and its metadata, extract the RVAs and decrypt the strings without assuming any offsets.\nVersion 3\nAgent Tesla v3 changes how the strings are encrypted. AES is no longer used for decryption. Instead, the encrypted strings are stored in a byte array which is decrypted by XORing the value with the current array offset and a hard-coded key. This decryption takes place when the class is constructed, i.e., the array and the decryption loop (Figure 16 left) are implemented inside a class constructor. The decrypted strings are stored without any separators as a single blob of characters. When a particular string is required, a function that takes the offset and length of the string as parameters is used (Figure 16 right). This also means that it’s harder to statically extract information from the strings and requires, e.g., parsing of the actual decoding function wherever it’s used and extracting its arguments.\nConclusions\nUnderstanding a malware family, its usual delivery methods, and the techniques used can be very beneficial from an incident response standpoint. The research of a family can give the blue team enough information to start an internal investigation if a breach is suspected. They can better assess the initial impact of such a breach, can look for indicators and start their initial analysis from there and expand outwards.\nReferences\nhttps://labs.bitdefender.com/2020/04/oil-gas-spearphishing-campaigns-drop-agent-tesla-spyware-in-advance-of-historic-opec-deal/\nhttps://unit42.paloaltonetworks.com/covid-19-themed-cyber-attacks-target-government-and-medical-organizations/\nhttps://cofense.com/strategic-analysis-agent-tesla-expands-targeting-and-networking-capabilities/\nhttps://docs.microsoft.com/de-de/windows-server/administration/windows-commands/cmstp\nhttps://docs.microsoft.com/en-us/dotnet/standard/metadata-and-self-describing-components\nhttps://attack.mitre.org/techniques/T1218/003/\nhttps://gist.github.com/tylerapplebaum/ae8cb38ed8314518d95b2e32a6f0d3f1#file-uacbypass-inf\nhttps://attack.mitre.org/techniques/T1055/012/\nhttps://blog.f-secure.com/detecting-malicious-use-of-net-part-1/\nhttps://blog.malwarebytes.com/threat-analysis/2020/04/new-agenttesla-variant-steals-wifi-credentials/\nhttps://www.fortinet.com/blog/threat-research/in-depth-analysis-of-net-malware-javaupdtr\nhttps://thisissecurity.stormshield.com/2018/01/12/agent-tesla-campaign/\nAppendix A\nIOCs\nAgent Tesla Payloads – Hashes\n88F94C1E8A555D84BF7AD2E0FE21D82D33F1976786267AF93808CC050D039BD9\n1B91B0EDA8B823353154334C5031ECA8F9CB8E022BBC2DCB47494AFB33A1C9CF\nD5454DC627980449EADC9DF01A94A38DD7DD32090713FB9C1C3A93FDD316A78B\n8FD0DCAE134D32EB666D576A85756E35C022810BC767263CF9A12A5F52801409\nAB056BF16EDC280DF3D80740C132B7B8667EC1F69CB225FAC2E3017C2CE5F802\nED59B3FC26DE2B31E908F025C23D01EB8ED9834B2BDD740745E1DC0737E443B9\nED59B3FC26DE2B31E908F025C23D01EB8ED9834B2BDD740745E1DC0737E443B9\nE409F3663952399F60A9A112D3B05B5648E8F73D41E167121279EBDB17E8173B\n505FC5FAAE424387A6036FA41C02EB83E44DC4A6CA60BC0125EFFFCB49D5AD8C\n1B91B0EDA8B823353154334C5031ECA8F9CB8E022BBC2DCB47494AFB33A1C9CF\nD3806488B3DDA1092E3F53EC8A18EE68EE1C34CC4241CDFDB8171DD0CF9F4F57\nAppendix B\nSome of the extracted configurations presented in the MWCP format.\nConfigs\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.arles-cz.co’}, ’email_address’: [‘panel1@arles-cz.co’], ‘password’: [‘fP******’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.otecfundacionredes.cl’}, ’email_address’: [‘pillar@otecfundacionredes.cl’], ‘password’: [‘sg**********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.fnsst.com’}, ’email_address’: [‘kings@fnsst.com’], ‘password’: [‘ma*******’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.shyamindofab.com’, ‘toemail’: ‘spencer@haohuatlre.com’}, ’email_address’: [‘anurag.aggarwal@shyamindofab.com’], ‘password’: [‘an*********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘chat_id’: ‘1063661839’, ‘token’: ‘bot16********:AAF2v81NoI*************************’, ‘method’: ‘sendDocument’}, ‘c2_address’: [‘https://api.telegram.org’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.prinutrition.com’}, ’email_address’: [‘forrest@prinutrition.com’], ‘password’: [‘fo*****’]}\n{‘version’: [2], ’email_address’: [‘arinzelog@asustech.ml’], ‘password’: [‘721*************’], ‘other’: {‘smtp’: ‘bh-58.webhostbox.net’, ‘toemail’: ‘arinze@asustech.ml’}}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.bodrumosmanlialuminyum.com’}, ’email_address’: [‘foreigntrade@bodrumosmanlialuminyum.com’], ‘password’: [‘bd***************’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.gcclatinoamerica.com’, ‘toemail’: ‘sanetbehin.co@gmail.com’}, ’email_address’: [‘jobs@gcclatinoamerica.com’], ‘password’: [‘4r**********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.yandex.com’}, ’email_address’: [‘donkraus6@yandex.com’], ‘password’: [‘Chi*****’]}\n{‘version’: [2], ’email_address’: [‘lori@stalexinc.com’], ‘password’: [‘stl*****’], ‘other’: {‘smtp’: ‘mail.stalexinc.com’}}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.privateemail.com’}, ’email_address’: [‘levels@sgsdivinq.com’], ‘password’: [‘m*****’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.gmail.com’}, ’email_address’: [‘kmarshal234@gmail.com’], ‘password’: [‘Jes*****’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘peopleinpower.biz’, ‘toemail’: ‘royalcrown@peopleinpower.biz’}, ’email_address’: [‘erudite@peopleinpower.biz’], ‘password’: [‘D***************’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘hisensetech.ml’, ‘toemail’: ‘yugo@hisensetech.ml’}, ’email_address’: [‘yugolog@hisensetech.ml’], ‘password’: [‘721*************’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘chat_id’: ‘1464755657’, ‘token’: ‘bot14********:AAHvvJmG-W*************************’, ‘method’: ‘sendDocument’}, ‘c2_address’: [‘https://api.telegram.org’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.rulkeroil.com’}, ’email_address’: [‘info@rulkeroil.com’], ‘password’: [‘sta*******’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.electro-plomb.cf’, ‘toemail’: ‘henryfocux2@gmail.com’}, ’email_address’: [‘pauline.nguimfack@electro-plomb.cf’], ‘password’: [‘ZA**********’]}\n{‘version’: [2], ’email_address’: [‘norvicfertility.clinic@blc.com.np’], ‘password’: [‘B**********’], ‘other’: {‘smtp’: ‘mail.blc.com.np’, ‘toemail’: ‘norvicfertility.clinic@blc.com.np’}}\n{‘version’: [3], ‘other’: {‘xor_key’: 170}, ‘ftp’: [‘ftp://ftp.travels-plan.com/’, ‘travelsplan’, ‘3p**********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.vivaldi.net’}, ’email_address’: [‘leemoney@vivaldi.net’], ‘password’: [‘Reb**********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.yusufgroups.com’}, ’email_address’: [‘ebbah_yusuf@yusufgroups.com’], ‘password’: [‘@@**********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.akdogulojistik.com’}, ’email_address’: [‘servet@akdogulojistik.com’], ‘password’: [‘Ak************’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘sixjan.club’}, ’email_address’: [‘salesdept@sixjan.club’], ‘password’: [‘{D**********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.privateemail.com’}, ’email_address’: [‘jfoster@barranttandbarrettlaw.com’], ‘password’: [‘@M********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.ckclegal.com’}, ’email_address’: [‘feeling@ckclegal.com’], ‘password’: [‘S1**********’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.arroweuorpe.com’}, ’email_address’: [‘mbonaccorsi@arroweuorpe.com’], ‘password’: [‘Q*******’]}\n{‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.gruptruck.com’}, ’email_address’: [‘alper@gruptruck.com’], ‘password’: [‘dg**********’]}",
+  "sanitized_txt": "Agent Tesla is a spyware that has been around since 2014. It’s in active development, constantly being updated and improved with new features, obfuscation, and encryption methods. The malware is sold as a service with a relatively cheap licensing model, which makes it particularly easy to use and can explain its distribution on such a wide scale. At the time of writing two versions of Agent Tesla can still be found in the wild – version 2 and 3. Version 3 comes with some updates and additional features and is currently the most prevalent.\nAgent Tesla’s most common and successful delivery method is through email, either in the form of spam or more targeted campaigns (OPEC+, COVID-19, ISPS), where the malware is bundled as an attachment, usually in the form of a document or a compressed archive (Figure 1).\nIn the following Threat Bulletin, we’ll explore the delivery process of an Agent Tesla sample and some of the differences and similarities between different versions of Agent Tesla. With that in mind, we begin by looking into a fairly recent sample of Agent Tesla (v3) delivered as an email attachment (Figure 1).\nAgent Tesla – Initial Stages The email arrives with an attachment posing as an invoice with the .doc extension but is actually an RTF document. When it’s opened, it exploits CVE-2017-11882 to execute further stages. The shellcode used in the exploitation of the Equation Editor (eqnedt32.exe) is responsible for downloading and executing the next stage (Figure 2).\nView the VMRay Analyzer Report for Agent Tesla v3 (INVOICE-6754.doc.rtf) Interestingly, with this delivery, the threat actors leverage the CMSTP.exe to launch further stages (Figure 3).\nCMSTP is usually used to install Connection Manager service profiles. It takes an .INF file’s path as argument. It describes the profile’s characteristics and the steps to be taken when installing it. This can be abused to start another executable by a legitimate, signed binary or used as a UAC bypass. It’s one of the Living Off The Land techniques. In this case, the .INF file itself seems to have been taken from a public example (by Tyler Applebaum) (Figure 4). It extends the installation with a RunPreSetupCommandsSection which allows one to run commands before the profile is installed. The malicious actor leverages this to run the malware.\nDuring the following steps of the execution, we observe how Agent Tesla makes sure that it’s not easily discovered by adding its image path as an exclusion for Windows Defender (Figure 5). Additionally, it also disables the UAC dialog by overwriting the corresponding settings in the registry. Doing this, the user won’t be notified or prompted for permission if an elevated (requiring administrator access token) action is taken. Thus, Agent Tesla is silently installed.\nFinally, the actual Agent Tesla payload is extracted and injected using the process hollowing method (Figure 6). We have observed many samples using this approach however there were also cases using .NET in-memory reflective loading or a similar method. The process of delivering and loading Agent Tesla varies greatly but the actual payload has many similarities even between versions.\nAgent Tesla – Execution Flow Even though Agent Tesla has been in development for at least 7 years, the overall execution flow hasn’t changed much. Some new features were added to the newer versions of Agent Tesla, but the behavior has remained fairly similar. The following section summarizes the high-level execution steps it usually performs. In some cases, we have observed that the order changes slightly but it doesn’t impact the behavior. It also highlights additions made in the newer version of Agent Tesla (v3).\nAt the beginning of its execution, Agent Tesla often uses certain methods to evade automatic analyses. Some of the common evasion techniques include the introduction of an execution delay, which can evade sandboxes that have a limited monitoring duration, and checking the user and computer name for certain hard-coded values that could indicate it’s being analyzed (Figure 7). The spyware also makes sure that no other processes with the same name are currently running. It iterates over all processes with the same name and kills any which aren’t the current process.\nEach infected system is identified by a unique ID generated from different hardware information. There are different ways Agent Tesla can achieve this. It applies the MD5 hashing algorithm on a string created by concatenating different hardware properties:\n- System Serial Number, - CPU identification value retrieved from the processorID property of the Win32_Processor WMI management class, - The MAC address is taken from the MACAddress property of the Win32_NetworkAdapterConfiguration WMI class. It takes the MAC address of a network adapter that is currently connected.\nThe hardware ID is generated at the beginning of the execution but appears to be only used during the HTTP communication.\nAnother common “evasion” between versions, that Agent Tesla uses at the beginning of its execution, is the GetLastInputInfo function. If no input event was detected in the last 10 minutes a configuration variable is set (Figure 7).\nIts next step is usually to copy itself to a less obvious location (an installation folder) like %appdata% which is also configurable and might not be used at all. The config file also indicates if the file should have the hidden and system attributes set. Persistence is achieved by installing itself as a startup application in the registry. In this case, Agent Tesla also enables the corresponding startup entry via \\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run by setting the value 02 00 00 00 00 00 (Figure 8).\nFurthermore, it also deletes the ZoneIdentifier from the base image. A ZoneIdentifier is an Alternate Data Stream created (when a file is downloaded and saved from the internet). This information is used by Windows and various security products. Deleting it makes the malware look as if it wasn’t downloaded from the internet. Depending on the configuration Agent Tesla is able to take screenshots periodically. It uses a timer that will invoke the registered callback function according to a specified interval which is also configurable. One difference between versions is in the choice of protocols the malware can use to exfiltrate the collected information. Version 2 and 3 are both capable of using HTTP, SMTP, and FTP. On top of that, v3 comes with another possibility which is sending a document to a Telegram channel (Figure 9).\nA new addition that came with Agent Tesla v3 is the ability to collect clipboard data and the external IP of the infected host (Figure 10).\nView the VMRay Analyzer Report for Agent Tesla v3 (External IP Check) Furthermore, v3 comes with the option to use the Tor proxy for its HTTP communication. This is a newer addition which isn’t found in the previous versions (Figure 11). If the corresponding configuration is set, Agent Tesla first tries to kill all currently running Tor instances and then download and set up the Tor client.\nWith HTTP communication set-up, Agent Tesla starts one of its main tasks – credential-stealing (Figure 12). Agent Tesla v3 has some additions to the application list that it targets.\nBoth versions are also able to function as a keylogger. The keylogging functionality is again implemented with the help of timers. The set interval specifies how often the logs are collected and exfiltrated (Figure 13). The hook itself is installed using the native SetWindowsHookExA function with idHook WH_KEYBOARD_LL which takes an application-defined hook.\nString and Config Decryption All strings that are used by Agent Tesla are encrypted by default and mostly used on demand. The ability to decrypt Agent Tesla’s strings, allows one to extract parts of the configuration information like the c2 server, the passwords used, or other data related to network connections. Appendix B contains a small list of extracted network information from different Agent Tesla samples.\nVersion 2 Agent Tesla v2’s encrypted strings are usually located in the .text segment of the PE file. To be exact, they start 0x50 bytes past the beginning of the section. The strings are encrypted using AES in CBC mode (Figure 14). Each string is encrypted with its own Key and IV. Strings are stored in an array of objects, where each object is an array of units. The decryption routine takes an encoded offset into the array which is then decoded at runtime to extract the corresponding string.\nInvestigating the object in dnSpy shows that the static object array corresponds to the token 0x04000001 (Figure 15 left). It describes the Field table (0x4) and its first row (0x000001). Each element in the array is described by its own token (Figure 15 right). dnSpy already provides us with the corresponding RVA and file offset. However, this information can also be extracted manually from the FieldRVA table in the metadata stream of the PE file by looking up the corresponding row number. This information would allow to statically parse the file and its metadata, extract the RVAs and decrypt the strings without assuming any offsets.\nVersion 3 Agent Tesla v3 changes how the strings are encrypted. AES is no longer used for decryption. Instead, the encrypted strings are stored in a byte array which is decrypted by XORing the value with the current array offset and a hard-coded key. This decryption takes place when the class is constructed, i.e., the array and the decryption loop (Figure 16 left) are implemented inside a class constructor. The decrypted strings are stored without any separators as a single blob of characters. When a particular string is required, a function that takes the offset and length of the string as parameters is used (Figure 16 right). This also means that it’s harder to statically extract information from the strings and requires, e.g., parsing of the actual decoding function wherever it’s used and extracting its arguments.\nConclusions Understanding a malware family, its usual delivery methods, and the techniques used can be very beneficial from an incident response standpoint. The research of a family can give the blue team enough information to start an internal investigation if a breach is suspected. They can better assess the initial impact of such a breach, can look for indicators and start their initial analysis from there and expand outwards.\nConfigs {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.arles-cz.co’}, ’email_address’: [‘panel1@arles-cz.co’], ‘password’: [‘fP******’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.otecfundacionredes.cl’}, ’email_address’: [‘pillar@otecfundacionredes.cl’], ‘password’: [‘sg**********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.fnsst.com’}, ’email_address’: [‘kings@fnsst.com’], ‘password’: [‘ma*******’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.shyamindofab.com’, ‘toemail’: ‘spencer@haohuatlre.com’}, ’email_address’: [‘anurag.aggarwal@shyamindofab.com’], ‘password’: [‘an*********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘chat_id’: ‘1063661839’, ‘token’: ‘bot16********:AAF2v81NoI*************************’, ‘method’: ‘sendDocument’}, ‘c2_address’: [‘https://api.telegram.org’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.prinutrition.com’}, ’email_address’: [‘forrest@prinutrition.com’], ‘password’: [‘fo*****’]} {‘version’: [2], ’email_address’: [‘arinzelog@asustech.ml’], ‘password’: [‘721*************’], ‘other’: {‘smtp’: ‘bh-58.webhostbox.net’, ‘toemail’: ‘arinze@asustech.ml’}} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.bodrumosmanlialuminyum.com’}, ’email_address’: [‘foreigntrade@bodrumosmanlialuminyum.com’], ‘password’: [‘bd***************’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.gcclatinoamerica.com’, ‘toemail’: ‘sanetbehin.co@gmail.com’}, ’email_address’: [‘jobs@gcclatinoamerica.com’], ‘password’: [‘4r**********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.yandex.com’}, ’email_address’: [‘donkraus6@yandex.com’], ‘password’: [‘Chi*****’]} {‘version’: [2], ’email_address’: [‘lori@stalexinc.com’], ‘password’: [‘stl*****’], ‘other’: {‘smtp’: ‘mail.stalexinc.com’}} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.privateemail.com’}, ’email_address’: [‘levels@sgsdivinq.com’], ‘password’: [‘m*****’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.gmail.com’}, ’email_address’: [‘kmarshal234@gmail.com’], ‘password’: [‘Jes*****’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘peopleinpower.biz’, ‘toemail’: ‘royalcrown@peopleinpower.biz’}, ’email_address’: [‘erudite@peopleinpower.biz’], ‘password’: [‘D***************’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘hisensetech.ml’, ‘toemail’: ‘yugo@hisensetech.ml’}, ’email_address’: [‘yugolog@hisensetech.ml’], ‘password’: [‘721*************’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘chat_id’: ‘1464755657’, ‘token’: ‘bot14********:AAHvvJmG-W*************************’, ‘method’: ‘sendDocument’}, ‘c2_address’: [‘https://api.telegram.org’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.rulkeroil.com’}, ’email_address’: [‘info@rulkeroil.com’], ‘password’: [‘sta*******’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.electro-plomb.cf’, ‘toemail’: ‘henryfocux2@gmail.com’}, ’email_address’: [‘pauline.nguimfack@electro-plomb.cf’], ‘password’: [‘ZA**********’]} {‘version’: [2], ’email_address’: [‘norvicfertility.clinic@blc.com.np’], ‘password’: [‘B**********’], ‘other’: {‘smtp’: ‘mail.blc.com.np’, ‘toemail’: ‘norvicfertility.clinic@blc.com.np’}} {‘version’: [3], ‘other’: {‘xor_key’: 170}, ‘ftp’: [‘ftp://ftp.travels-plan.com/’, ‘travelsplan’, ‘3p**********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.vivaldi.net’}, ’email_address’: [‘leemoney@vivaldi.net’], ‘password’: [‘Reb**********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.yusufgroups.com’}, ’email_address’: [‘ebbah_yusuf@yusufgroups.com’], ‘password’: [‘@@**********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.akdogulojistik.com’}, ’email_address’: [‘servet@akdogulojistik.com’], ‘password’: [‘Ak************’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘sixjan.club’}, ’email_address’: [‘salesdept@sixjan.club’], ‘password’: [‘{D**********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.privateemail.com’}, ’email_address’: [‘jfoster@barranttandbarrettlaw.com’], ‘password’: [‘@M********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.ckclegal.com’}, ’email_address’: [‘feeling@ckclegal.com’], ‘password’: [‘S1**********’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘smtp.arroweuorpe.com’}, ’email_address’: [‘mbonaccorsi@arroweuorpe.com’], ‘password’: [‘Q*******’]} {‘version’: [3], ‘other’: {‘xor_key’: 170, ‘smtp’: ‘mail.gruptruck.com’}, ’email_address’: [‘alper@gruptruck.com’], ‘password’: [‘dg**********’]}",
+  "ID_list": [
+    "T1055",
+    "T1218"
+  ],
+  "Name_list": [
+    "CMSTP",
+    "Clipboard Data",
+    "Execution",
+    "Impact",
+    "Phishing",
+    "Process Hollowing",
+    "Proxy"
+  ],
+  "TTP_sentences": {
+    "T1055": [
+      {
+        "sentence": "It’s in active development, constantly being updated and improved with new features, obfuscation, and encryption methods.",
+        "score": 0.4486
+      },
+      {
+        "sentence": "At the time of writing two versions of Agent Tesla can still be found in the wild – version 2 and 3.",
+        "score": 0.3359
+      },
+      {
+        "sentence": "Version 3 comes with some updates and additional features and is currently the most prevalent.",
+        "score": 0.3672
+      },
+      {
+        "sentence": "In the following Threat Bulletin, we’ll explore the delivery process of an Agent Tesla sample and some of the differences and similarities between different versions of Agent Tesla.",
+        "score": 0.4145
+      },
+      {
+        "sentence": "With that in mind, we begin by looking into a fairly recent sample of Agent Tesla (v3) delivered as an email attachment (Figure 1).",
+        "score": 0.3006
+      },
+      {
+        "sentence": "When it’s opened, it exploits CVE-2017-11882 to execute further stages.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "The shellcode used in the exploitation of the Equation Editor (eqnedt32.exe) is responsible for downloading and executing the next stage (Figure 2).",
+        "score": 0.5179
+      },
+      {
+        "sentence": "View the VMRay Analyzer Report for Agent Tesla v3 (INVOICE-6754.doc.rtf) Interestingly, with this delivery, the threat actors leverage the CMSTP.exe to launch further stages (Figure 3).",
+        "score": 0.4548
+      },
+      {
+        "sentence": "This can be abused to start another executable by a legitimate, signed binary or used as a UAC bypass.",
+        "score": 0.468
+      },
+      {
+        "sentence": "It’s one of the Living Off The Land techniques.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "In this case, the .INF file itself seems to have been taken from a public example (by Tyler Applebaum) (Figure 4).",
+        "score": 0.4181
+      },
+      {
+        "sentence": "It extends the installation with a RunPreSetupCommandsSection which allows one to run commands before the profile is installed.",
+        "score": 0.3305
+      },
+      {
+        "sentence": "Finally, the actual Agent Tesla payload is extracted and injected using the process hollowing method (Figure 6).",
+        "score": 0.817
+      },
+      {
+        "sentence": "We have observed many samples using this approach however there were also cases using .NET in-memory reflective loading or a similar method.",
+        "score": 0.5565
+      },
+      {
+        "sentence": "The process of delivering and loading Agent Tesla varies greatly but the actual payload has many similarities even between versions.",
+        "score": 0.4922
+      },
+      {
+        "sentence": "Agent Tesla – Execution Flow Even though Agent Tesla has been in development for at least 7 years, the overall execution flow hasn’t changed much.",
+        "score": 0.5065
+      },
+      {
+        "sentence": "Some new features were added to the newer versions of Agent Tesla, but the behavior has remained fairly similar.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "The following section summarizes the high-level execution steps it usually performs.",
+        "score": 0.4805
+      },
+      {
+        "sentence": "In some cases, we have observed that the order changes slightly but it doesn’t impact the behavior.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "It also highlights additions made in the newer version of Agent Tesla (v3).",
+        "score": 0.3204
+      },
+      {
+        "sentence": "At the beginning of its execution, Agent Tesla often uses certain methods to evade automatic analyses.",
+        "score": 0.4378
+      },
+      {
+        "sentence": "Some of the common evasion techniques include the introduction of an execution delay, which can evade sandboxes that have a limited monitoring duration, and checking the user and computer name for certain hard-coded values that could indicate it’s being analyzed (Figure 7).",
+        "score": 0.3123
+      },
+      {
+        "sentence": "The spyware also makes sure that no other processes with the same name are currently running.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "It iterates over all processes with the same name and kills any which aren’t the current process.",
+        "score": 0.481
+      },
+      {
+        "sentence": "It applies the MD5 hashing algorithm on a string created by concatenating different hardware properties: - System Serial Number, - CPU identification value retrieved from the processorID property of the Win32_Processor WMI management class, - The MAC address is taken from the MACAddress property of the Win32_NetworkAdapterConfiguration WMI class.",
+        "score": 0.3009
+      },
+      {
+        "sentence": "The hardware ID is generated at the beginning of the execution but appears to be only used during the HTTP communication.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "Another common “evasion” between versions, that Agent Tesla uses at the beginning of its execution, is the GetLastInputInfo function.",
+        "score": 0.3388
+      },
+      {
+        "sentence": "Its next step is usually to copy itself to a less obvious location (an installation folder) like %appdata% which is also configurable and might not be used at all.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "Furthermore, it also deletes the ZoneIdentifier from the base image.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "A ZoneIdentifier is an Alternate Data Stream created (when a file is downloaded and saved from the internet).",
+        "score": 0.4265
+      },
+      {
+        "sentence": "Deleting it makes the malware look as if it wasn’t downloaded from the internet.",
+        "score": 0.4435
+      },
+      {
+        "sentence": "It uses a timer that will invoke the registered callback function according to a specified interval which is also configurable.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "View the VMRay Analyzer Report for Agent Tesla v3 (External IP Check) Furthermore, v3 comes with the option to use the Tor proxy for its HTTP communication.",
+        "score": 0.3399
+      },
+      {
+        "sentence": "This is a newer addition which isn’t found in the previous versions (Figure 11).",
+        "score": 0.3361
+      },
+      {
+        "sentence": "With HTTP communication set-up, Agent Tesla starts one of its main tasks – credential-stealing (Figure 12).",
+        "score": 0.389
+      },
+      {
+        "sentence": "The hook itself is installed using the native SetWindowsHookExA function with idHook WH_KEYBOARD_LL which takes an application-defined hook.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "String and Config Decryption All strings that are used by Agent Tesla are encrypted by default and mostly used on demand.",
+        "score": 0.4255
+      },
+      {
+        "sentence": "The ability to decrypt Agent Tesla’s strings, allows one to extract parts of the configuration information like the c2 server, the passwords used, or other data related to network connections.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "Appendix B contains a small list of extracted network information from different Agent Tesla samples.",
+        "score": 0.3282
+      },
+      {
+        "sentence": "Version 2 Agent Tesla v2’s encrypted strings are usually located in the .text segment of the PE file.",
+        "score": 0.5689
+      },
+      {
+        "sentence": "To be exact, they start 0x50 bytes past the beginning of the section.",
+        "score": 0.5392
+      },
+      {
+        "sentence": "The strings are encrypted using AES in CBC mode (Figure 14).",
+        "score": 0.4703
+      },
+      {
+        "sentence": "Each string is encrypted with its own Key and IV.",
+        "score": 0.4153
+      },
+      {
+        "sentence": "Strings are stored in an array of objects, where each object is an array of units.",
+        "score": 0.3444
+      },
+      {
+        "sentence": "The decryption routine takes an encoded offset into the array which is then decoded at runtime to extract the corresponding string.",
+        "score": 0.498
+      },
+      {
+        "sentence": "Investigating the object in dnSpy shows that the static object array corresponds to the token 0x04000001 (Figure 15 left).",
+        "score": 0.3918
+      },
+      {
+        "sentence": "It describes the Field table (0x4) and its first row (0x000001).",
+        "score": 0.3376
+      },
+      {
+        "sentence": "However, this information can also be extracted manually from the FieldRVA table in the metadata stream of the PE file by looking up the corresponding row number.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "This information would allow to statically parse the file and its metadata, extract the RVAs and decrypt the strings without assuming any offsets.",
+        "score": 0.4665
+      },
+      {
+        "sentence": "Version 3 Agent Tesla v3 changes how the strings are encrypted.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "AES is no longer used for decryption.",
+        "score": 0.3871
+      },
+      {
+        "sentence": "Instead, the encrypted strings are stored in a byte array which is decrypted by XORing the value with the current array offset and a hard-coded key.",
+        "score": 0.5168
+      },
+      {
+        "sentence": "This decryption takes place when the class is constructed, i.e., the array and the decryption loop (Figure 16 left) are implemented inside a class constructor.",
+        "score": 0.5074
+      },
+      {
+        "sentence": "The decrypted strings are stored without any separators as a single blob of characters.",
+        "score": 0.4833
+      },
+      {
+        "sentence": "When a particular string is required, a function that takes the offset and length of the string as parameters is used (Figure 16 right).",
+        "score": 0.3749
+      },
+      {
+        "sentence": "This also means that it’s harder to statically extract information from the strings and requires, e.g., parsing of the actual decoding function wherever it’s used and extracting its arguments.",
+        "score": 0.4573
+      },
+      {
+        "sentence": "Conclusions Understanding a malware family, its usual delivery methods, and the techniques used can be very beneficial from an incident response standpoint.",
+        "score": 0.4278
+      },
+      {
+        "sentence": "The research of a family can give the blue team enough information to start an internal investigation if a breach is suspected.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "They can better assess the initial impact of such a breach, can look for indicators and start their initial analysis from there and expand outwards.",
+        "score": 0.3345
+      }
+    ],
+    "T1218": [
+      {
+        "sentence": "It’s in active development, constantly being updated and improved with new features, obfuscation, and encryption methods.",
+        "score": 0.4846
+      },
+      {
+        "sentence": "The malware is sold as a service with a relatively cheap licensing model, which makes it particularly easy to use and can explain its distribution on such a wide scale.",
+        "score": 0.3649
+      },
+      {
+        "sentence": "At the time of writing two versions of Agent Tesla can still be found in the wild – version 2 and 3.",
+        "score": 0.389
+      },
+      {
+        "sentence": "Version 3 comes with some updates and additional features and is currently the most prevalent.",
+        "score": 0.3822
+      },
+      {
+        "sentence": "Agent Tesla’s most common and successful delivery method is through email, either in the form of spam or more targeted campaigns (OPEC+, COVID-19, ISPS), where the malware is bundled as an attachment, usually in the form of a document or a compressed archive (Figure 1).",
+        "score": 0.3946
+      },
+      {
+        "sentence": "In the following Threat Bulletin, we’ll explore the delivery process of an Agent Tesla sample and some of the differences and similarities between different versions of Agent Tesla.",
+        "score": 0.4718
+      },
+      {
+        "sentence": "With that in mind, we begin by looking into a fairly recent sample of Agent Tesla (v3) delivered as an email attachment (Figure 1).",
+        "score": 0.3663
+      },
+      {
+        "sentence": "Agent Tesla – Initial Stages The email arrives with an attachment posing as an invoice with the .doc extension but is actually an RTF document.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "When it’s opened, it exploits CVE-2017-11882 to execute further stages.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "The shellcode used in the exploitation of the Equation Editor (eqnedt32.exe) is responsible for downloading and executing the next stage (Figure 2).",
+        "score": 0.5881
+      },
+      {
+        "sentence": "View the VMRay Analyzer Report for Agent Tesla v3 (INVOICE-6754.doc.rtf) Interestingly, with this delivery, the threat actors leverage the CMSTP.exe to launch further stages (Figure 3).",
+        "score": 0.5961
+      },
+      {
+        "sentence": "It describes the profile’s characteristics and the steps to be taken when installing it.",
+        "score": 0.377
+      },
+      {
+        "sentence": "This can be abused to start another executable by a legitimate, signed binary or used as a UAC bypass.",
+        "score": 0.6266
+      },
+      {
+        "sentence": "In this case, the .INF file itself seems to have been taken from a public example (by Tyler Applebaum) (Figure 4).",
+        "score": 0.4705
+      },
+      {
+        "sentence": "It extends the installation with a RunPreSetupCommandsSection which allows one to run commands before the profile is installed.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "The malicious actor leverages this to run the malware.",
+        "score": 0.3975
+      },
+      {
+        "sentence": "During the following steps of the execution, we observe how Agent Tesla makes sure that it’s not easily discovered by adding its image path as an exclusion for Windows Defender (Figure 5).",
+        "score": 0.4348
+      },
+      {
+        "sentence": "Doing this, the user won’t be notified or prompted for permission if an elevated (requiring administrator access token) action is taken.",
+        "score": 0.3853
+      },
+      {
+        "sentence": "Thus, Agent Tesla is silently installed.",
+        "score": 0.3554
+      },
+      {
+        "sentence": "Finally, the actual Agent Tesla payload is extracted and injected using the process hollowing method (Figure 6).",
+        "score": 0.5012
+      },
+      {
+        "sentence": "We have observed many samples using this approach however there were also cases using .NET in-memory reflective loading or a similar method.",
+        "score": 0.4993
+      },
+      {
+        "sentence": "The process of delivering and loading Agent Tesla varies greatly but the actual payload has many similarities even between versions.",
+        "score": 0.5824
+      },
+      {
+        "sentence": "Agent Tesla – Execution Flow Even though Agent Tesla has been in development for at least 7 years, the overall execution flow hasn’t changed much.",
+        "score": 0.4463
+      },
+      {
+        "sentence": "Some new features were added to the newer versions of Agent Tesla, but the behavior has remained fairly similar.",
+        "score": 0.3858
+      },
+      {
+        "sentence": "The following section summarizes the high-level execution steps it usually performs.",
+        "score": 0.4634
+      },
+      {
+        "sentence": "In some cases, we have observed that the order changes slightly but it doesn’t impact the behavior.",
+        "score": 0.3219
+      },
+      {
+        "sentence": "It also highlights additions made in the newer version of Agent Tesla (v3).",
+        "score": 0.3742
+      },
+      {
+        "sentence": "At the beginning of its execution, Agent Tesla often uses certain methods to evade automatic analyses.",
+        "score": 0.4858
+      },
+      {
+        "sentence": "Some of the common evasion techniques include the introduction of an execution delay, which can evade sandboxes that have a limited monitoring duration, and checking the user and computer name for certain hard-coded values that could indicate it’s being analyzed (Figure 7).",
+        "score": 0.3935
+      },
+      {
+        "sentence": "The spyware also makes sure that no other processes with the same name are currently running.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "It iterates over all processes with the same name and kills any which aren’t the current process.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "The hardware ID is generated at the beginning of the execution but appears to be only used during the HTTP communication.",
+        "score": 0.32
+      },
+      {
+        "sentence": "Another common “evasion” between versions, that Agent Tesla uses at the beginning of its execution, is the GetLastInputInfo function.",
+        "score": 0.3385
+      },
+      {
+        "sentence": "Its next step is usually to copy itself to a less obvious location (an installation folder) like %appdata% which is also configurable and might not be used at all.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "Furthermore, it also deletes the ZoneIdentifier from the base image.",
+        "score": 0.4455
+      },
+      {
+        "sentence": "A ZoneIdentifier is an Alternate Data Stream created (when a file is downloaded and saved from the internet).",
+        "score": 0.5112
+      },
+      {
+        "sentence": "Deleting it makes the malware look as if it wasn’t downloaded from the internet.",
+        "score": 0.5769
+      },
+      {
+        "sentence": "View the VMRay Analyzer Report for Agent Tesla v3 (External IP Check) Furthermore, v3 comes with the option to use the Tor proxy for its HTTP communication.",
+        "score": 0.3808
+      },
+      {
+        "sentence": "This is a newer addition which isn’t found in the previous versions (Figure 11).",
+        "score": 0.3575
+      },
+      {
+        "sentence": "If the corresponding configuration is set, Agent Tesla first tries to kill all currently running Tor instances and then download and set up the Tor client.",
+        "score": 0.42
+      },
+      {
+        "sentence": "With HTTP communication set-up, Agent Tesla starts one of its main tasks – credential-stealing (Figure 12).",
+        "score": 0.3568
+      },
+      {
+        "sentence": "String and Config Decryption All strings that are used by Agent Tesla are encrypted by default and mostly used on demand.",
+        "score": 0.4934
+      },
+      {
+        "sentence": "The ability to decrypt Agent Tesla’s strings, allows one to extract parts of the configuration information like the c2 server, the passwords used, or other data related to network connections.",
+        "score": 0.382
+      },
+      {
+        "sentence": "Version 2 Agent Tesla v2’s encrypted strings are usually located in the .text segment of the PE file.",
+        "score": 0.5414
+      },
+      {
+        "sentence": "To be exact, they start 0x50 bytes past the beginning of the section.",
+        "score": 0.433
+      },
+      {
+        "sentence": "The strings are encrypted using AES in CBC mode (Figure 14).",
+        "score": 0.486
+      },
+      {
+        "sentence": "Each string is encrypted with its own Key and IV.",
+        "score": 0.39
+      },
+      {
+        "sentence": "The decryption routine takes an encoded offset into the array which is then decoded at runtime to extract the corresponding string.",
+        "score": 0.4102
+      },
+      {
+        "sentence": "Investigating the object in dnSpy shows that the static object array corresponds to the token 0x04000001 (Figure 15 left).",
+        "score": 0.3128
+      },
+      {
+        "sentence": "Each element in the array is described by its own token (Figure 15 right). dnSpy already provides us with the corresponding RVA and file offset.",
+        "score": 0.3267
+      },
+      {
+        "sentence": "However, this information can also be extracted manually from the FieldRVA table in the metadata stream of the PE file by looking up the corresponding row number.",
+        "score": 0.3882
+      },
+      {
+        "sentence": "This information would allow to statically parse the file and its metadata, extract the RVAs and decrypt the strings without assuming any offsets.",
+        "score": 0.4742
+      },
+      {
+        "sentence": "Version 3 Agent Tesla v3 changes how the strings are encrypted.",
+        "score": 0.4998
+      },
+      {
+        "sentence": "AES is no longer used for decryption.",
+        "score": 0.3946
+      },
+      {
+        "sentence": "Instead, the encrypted strings are stored in a byte array which is decrypted by XORing the value with the current array offset and a hard-coded key.",
+        "score": 0.4425
+      },
+      {
+        "sentence": "This decryption takes place when the class is constructed, i.e., the array and the decryption loop (Figure 16 left) are implemented inside a class constructor.",
+        "score": 0.4922
+      },
+      {
+        "sentence": "The decrypted strings are stored without any separators as a single blob of characters.",
+        "score": 0.4443
+      },
+      {
+        "sentence": "When a particular string is required, a function that takes the offset and length of the string as parameters is used (Figure 16 right).",
+        "score": 0.3764
+      },
+      {
+        "sentence": "This also means that it’s harder to statically extract information from the strings and requires, e.g., parsing of the actual decoding function wherever it’s used and extracting its arguments.",
+        "score": 0.4611
+      },
+      {
+        "sentence": "Conclusions Understanding a malware family, its usual delivery methods, and the techniques used can be very beneficial from an incident response standpoint.",
+        "score": 0.4374
+      },
+      {
+        "sentence": "They can better assess the initial impact of such a breach, can look for indicators and start their initial analysis from there and expand outwards.",
+        "score": 0.3216
+      }
+    ]
+  }
+}

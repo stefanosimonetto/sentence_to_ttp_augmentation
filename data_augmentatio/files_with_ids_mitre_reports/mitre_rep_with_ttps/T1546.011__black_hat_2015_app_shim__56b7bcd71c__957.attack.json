@@ -1,0 +1,962 @@
+{
+  "original_txt": "Malicious Application Compatibility Shims \n\nTable of Contents \nIntroduction .................................................................................................................................................. 2 \n\nBackground ................................................................................................................................................... 2 \n\nHow the Windows Image Loader works with the Shim Engine .................................................................... 6 \n\nPrior Work ..................................................................................................................................................... 7 \n\nIn the wild ..................................................................................................................................................... 9 \n\nOther Offensive Uses .................................................................................................................................. 13 \n\nTools ............................................................................................................................................................ 14 \n\nCurrent Analysis Tools............................................................................................................................. 14 \n\nDefense Tools .......................................................................................................................................... 15 \n\nForensics Tools ........................................................................................................................................ 16 \n\nPenetration Testing Tools ....................................................................................................................... 16 \n\nDefenses ...................................................................................................................................................... 17 \n\nMoving Forward ...................................................................................................................................... 18 \n\nConclusion ................................................................................................................................................... 18 \n\nBibliography ................................................................................................................................................ 19 \n\nPage | 1  \n\n \n \n \n \n \n \n\fIntroduction \nOne of the many reasons why Microsoft has dominated the personal computer market \nis because they have gone to extraordinary lengths to ensure backwards compatibility in \n(most) of their products, and many third party products. This is currently implemented by the \nApplication Compatibility Framework (ACF) which holds a position of considerable tactical \nvalue on modern computer systems because, by design, the ACF is capable of intercepting \napplication API calls and manipulating the Portable Executable (PE) file loading process. \nActors in the wild have been observed leveraging a few of the simple components of the \nACF and it is expected that the number of exploitations will rise and grow in sophistication. \nSome of these more advanced malicious techniques will be demonstrated and I will be \nreleasing the source code of several new tools that help mitigate this new threat. \n\nBackground \nRaymond Chen is a developer on the Windows Team at Microsoft and maintains a blog \ncalled ‘The Old New Thing’ in which he describes many fascinating stories and deep \ntechnical insights into the history of Windows. On August 24th 2005 he wrote: \n\n“During the development of Windows 95, application compatibility was of course a very high \npriority. To make sure that coverage was as broad as possible, the development manager \nfor Windows 95 took his pick-up truck, drove down to the local Egghead Software store \n(back when Egghead still existed), and bought one copy of every single PC program in \nthe store... In exchange for taking responsibility for ensuring that Windows 95 was \ncompatible with your adopted programs, you [the developer] got to keep them [the \napplications] after Windows 95 shipped.” (Chen, 2005) \n\nIn any given Windows 7 machine one can find hard coded \nreferences to ‘3DFrogFrenzy’, ‘Acrobat5’, ‘WordPerfect8’, \n‘Works99’ and many other applications dating back to the \nearly 1990’s. These programs do not correctly function on \nmodern Windows machines, so in an effort to compensate \nfor poor coding (on all sides), Microsoft has sacrificed \nsecurity for developer convenience by allowing anyone to \ncreate and install Shim database (sdb) files. These \ndatabase files contain the specific details on how \nWindows should manipulate (in other words ‘shim’) a \ntarget program with predefined ‘Fixes’. The Application \nCompatibility Toolkit (ACT) contains hundreds of \nconfigurations for thousands of programs (like those listed \nabove) primarily contained within the file \n%WINDIR%\\AppPatch\\sysmain.sdb. Microsoft provides a \nfree tool called the Application Compatibility Administrator \nwhich allows users to create and apply specific Fixes \nsuch as ‘DisableNX’, ‘ModifyShellLinkPath’, ‘VirtualRegistry’, \n‘DisableAdvancedRPCClientHardening’, ‘ForceAdminAccess’, ‘InjectDll’ (my favorite), \n‘DisableSeh’, ‘ShellExecuteXP’ and many others.  \n\nPage | 2  \n\n \n \n \n \n \n\fFigure 1. The Application Compatibility Toolkit (ACT) – Compatibility Administrator \n\nThe Application Compatibility Toolkit can be used to create and install a shim by guiding the \nuser through a Wizard which first asks for a path to the target executable. The ACT will then \nanalyze the file for criteria to filter on such as file name, file size, link date, PE checksum, \netc. Then the user will be presented with a list of ‘Modes’ where each ‘Mode’ is effectively a \nbundle of individual Fixes that can be applied to a process and its children (A ‘Mode’ or \n‘Compatibility Mode’ are sometimes referred to as a ‘Layer’). An example of a Mode would \nbe ‘VistaSP1VersionLie’ as opposed to a Fix such as, ‘Emulate Cursor’. After the Mode \nscreen, the wizard will show a list of Fixes. By default the 32-bit Compatibility Administrator \nwill show a list of 367 Fixes, however if the Compatibility Administrator is executed from the \ncommand line with the ‘/x’ parameter the list of Fixes will increase to 811 to include \nundocumented Fixes. After finishing the wizard, a user can save the sdb file, and then \ninstall it by right clicking on the database icon and clicking ‘Install’. The installer simply \nexecutes the command line sdb installer called sdbinst.exe. \n\nThe Application Compatibility Toolkit (ACT) – Compatibility Administrator \n\nPage | 3  \n\n \n \n \n \n \n \n \n\fThe installer will create a GUID, copy the sdb file into \n%SystemRoot%\\AppPatch\\Custom\\<GUID>.sdb then add a registry key using an internal \ndatabase name in the format of HKLM\\SOFTWARE\\Microsoft\\Windows \nNT\\CurrentVersion\\AppCompatFlags\\Custom\\<GUID>.sdb and \\InstalledSDB\\<GUID>.sdb. \nIf everything is successful, the installer will add an entry to the Add/Remove programs list. \nObviously if a user has administrative access, they could simply add the keys to the registry \ndirectly.  \nRegistry keys: \n\n  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Custom \n  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\InstalledSDB \n\nFigure 2 Install Registry Keys (1) \n\nFigure 3. Install Registry Keys (2) \n\nDefault Install File Locations \n\n  %WINDIR%\\AppPatch\\Custom\\ \n  %WINDIR%\\AppPatch\\Custom\\Custom64\\ \n\nFigure 4 - Default Install Path. Note: The sdb file can be put anywhere accessible. Even a UNC path \n\nAfter the sdb file installation is complete all processes launched after that point will be \nsubjected to the file matching rules of this shim database. For efficiency reasons, Windows \ncaches metadata for each executed file and stores that data in the Application Compatibility \nCache. In effect, the cache is a record of all executed processes since the computer was \nlast rebooted. The forensic value from this data is used by some tools such as Mandiant’s \n\nPage | 4  \n\n \n \n \n \n \n \n \n \n \n \n\fShim Cache Parser ® and was the subject of the MS15-001 elevation of privilege \nvulnerability in January 2015.  \n\nSeven months prior to the MS15-001 patch, a forensics expert named Chris Graham \npublished a blog post titled, ‘Shimming Your way Past UAC’. In this entry he provided a \ndetailed walk through (including source code) on how to generate and install an sdb file that \nwould use the ‘RedirectEXE’ Fix to redirect the execution (while retaining the privileges) of a \ntarget executable (Graham, 2014). The processes that are targeted by this method rely on \nthe fact that these executables are signed by Microsoft and have a manifest file property of \n<autoElevate>true</autoElevate> such as SndVol.exe. The MS15-001 did nothing to \nprevent this UAC bypass technique and as a result it is still being exploited in the wild. \nHowever, in April 2015 Microsoft did push out an optional update (KB3045645) which \nremoved the auto-elevating manifest property from sdbinst.exe (the system sdb installer). \nMore details can be found in the Defenses section.  \n\nShims are heavily integrated into Windows for normal operations, such as auto elevating \nany executable matching the filename *instal*. Microsoft also uses shims to test and fix their \nown products such as Outlook and Word rather than updating/patching them the traditional \nway. When evaluating compatibility issues with Windows Vista, the ACT was used to collect \ndata via shimming exeplorer.exe and other system processes (Hancke, 2009). Primarily \nMicrosoft uses shims to implement most of the functionality in products such as the \nEnhanced Mitigation Experience Toolkit (EMET) and Windows Fixit patches which are used \nto mitigate critical vulnerabilities as a stopgap measure between patch cycles. \n\nShim strengths from an attacker’s point of view are: \n\n  Nearly every process is vulnerable. The shim engine (shimeng.dll) will not shim \n\ncertain hard coded modules such as: \n\no  NT Symbolic Debugger (NTSD) \no  WinDbg \no  Software License Service (slsvc.exe) for Windows Vista (Ionescu, 2007) \n\n  The shim engine (shimeng.dll) will intercept GetProcAddress() in the event an \napplication attempts to dynamically call a function that the shim engine has \nmanipulated. \n\n  There are many ways to apply native fixes maliciously. \n  There are little to no defensive measures from malicious shims (until now). \n  They are not considered executable even though they can contain shellcode. \n  Custom fixes can be defined in the form of a user supplied DLL file. This is useful \n\nbecause the ‘InjectDll’ is not a predefined Fix for 64-bit shims. \n\n  With a few exceptions, all modern Windows OS versions support shims and natively \nship with the auto-elevated shim database installer sdbinst.exe. The native installer \nwill add an entry in the Add/Remove programs list but this can be bypassed by \ndirectly adding to the appropriate keys. \n\nShim weaknesses from an attacker’s pointer of view: \n\n  An attacker needs administrative rights to execute the shim database installer and/or \n\nwrite to the necessary registry keys. \n\nPage | 5  \n\n \n \n \n \n \n\f  Programs only need to change their names to avoid being shimmed. There are no \n\ncurrently available tools that allow wildcards in file names, but the functionality does \nexist as seen in the native shim databases such as sysmain.sdb. \n\n  Shims only run in user-mode so they cannot manipulate kernel-mode modules. \n\nHow the Windows Image Loader works with the Shim Engine \nWhen a new process needs to be created, a program will use one of the functions in \nntdll.dll, such as CreateProcess(). To determine if the new process needs to be shimmed, \napphelp.dll is loaded and two registry keys might be opened or queried: \n\n  HKCM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers \n  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers \n\nIf the application needs to be shimmed an undocumented __ COMPAT_LAYER \nenvironment variable will be set in the new child process. The kernel creates the various \ndata structures, sets up the process space then loads ntdll.dll into that new process space. \nIn that space, the kernel will set the context struct to begin executing the ntdll.dll function \ncalled LdrInitializedThunk(). This function effectively sets up everything the process will \nneed such as: \n\nInitialize the heap \n\n \n  Maps and initializes the appropriate DLL’s \n \nInitializes Tread Local Storage (TLS) \n  Fiber Local Storage (FLS) \n \nImport Address Tables (IAT’s)  \n  Export Address Tables (EAT’s) \n  Process the Manifest files (Which might also have compatibility settings) \n  Read the application compatibility database and loading the shim engine \n\nAfter all the initialization is done, the kernel will reset the threat’s context to the ntdll.dll \nfunction RtlUserThreatStart() which will in turn begin executing the actual original entry point \nfor the executable that was specified with CreateProcess(). If the child process needs to be \nshimmed, both the parent and child processes will load apphelp.dll and verify the sdb file: \n\nFigure 5 Confusing procmon log output of a program named 'LaunchWithoutShim.exe' executing a program called, \n'HelloWorldShimmed.exe'. Procmon is a part of SysInternals by Mark Russinovich \n\nPage | 6  \n\n \n \n \n \n \n \n\fIf the sdb file cannot be found or opened the Application Event Log will record, ‘Unable to \nopen shim database version registry key’. Assuming the sdb file is found and loaded without \nerror, it is then parsed to further verify that the file should indeed be shimmed by checking \nthe sdb file for more name filters and other file criteria; there is always at least one filter, but \nby default it is a match-all wildcard character: *. The loaded sdb file will be further parsed to \nfind the specific Fix (or Fixes) that will be applied along with a reference to a DLL where that \nFix is implemented. The specified DLL is then loaded into the suspended process, and \nallowed to execute DllMain() following the initialization of the other system DLLs. If the Fix \ndoes not reference a DLL then the native system shim database(s) are loaded in order find \nthe appropriate DLL where that particular fix is implemented. Most of the predefined Fixes \nare found in %WINDIR%\\AppPatch\\sysmain.sdb and most of those fixes are implemented \nin %WINDIR%\\AppPatch\\AcGeneral.dll.  \n\nIf the Fix is not predefined in sysmain.sdb it is called a Custom Fix. Anyone can create a \ncustom fix by creating a DLL which exports the following functions: \n\n  GetHookAPIs(char *,ushort *,ulong *) \n  NotifyShims(char *, unsigned __int16 *, unsigned __int32 *) \n\nThe DLL containing the Fix is typically hooks the IAT of the target to intercept specific \nfunctions. For example the VirtualRegistry Fix will hook all registry related calls and \nmanipulate them accordingly. GetProcAddress() is also hooked to anticipate dynamic calls \nto the would-be hooked functions. Sdb files have undocumented features such as hot \npatching which is currently only used by Microsoft to implement the functionality in Fixit \npatches (discussed later). After ntdll.dll loads the AppInit DLLs in the child process, it then \nloads the shim engine which implemented with apphelp.dll. This shim engine will clear the \nenvironment variable __COMPAT_LAYER then apply the Fixes and patches (if any) to the \ntarget module. It is possible to have more than one sdb apply Fixes to the same process but \nthis leads to undefined behavior due to the uncertain order in which the shims are applied. \n\nPrior Work \nThe earliest mention of shims relating to security was in 2007 when a software engineer \nnamed Alex Ionescu started to publish a number of blog posts titled, ‘Secrets of the \nApplication Compatilibity Database (SDB)’. This was planned to be a 7 part series but \nunfortunately Ionescu stopped after the fourth post.  In the years preceding and following, a \nsmall number of disparate bloggers posted various technical details and mentions of shims, \nbut typically with the focus of application compatibility. Below is a general timeline of major \nshim references:  \n\n1.  June 2005. A Microsoft Employee named Chris Jackson’s started an MSDN blog \n\ncalled, ‘The App Compat Guy’. Around January 2007 he began posting information \nabout the ACT and blogging about shims.  \nhttp://blogs.msdn.com/b/cjacks/  \n\n2.  May 2007. Ionescu ‘Secrets of the Application Compatilibity Database (SDB)’ \n\nwww.alex-ionescu.com/?p=39  \n\nPage | 7  \n\n \n \n \n \n \n\f3.  August 2008. A blogger with the handle ‘wedday’ posted some technical details \nabout how the shim engine worked based on the shim engine’s debug output. \nhttp://wedday.blogspot.co.uk/2008/08/shimeng.html  \n\n4.  July 2009. Another Microsoft Employee named ‘Maarten van de Bospoort’ wrote a \nblog post titled ‘Disabling a Shim’. However his solution was to disable the shim \nengine via group policy which is not advised because Windows relies on the shim \nengine for EMET and Fixit patches (discussed later). (Bospoort, 2009) \nhttp://blogs.msdn.com/b/maartenb/archive/2009/07/24/disabling-a-shim.aspx  \n5.  February 2010. A developer who goes by the name, ‘Jochen Kalmbach’ posted a \n\ntool that will display the shims that would be activated by a particular file. \nhttp://blog.kalmbach-software.de/2010/02/22/the-shim-database/   \n\n6.  April 2012. A company named ‘Recx’ posted a compilation of research notes titled \n‘Windows AppCompat Research Notes’ where deep technical insight and control \nflow of the shim engine was discussed. (Ollie, 2012)   \nhttp://recxltd.blogspot.co.uk/2012/04/windows-appcompat-research-notes-part-\n1.html  \n\n7.  May 2012. Microsoft updated its Application Compatibility Toolkit (ACT) Technical \nReference where background information is given on the ACT along with details of \nindividual fixes. This article also links to the AppHelp.dll documentation. \nhttps://technet.microsoft.com/en-us/library/hh825181.aspx    \n\n8.  May 2012. “Shim: A New Method of Injection” by the Journal of Computer Hooligans \n\nftp://os2.fannet.ru/fileechoes/programming/XA_159.PDF  \n\n9.  October 2013. Mark Baggett gave a talk at DerbyCon titled, ‘Windows – Own3d by \nDefault’. He is the first to discuss the use of shims in a post exploitation context. \nhttp://www.irongeek.com/i.php?page=videos/derbycon3/4206-windows-0wn3d-by-\ndefault-mark-baggett  \n\n10. March 2014. Jon Erickson presented at Black Hat Asia ‘Persist-It – Using and \n\nAbusing Microsoft Fix It Patches’ where he describes how Fixit patches work and \nhow his tool can be used to analyze them. (Erickson, 2014) \nhttps://www.blackhat.com/docs/asia-14/materials/Erickson/Asia-14-Erickson-Persist-\nIt-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf  \nhttps://www.blackhat.com/docs/asia-14/materials/Erickson/WP-Asia-14-Erickson-\nPersist-It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf  \n\n11. May 2014. Graham Posts ‘Shimming your Way Past UAC’ (Graham, 2014). This \nprovided the first public source code reference for how the ACT can be used to \nbypass a UAC prompt. \nhttp://blog.ddifrontline.com/4#more-4  \n\n12. December 2014. Jon Erickson presents ‘The active use and exploitation of \n\nMicrosoft's Application Compatibility Framework’ at SysScan 360 and CodeBlue in \nJapan.  \nhttp://sdb.io/erickson-codeblue.pdf   \n\n13. Jan 2015. Sean Pierce (me) Shmoocon Epilogue “Forensic Analysis of Advanced \n\nPersistence through the Application Compatibility Toolkit” \n\nPage | 8  \n\n \n \n \n\fIn the wild \nThe frame of reference for leveraging malicious shims is centered around post exploitation \nwhere it is assumed the attacker has administrative privileges in order to write the \nnecessary registry keys to install shims on a system wide basis. Listed below are numerous \nexamples of malicious shims being used in cyber-espionage and cyber-crime activities. \nWhile the ACT offers many avenues to perform arbitrary code execution, attackers routinely \nuse only a few of the basic Fixes: \n\nBlackEnergy: There are variants of this malware that have been used in cyber-\ncrime & cyber-espionage and has been under continuous development since \nJune 2007. Modern variations support components such as rootkits and 64-bit \nplugins. In April 2013 the authors responsible for BlackEnergy added the UAC \nbypass ‘RedirectEXE’ Fix making BlackEnergy the first publically known \nmalicious use of the ACT. They also used the ‘DisableNXShowUI’ Fix to \ndisable Data Execution Prevention (DEP) in its host process. (F-Secure, 2015) \n(Aquilino, 2014) (Cherepanov R. L., 2014) \nBlackEnergy 2 hash: 26b9816b3f9e2f350cc92ef4c30a097c6fec7798 \nBlackEnergy 3 hash: 78636f7bbd52ea80d79b4e2a7882403092bbb02d \n\nGootKit: This is a backdoor that was initially observed in April of 2014 and is \npurportedly created by the actor ‘MzH’ (hFireF0X, 2015). It used the UAC \nbypassing ‘RedirectEXE’ Fix to target the auto-elevated ‘cliconfg.exe’ (SQL \nServer Client Network Utility). In March 2015, the malware author(s) leveraged \nthe in-memory patching as discussed by Jon Erickson at his talks at BlackHat \nAsia in August 2014. The authors of Gootkit most likely used Erickson’s \npublically available sample code to generate the sdb files (23 in all), but for \nunknown reasons the Gootkit authors did not use Erickson’s stealth installation \ntechnique (they still use the traditional native sdb installer, sdbinst.exe). \n(Pernet, 2015) (Dr. WEB, 2014) (Erickson, 2014) \nGootKit: f9772fcfbcaac9c4873989a1759a5c654eec440e \n\nRoaming Tiger: This is a cyber-espionage group outed by Eset’s Anton \nCherepanov at ZeroNights 2014. Cherepanov observed Roaming Tiger \ntargeting countries belonging to the Russia and Commonwealth of Independent \nStates (CIS) with phishing documents to get initial code execution which then \nused the ACT UAC bypass technique and then installed ACT enabled \npersistence. What makes this case unique is that Roaming Tiger registered \nspecially crafted 32-bit and 64-bit shim databases for ‘explorer.exe’ and two \nother processes. These sdb files described custom Fixes named \n‘AcProtect_Apps’ and specified that those Fixes were contained within the \nlibrary ‘AcProtect.dll’ as seen in Figure 6. As a result the AcProtect.dll was \ninjected into every target process that matched the sdb criteria.  \n(Cherepanov A. , 2014) \n\nPage | 9  \n\n \n \n \n \n \n \n \n \n \n \n\fFigure 6 sdb-explorer showing the shim (Fix) name and DLL reference (bottom two boxes), and the DLL file \nreference (top) \n\nSearch Protect by Conduit: This has been classified by multiple anti-virus \nvenders as a Potentially Unwanted Program (PUP) starting in August 2013. In \nJanuary of 2015 Search Protect was observed using the ACT for targeted \npersistence by creating a 32-bit shim layer named ‘VC32Ldr♦☻’ which applies \nthe ‘InjectDll’ Fix to ‘chrome.exe’, ‘firefox.exe’, ‘iexplorer.exe’, \n‘software_remove_tool.exe’, and ‘software_reporter_tool.exe’. For the 64-bit \nprocesses, a custom Fix named, ‘VC64Shim’ was defined as being in the \n‘VCLdr64.dll’; similar to Roaming Tiger. This resulted in that DLL being injected \ninto ‘iexplore.exe’, ‘chrome.exe’, and ‘explorer.zza’. The custom fix was most \nlikely used because there is no predefined ‘InjectDll’ Fix for 64-bit processes. \n\nBy using the sdb-explorer.exe tool developed by Jon Erickson of iSIGHT \nPartners, the output below will show that the Fix injected \n\\\\.\\globalroot\\systemroot\\apppatch\\nbin\\vc32loader.dll into every process that \nmatched one of the target filenames listed above. \nSearch Protect shim: 175abbeaf62f08716f7975190e550b95 \n\nPage | 10  \n\n \n \n \n \n \n\fFigure 7 sdb-explorer output for Search Protect shim \n\nUpatre: This was first observed in August 2013 (msft-mmpc, 2013) and acts as \na downloader for other malware such as Zbot, Dyre, and Dridex. As early as \nFebruary 2015 Upatre started installing other malware with administrative \nprivileges by using Graham’s UAC bypass technique (Inocencio, 2014) (Author, \n2015).  \nUpatre hash: 1d38c362198ad67329fdf58b4743165e \n\nDRIDEX: This is the successor to CRIDEX, both of which focus on stealing \npersonal and banking information. This latest variant was upgraded to use \nwebinjects, more evasion techniques and relies on spam or Upatre for delivery. \nAt the same time Upatre implemented Graham’s code, Dridex also started \nusing it but in a slightly different manner: Unlike Upatre, Dridex targeted \n‘iscsicli.exe’ and used the ‘RedirectEXE’ Fix to execute a batch script to simply \nopen up a port in the Window’s Firewall. After that, the batch script uninstalled \nthe shim and destroyed all evidence of there being a shim (Drapeau, 2015). \nThis is most likely due to the fact that Graham’s technique used the native \n‘sdbinst.exe’ installer, which adds an entry into the add/remove programs’ list. \nThe commands used are:  \n\nPage | 11  \n\n \n \n \n \n \n \n \n \n \n\f\"C:\\Windows\\system32\\sdbinst.exe\" /q \n\"C:\\Users\\%USERNAME%\\AppData\\Local\\Temp\\\\..\\..\\LocalLow\\com.%USERNAME%.\nsdb\" \n\nThe batch script: \nstart C:\\Users\\user_name\\AppData\\Local\\edg3FAC.exe \nC:\\Users\\user_name\\Desktop\\malware.exe \nsdbinst.exe /q /u \"C:\\Users\\user_name\\AppData\\LocalLow\\$$$.sdb\" \nreg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows \nNT\\CurrentVersion\\AppCompatFlags\\Custom\\iscsicli.exe\" /f \nreg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows \nNT\\CurrentVersion\\AppCompatFlags\\InstalledSDB\\{f48a0c57-7c48-461c-9957-\nab255ddc986e}\" /f \ndel C:\\Windows\\AppPatch\\Custom\\{f48a0c57-7c48-461c-9957-\nab255ddc986e}.sdb \ndel %LOCALAPPDATA%Low\\$$$.sdb \ndel %LOCALAPPDATA%Low\\$$$.bat \n\nDridex hash: 2dcf82bfc86397969059e118f3feab10 \n\nPage | 12  \n\n \n \n \n \n \n \n \n \n \n\fOther Offensive Uses \nAttackers have been observed using the ACT predominantly as a UAC bypass, as a \npersistence mechanism, and only recently has one family (GootKit) used the in-memory \npatching capability. However there are still over 800 more ‘Fixes’ and ‘Modes’ that can be \nused for an array of offensive purposes, the examples listed below will be demonstrated \nduring the talk. Incident Responders and Malware Analysts need to be aware of how shims \ncan modify a process before and during execution, because malicious shims are capable of \nleveraging many rootkit-like functions: \n\n  Evasion, and System Integrity Subversion: The autoruns.exe utility (part of the \n\nSysInternals Suite) is a tool created by Mark Russinovich which displays many of the \ncommon auto-start locations for executables in Windows. Autoruns does not detect \nshims as having any kind of auto-start capability and furthermore can be shimmed to \nhide auto-start locations such as registry keys with the ‘VirtualRegistry’ Fix. This type \nof tool subversion is not unheard of but what makes the ACT uniquely powerful is \nthat the malicious shim could be developed in as little as 30 seconds. The same \nprocess can be reapplied for both 64-bit and 32-bit versions of regedit.exe (the \nnative Windows registry editor).  \n\n  Manipulating a Process with Redirections: Fixes such as ‘VirtualRegistry’, \n\n‘CorrectFilePaths’, ’VirtualizeDeleteFile’, ‘RedirectShortcut’ and ‘APILogger’. \nDepending on the application, these fixes could be used to intercept and manipulate \nsensitive information such as credentials, and debugging logs. The primary example \nbeing web browsers. \n\n  Persistence & Trojanizing: Almost any process can be a host for malicious activity \n\nwith ‘InjectDll’, ‘LoadLibraryRedirect’, ‘RedirectShortcut’, ‘RedirectEXE’, \n‘ShimViaEAT’, ‘LoadLibraryfromCWD’ and much more can be accomplished with in-\nmemory patching.   \n\n  Denial of Service: The “TerminateExe” Fix is the most trait forward way to prevent \nprocesses from running, however many of the fixes can be used to achieve the \nsame goals such as ‘IgnoreLoadLibrary’, ‘RedirectEXE’, and \n‘DeprecatedServiceShim’. The last shim will allow the denial or redirection of any \nservice that the process was attempting to start.  \n\n  Disabling Defenses: Shims can also incorporate simple Fixes such as \n\n‘DisableWindowsDefender’, ‘DisableASLR’, 'DisableAdvancedRPCClientHardening', \n‘DisableSeh’, and ‘DisableNX’ which would be useful when executing malware or \nattempting to exploit a vulnerability. This is especially powerful when one considers \nthat vulnerabilities like MS08-067 can simply be restored as Mark Baggett mentioned \nin his 2013 DerbyCon talk (Baggett, 2013). \n\n  Malware Obfuscation: As a malware analyst this section has been divided into three \n\ncategories based on the target/host executable:  \n\no  Benign Executables – The shimmed executable can be a generic program \n\nthat has been signed and/or whitelisted. The classic ‘InjectDll’ and \n‘LoadLibraryRedirect’ Fixes could be leveraged via a UNC path but patching \nin new code and/or utilizing existing code akin to ROP (Return Oriented \nProgramming) chains would be a much stealthier and would be very difficult \nto analyze. \n\no  Dependently Malicious Executables – The target executable is purposefully \n\nbuilt to work in tandem with its shim for malicious functionally. As a result the \ntarget would fail to display any malicious behaviors without the malicious shim \n\nPage | 13  \n\n \n\fto interfere. A classic example would be a subtle ‘kill switch’ being disabled \nvia a shim like the ‘IgnoreException’ Fix. Another example would be hot \npatching instructions to redirect program flow to malicious code existing \nelsewhere in the binary.  \n\no  Obfuscated Executable – The target executable will fail completely without \n\nthe shim. This can be done with code injection and/or hot patching. Such an \nexecutable could be partially or completely encrypted.  \n\n \n\nIn-Memory Patching. This can offer the most wide array of stealth, defense and \ngeneral anti-analysis capabilities:  \no  Hooking any function \no  Add/Remove/Edit Instructions \no \n\nInserting strings/data where needed \n\n  Changing destination IP’s/hostnames \n  Changing/Randomizing Indicators \n\no  Early detection of debugging and/or other analysis tools.  \n\nOne can learn more about what each documented Fix does here: \nhttps://technet.microsoft.com/en-us/library/cc765984(v=ws.10).aspx  \n\nTools \nCurrent Analysis Tools \nThere are a number of publicly available tools that are indispensable when analyzing a \nsuspicious sdb file. Below is an inventory of the major ones: \n\n  Compatibility Administrator: The free tool by Microsoft to aid customers in creating, \n\ntesting, and installing shim database files as mentioned above. It is the only tool with \na graphical user interface (GUI) and uses that to display sdb files in a logical \nmanner. However it fails to open most custom made sdb files (such as those made \nwith sdb-explorer) and fails to display most of the technical details or even the \nexistence of in-memory patches and custom Fixes. \nLink: http://www.microsoft.com/en-us/download/details.aspx?id=7352  \n\n  sdbinst.exe: The native installer that the Compatibility Administrator uses to install \n\nsdb files. \nLink: https://support.microsoft.com/en-us/kb/308235  \n\n  sdb-explorer.exe: Created by Jon Erickson and for his BlackHat Asia talk ‘Using and \n\nAbusing Microsoft’s Fix It Patches’ in March 2014. Unlike the Compatibility \nAdministrator sdb-explorer displays tremendous amounts of technical information for \na given shim database including disassembling the shims patch code for x86. sdb-\nexplorer can also create in-memory patch code and stealthily install a shim by \nmanually adding the required registry keys. This technique bypasses the sdbinst \nsafe guard of creating an entry in the Add/Remove Programs list. \nLink: https://github.com/evil-e/sdb-explorer  \n\n  sdb2xml.exe: - Created by Heath Stewart of Microsoft in November 2007 extracts \n\nsome data as XML from a shim database. (Stewart, 2007) \nLink: http://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx  \n\nPage | 14  \n\n \n \n \n \n \n\f  shims.exe: - The only non-free application on this list. Created by David Tomczak in \nMarch 2015, this tool similarly displays information about shim database files, shim \nstatistics, and patch information in a much prettier format than the other tools, but \ndoes not automatically disassemble the patched bytes. \nLink: https://tzworks.net/prototype_page.php?proto_id=33 \n\n  python-sdb: - A python sdb file parser. Created by William Ballenthin in July 2015, \n\nthis tool similarly displays information about shim database files. \nLink: https://github.com/williballenthin/python-sdb  \n\nDefense Tools \n\nTargeted persistence is currently not detected as a form of persistence by any analysis \ntools (notably SysInternals’ autoruns). As a result, the code that is being released attempts \nto uninstall malicious shims whenever they are detected. Some tools even have built-in \nshim-defenses as proof of concept code for developers. The following are several examples \nof these tools: \n\nShim-Process-Scanner: This scanner checks the memory of every running process for \nApplication Compatibility Flags. Features: \n\n  Will search other processes for shim flags \n  WMI event trigger on install registries  \n\nShim-Detector-Lite: Shims have total control of file redirection and Registry re-mapping for \nthe target executable so this tool checks in-memory data structures for undocumented \nApplication Compatibility Flags. Features: \n\n  Will detect and alert on installation of a custom shim database (sdb) \n\nShim-Guard-Service: This tools starts as a service when Windows starts up and monitors \nthe registry for any shim installations, then promptly uninstalls them. Features: \n\n  Runs as a service \n  Detects and alerts on newly installed shims \n  Uninstalls detected shims \n\nShim-Guard-Lite \n\n  Flexible WMI based script \n  Alerts on newly installed shims \n  Uninstalls detected shims \n\nShim-File-Scanner \n\n  Scans Files/Folders for non-default shims and analyzes them \n  Checks registry for installed shims \n  Tests a file to see if any shim can be applied to them \n  Future: \n\no  Shell Extension for file/folder scanner \n\nPage | 15  \n\n \n \n \n \n \n \n \n \n \n \n \n\fForensics Tools \n\nThe tools listed below focus on a forensic perspective for which I have created two plugins \nthat will assist with both the live and dead analysis of a system afflicted by malicious shims: \n\nshimScanner: Attempts to find evidence for active sdb files in-memory via the open source \nmemory analysis framework Volatility. Features: \n\n  Searches the Registry for installed sdb files \n  Searches each process for shim flags \n  Future:  \n\no  Pull request for Volatility autoruns plugin \no  Add analyzing ability \n\nsdbFileIngestModule: Is a File Ingest Module that detects and analyzes sdb files for the \nopen source digital forensics tool Autopsy which is a graphical interface for the Sleuth Kit \ntools. Features: \n\n  Searches disk image for sdb files \n  Parses Registry for installed sdb files \n  Uses results from sdb-explorer (windows only tool) \n\nPenetration Testing Tools \n\nRun Self as Admin \n\n  Builds an shim database, installs it, bypasses UAC \n\nSubversion-Shims \n\n  Hides auto run keys from autoruns \n  Hides auto run keys from regedit \n  Prevents SysInternals tools from launching \n\nStealth-Shim \n\n  Hot patching code that will conceal flags that the above tools search for \n  Unload custom App Comp DLL Helper with FreeLibraryAndExitThread() \n\nPuttyRider-Shim \n\n \n\nInjects the putty rider DLL into Putty \n\nDuring the course of this research it became obvious that to ensure compatibility, Microsoft \nbuilt Windows to effectively lie to all non-native code. Therefore 32-bit and 64-bit versions \nare available but will only work in their native code environment. All tools have been tested \nprimarily on 64-bit Windows 7 Professional and should work on x86/x64 on Windows XP, \nVista, Win7, and Win 8 depending on certain compatibility issues (joke).  \n\nPage | 16  \n\n \n \n \n \n \n \n \n \n \n \n \n \n\fDefenses \nAside from using the given tools above, the only other technical defense from a malicious \nshim is by disabling the Shim Engine via Group Policy. However, that is not recommended \nbecause shims are heavily integrated into Windows for normal operations; such as auto \nelevating any executable matching the filename *instal*.  \n\nIn late April 2015, Microsoft released an optional update named KB3045645 for Windows 7 \nand above which, according to their description will “force a UAC prompt when a \ncustomized .sdb file is created in Windows” (Microsoft Support , 2015). Contrary to the \nofficial description, this patch effectively removes the <autoElevate>true</autoElevate> \nproperty from the sdbinst.exe file and does not present a UAC prompt when a customized \nsdb files are created or applied to a process. This prevents the traditional UAC bypass \nmethod used by GootKit and other malware families. However the update is classified as \nOptional so it will not install by default and sdbinst.exe was merely the official installer for \nsdb files, so a UAC bypass is still possible by manually adding the necessary registry keys.  \n\nFigure 8. Optional Patch which will disable sdbinst.exe auto-elevation \n\nPrior to KB3045645 malware relied on sdbinst.exe auto-elevating to install a ‘RedirectEXE’ \nfix in order to bypass a UAC prompt. Barring the use of that patch, some system \nadministrators may choose to increase the UAC security setting to “Always notify” but this \nwill of course annoy users into allowing everything especially over long periods of time. \nNote: one particularly annoying part of Dridex is that the UAC prompt will appear in an \ninfinite loop until the user clicks ‘Yes’.  \n\nPage | 17  \n\n \n \n \n \n \n\fFigure 9 More details see http://support.microsoft.com/en-us/kb/975787 \n\nMoving Forward \nI would recommend that Microsoft treat sdb files as they do any other executable file and \nenable and enforce code signing. I also recommend Windows Defender and other security \nsoftware vendors to scan sdb files for suspicious attributes such as, ‘RedirectEXE’ for auto-\nelevated apps, ‘TerminateExe’ for security apps, and ‘InjectDll’ for any app. Currently only \nthe security venders GData and Kaspersky appear to be aware of malicious shims and will \nsometimes detect sdb files that are dropped by malware or sdb files attempting a UAC \nbypass. In February 2015 a malware analyst named Takahio Haruyama created a generic \nIndicator of Compromise (IOC) for the for the Volatility plugin openioc_scan to trigger on the \nUAC bypass used by Dridex. (Haruyama, 2015) \n\nAwareness of malicious shims capabilities combined with the tools described above, are \ngood but it is expected that in the near future more sophisticated ACT enabled in-memory \npatching and malware obfuscation techniques will become more prevalent and beyond that \nI hypothesize more advanced attacks will include insertion of malicious sdb configurations \ninto the native system sdb files, and the use of wildcards in file names (but this would \nrequire much more reverse engineering). This will likewise require defenders to continue to \nadapt and innovate to better defend their environments. \n\nConclusion \nDefenders such as Incident Responders and Malware Analysts should be aware of how \nshim databases can be used to leverage rootkit-like functionality from the features found in \nthe Application Compatibility Toolkit. Malicious shim database files have been observed in \nthe wild with increasing frequency and complexity. Given the features and ease-of-use \nfound in the ACT, attackers will soon start utilizing the more advanced methods \ndemonstrated here, which has prompted me to create and distribute the tools necessary to \nprevent, detect, and combat this new avenue of post-exploitation. \n\nPage | 18  \n\n \n \n \n \n \n \n \n \n\fBibliography \nAquilino, B. (2014, 6 30). Beware BlackEnergy If Involved In Europe/Ukraine Diplomacy. Retrieved from \n\nF-Secure: https://www.f-secure.com/weblog/archives/00002721.html \n\nAuthor. (2015, 2 8). Upatre downloader malware using AppCompat for automatic UAC elevation. \n\nRetrieved from Bleen. All the integers between 6 and 7: \nhttp://lupwa.org/bleen/2015/02/08/upatre-downloader-malware-using-appcompat-for-\nautomatic-uac-elevation/ \n\nBospoort, M. v. (2009, 7 23). Disabling a Shim. Retrieved from Maarten's blog: \n\nhttp://blogs.msdn.com/b/maartenb/archive/2009/07/24/disabling-a-shim.aspx \n\nChen, R. (2005, 8 24). Buying an entire Egghead Software store. Retrieved from The Old New Thing - \n\nMSDN Blogs: http://blogs.msdn.com/b/oldnewthing/archive/2005/08/24/455557.aspx \n\nCherepanov, A. (2014). Roaming tiger. Zeronights 2014 (p. 20). Moscow: \n\nhttp://2014.zeronights.org/assets/files/slides/roaming_tiger_zeronights_2014.pdf. \n\nCherepanov, R. L. (2014, 1 25). Last-minute paper: Back in BlackEnergy: 2014 targeted attacks in the \n\nUkraine and Poland. Retrieved from Virus Bulletin: \nhttps://www.virusbtn.com/conference/vb2014/abstracts/LM3-LipovskyCherepanov.xml \n\nDr. WEB. (2014, 4 9). Retrieved from BackDoor.Gootkit.112—a new multi-purpose backdoor: \n\nhttps://news.drweb.com/show/?i=4338&lng=en  \n\nDrapeau, P. (2015, 1 16). Firewall Rule Changes and Compatibility Trickery. Retrieved from Kill Chain. The \n\nConfer Blog: http://www.confer.net/kill-chain-the-confer-blog/80-firewall-rule-changes-and-\ncompatibility-trickery \n\nErickson, J. (2014). Persist It: Using and Abusing Microsoft Fix It Patches. BlackHat Asia (p. 14). \n\nSingapore: https://www.blackhat.com/docs/asia-14/materials/Erickson/WP-Asia-14-Erickson-\nPersist-It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf. \n\nF-Secure. (2015). BLACKENERGY & QUEDAGH. Retrieved from f-secure.com: https://www.f-\n\nsecure.com/documents/996508/1030745/blackenergy_whitepaper.pdf \n\nGraham, C. (2014, 5 27). Shimming Your Way Past UAC. Retrieved from Digital Defense Incorporated: \n\nhttp://blog.ddifrontline.com/4#more-4  \n\nHancke, P. (2009). The Windows 7 App Compat Story. Retrieved from Microsoft Tech-ed Afraca 2009: \n\nhttp://download.microsoft.com/download/6/7/3/673B71D0-6D4F-4591-9940-\nD33DF9135487/WCL304_Win7_app_compat_story_Hancke.pptx \n\nHaruyama, T. (2015, 2 26). Github. Retrieved from TakahiroHaruyama / openioc_scan: \n\nhttps://github.com/TakahiroHaruyama/openioc_scan/blob/master/IOCs/generic/cdcd5fdb-\nfcd3-4947-8c76-d2fbdc1b5f82_UAC_COM.ioc \n\nhFireF0X. (2015, 1 9). FireF0X. Retrieved from Twitter: \n\nhttps://twitter.com/hfiref0x/status/553777371682443264 \n\nPage | 19  \n\n \n\fInocencio, R. (2014, 11 5). Banking Trojan DRIDEX Uses Macros for Infection. Retrieved from Security \nIntelligence Blog: http://blog.trendmicro.com/trendlabs-security-intelligence/banking-trojan-\ndridex-uses-macros-for-infection/ \n\nMicrosoft. (2009, 10 29). Deploy an Application Compatibility Database by Using SDBInst. Retrieved from \n\nTechNet: https://technet.microsoft.com/en-us/library/ee732408(v=WS.10).aspx \n\nMicrosoft Support . (2015, 4 29). Retrieved from Update to force a UAC prompt when a customized .sdb \n\nfile is created in Windows: https://support.microsoft.com/en-us/kb/3045645 \n\nmsft-mmpc. (2013, 10 31). Upatre: Emerging Up(d)at(er) in the wild. Retrieved from Microsoft Malware \nProtect Center: http://blogs.technet.com/b/mmpc/archive/2013/10/31/upatre-emerging-up-d-\nat-er-in-the-wild.aspx \n\nOllie. (2012, 4 28). Windows AppCompat Research Notes - Part 1. Retrieved from Research, Develop, \n\nAssess, Consult & Educate: http://recxltd.blogspot.co.uk/2012/04/windows-appcompat-\nresearch-notes-part-1.html \n\nPernet, C. (2015, 3 30). Fake Judicial Spam Leads to Backdoor with Fake Certificate Authority. Retrieved \n\nfrom TrendLabs Security Intelligence Blog: http://blog.trendmicro.com/trendlabs-security-\nintelligence/fake-judicial-spam-leads-to-backdoor-with-fake-certificate-authority/ \n\nSS_TSS@mail.ru. (2012, May). Journal of Computer Hooligans. Retrieved from \n\nftp://os2.fannet.ru/fileechoes/programming/XA_159.PDF  \n\nStewart, H. (2007, 11 3). Shim Database to XML. Retrieved from Setup & Install by Heath Stewart: \n\nhttp://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx \n\nBaggett, M. (2013, February 23).  2013 Posts and Publications. Retrieved October 23, 2013, from In \n\nDepth Defense: http://www.indepthdefense.com/2013/02/2013-posts-and-publications.html \n\nIonescu, A. (2007, May 20).  Secrets of the Application Compatilibity Database (SDB) – Part 1. Retrieved \n\nApril 15, 2015, from Alex Ionescu's Blog: http://www.alex-ionescu.com/?p=39 \n\nIonescu, A. (2007, May 21).  Secrets of the Application Compatilibity Database (SDB) – Part 2. Retrieved \n\nApril 15, 2015, from Alex Ionescu's Blog: http://www.alex-ionescu.com/?p=40 \n\nIonescu, A. (2007, May 26).  Secrets of the Application Compatilibity Database (SDB) – Part 3. Retrieved \n\nApril 15, 2015, from Alex Ionescu’s Blog: http://www.alex-ionescu.com/?p=41 \n\nMark Russinovich, B. C. (2013, August 1).  Autoruns for Windows v11.70. Retrieved September 5, 2013, \nfrom Windows Sysinternals: http://technet.microsoft.com/en-us/sysinternals/bb963902.aspx \n\nMicrosoft. (2013, September 6).  !chkimg. Retrieved October 2, 2013, from Dev Center: \n\nhttp://msdn.microsoft.com/en-us/library/windows/hardware/ff562217%28v=vs.85%29.aspx \n\nMicrosoft. (2013, October 1).  Application Compatibility Database. Retrieved October 23, 2013, from \n\nMicrosoft Developer Network:http://msdn.microsoft.com/library/bb432182.aspx \n\nMicrosoft. (2013).  Fix it Solution Center. Retrieved 2013 24-October from Microsoft Support: \n\nhttp://support.microsoft.com/fixit/ \n\nPage | 20  \n\n \n\fMicrosoft. (2012, October 1).  Microsoft Security Advisory: Vulnerability in Microsoft XML Core Services \n\ncould allow remote code execution. Retrieved September 5, 2013, from Microsoft Support: \nhttp://support.microsoft.com/kb/2719615 \n\nMicrosoft. (2012, December 7).  Shim Database Types. Retrieved September 5, 2013, from Microsoft \n\nDeveloper Network: http://msdn.microsoft.com/en-us/library/bb432483%28v=vs.85%29.aspx \n\nSikka, N. (2013, September 17).  CVE-2013-3893: Fix it workaround available. Retrieved October 02, \n\n2013, from Security Research & Defense: \n\nhttp://blogs.technet.com/b/srd/archive/2013/09/17/cve-2013-3893-fix-it-workaround-available.aspx \n\nStewart, H. (2007, November 3).  Shim Database to XML. Retrieved September 5, 2013, from Setup & \n\nInstall by Heath Stewart: http://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx \n\nPage | 21  \n\n \n \n \n \n\f",
+  "sanitized_txt": "Malicious Application Compatibility Shims\nTable of Contents Introduction .................................................................................................................................................. 2\nBackground ................................................................................................................................................... 2\nHow the Windows Image Loader works with the Shim Engine .................................................................... 6\nPrior Work ..................................................................................................................................................... 7\nIn the wild ..................................................................................................................................................... 9\nOther Offensive Uses .................................................................................................................................. 13\nTools ............................................................................................................................................................ 14\nCurrent Analysis Tools............................................................................................................................. 14\nDefense Tools .......................................................................................................................................... 15\nForensics Tools ........................................................................................................................................ 16\nPenetration Testing Tools ....................................................................................................................... 16\nDefenses ...................................................................................................................................................... 17\nMoving Forward ...................................................................................................................................... 18\nConclusion ................................................................................................................................................... 18\nBibliography ................................................................................................................................................ 19\nPage | 1\nIntroduction One of the many reasons why Microsoft has dominated the personal computer market is because they have gone to extraordinary lengths to ensure backwards compatibility in (most) of their products, and many third party products. This is currently implemented by the Application Compatibility Framework (ACF) which holds a position of considerable tactical value on modern computer systems because, by design, the ACF is capable of intercepting application API calls and manipulating the Portable Executable (PE) file loading process.\nActors in the wild have been observed leveraging a few of the simple components of the ACF and it is expected that the number of exploitations will rise and grow in sophistication.\nSome of these more advanced malicious techniques will be demonstrated and I will be releasing the source code of several new tools that help mitigate this new threat.\nBackground Raymond Chen is a developer on the Windows Team at Microsoft and maintains a blog called ‘The Old New Thing’ in which he describes many fascinating stories and deep technical insights into the history of Windows. On August 24th 2005 he wrote:\n“During the development of Windows 95, application compatibility was of course a very high priority. To make sure that coverage was as broad as possible, the development manager for Windows 95 took his pick-up truck, drove down to the local Egghead Software store (back when Egghead still existed), and bought one copy of every single PC program in the store... In exchange for taking responsibility for ensuring that Windows 95 was compatible with your adopted programs, you [the developer] got to keep them [the applications] after Windows 95 shipped.” (Chen, 2005)\nIn any given Windows 7 machine one can find hard coded references to ‘3DFrogFrenzy’, ‘Acrobat5’, ‘WordPerfect8’, ‘Works99’ and many other applications dating back to the early 1990’s. These programs do not correctly function on modern Windows machines, so in an effort to compensate for poor coding (on all sides), Microsoft has sacrificed security for developer convenience by allowing anyone to create and install Shim database (sdb) files. These database files contain the specific details on how Windows should manipulate (in other words ‘shim’) a target program with predefined ‘Fixes’. The Application Compatibility Toolkit (ACT) contains hundreds of configurations for thousands of programs (like those listed above) primarily contained within the file %WINDIR%\\AppPatch\\sysmain.sdb. Microsoft provides a free tool called the Application Compatibility Administrator which allows users to create and apply specific Fixes such as ‘DisableNX’, ‘ModifyShellLinkPath’, ‘VirtualRegistry’, ‘DisableAdvancedRPCClientHardening’, ‘ForceAdminAccess’, ‘InjectDll’ (my favorite), ‘DisableSeh’, ‘ShellExecuteXP’ and many others.\nPage | 2\nFigure 1. The Application Compatibility Toolkit (ACT) – Compatibility Administrator\nThe Application Compatibility Toolkit can be used to create and install a shim by guiding the user through a Wizard which first asks for a path to the target executable. The ACT will then analyze the file for criteria to filter on such as file name, file size, link date, PE checksum, etc. Then the user will be presented with a list of ‘Modes’ where each ‘Mode’ is effectively a bundle of individual Fixes that can be applied to a process and its children (A ‘Mode’ or ‘Compatibility Mode’ are sometimes referred to as a ‘Layer’). An example of a Mode would be ‘VistaSP1VersionLie’ as opposed to a Fix such as, ‘Emulate Cursor’. After the Mode screen, the wizard will show a list of Fixes. By default the 32-bit Compatibility Administrator will show a list of 367 Fixes, however if the Compatibility Administrator is executed from the command line with the ‘/x’ parameter the list of Fixes will increase to 811 to include undocumented Fixes. After finishing the wizard, a user can save the sdb file, and then install it by right clicking on the database icon and clicking ‘Install’. The installer simply executes the command line sdb installer called sdbinst.exe.\nThe Application Compatibility Toolkit (ACT) – Compatibility Administrator\nPage | 3\nThe installer will create a GUID, copy the sdb file into %SystemRoot%\\AppPatch\\Custom\\<GUID>.sdb then add a registry key using an internal database name in the format of HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Custom\\<GUID>.sdb and \\InstalledSDB\\<GUID>.sdb.\nIf everything is successful, the installer will add an entry to the Add/Remove programs list.\nObviously if a user has administrative access, they could simply add the keys to the registry directly.\nRegistry keys:\n  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Custom   HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\InstalledSDB\nFigure 2 Install Registry Keys (1)\nFigure 3. Install Registry Keys (2)\nDefault Install File Locations\n  %WINDIR%\\AppPatch\\Custom\\   %WINDIR%\\AppPatch\\Custom\\Custom64\\\nFigure 4 - Default Install Path. Note: The sdb file can be put anywhere accessible. Even a UNC path\nAfter the sdb file installation is complete all processes launched after that point will be subjected to the file matching rules of this shim database. For efficiency reasons, Windows caches metadata for each executed file and stores that data in the Application Compatibility Cache. In effect, the cache is a record of all executed processes since the computer was last rebooted. The forensic value from this data is used by some tools such as Mandiant’s\nPage | 4\nShim Cache Parser ® and was the subject of the MS15-001 elevation of privilege vulnerability in January 2015.\nSeven months prior to the MS15-001 patch, a forensics expert named Chris Graham published a blog post titled, ‘Shimming Your way Past UAC’. In this entry he provided a detailed walk through (including source code) on how to generate and install an sdb file that would use the ‘RedirectEXE’ Fix to redirect the execution (while retaining the privileges) of a target executable (Graham, 2014). The processes that are targeted by this method rely on the fact that these executables are signed by Microsoft and have a manifest file property of <autoElevate>true</autoElevate> such as SndVol.exe. The MS15-001 did nothing to prevent this UAC bypass technique and as a result it is still being exploited in the wild.\nHowever, in April 2015 Microsoft did push out an optional update (KB3045645) which removed the auto-elevating manifest property from sdbinst.exe (the system sdb installer).\nMore details can be found in the Defenses section.\nShims are heavily integrated into Windows for normal operations, such as auto elevating any executable matching the filename *instal*. Microsoft also uses shims to test and fix their own products such as Outlook and Word rather than updating/patching them the traditional way. When evaluating compatibility issues with Windows Vista, the ACT was used to collect data via shimming exeplorer.exe and other system processes (Hancke, 2009). Primarily Microsoft uses shims to implement most of the functionality in products such as the Enhanced Mitigation Experience Toolkit (EMET) and Windows Fixit patches which are used to mitigate critical vulnerabilities as a stopgap measure between patch cycles.\nShim strengths from an attacker’s point of view are:\n  Nearly every process is vulnerable. The shim engine (shimeng.dll) will not shim\ncertain hard coded modules such as:\no  NT Symbolic Debugger (NTSD) o  WinDbg o  Software License Service (slsvc.exe) for Windows Vista (Ionescu, 2007)\n  The shim engine (shimeng.dll) will intercept GetProcAddress() in the event an application attempts to dynamically call a function that the shim engine has manipulated.\n  There are many ways to apply native fixes maliciously.\n  There are little to no defensive measures from malicious shims (until now).\n  They are not considered executable even though they can contain shellcode.\n  Custom fixes can be defined in the form of a user supplied DLL file. This is useful\nbecause the ‘InjectDll’ is not a predefined Fix for 64-bit shims.\n  With a few exceptions, all modern Windows OS versions support shims and natively ship with the auto-elevated shim database installer sdbinst.exe. The native installer will add an entry in the Add/Remove programs list but this can be bypassed by directly adding to the appropriate keys.\nShim weaknesses from an attacker’s pointer of view:\n  An attacker needs administrative rights to execute the shim database installer and/or\nwrite to the necessary registry keys.\nPage | 5\n  Programs only need to change their names to avoid being shimmed. There are no\ncurrently available tools that allow wildcards in file names, but the functionality does exist as seen in the native shim databases such as sysmain.sdb.\n  Shims only run in user-mode so they cannot manipulate kernel-mode modules.\nHow the Windows Image Loader works with the Shim Engine When a new process needs to be created, a program will use one of the functions in ntdll.dll, such as CreateProcess(). To determine if the new process needs to be shimmed, apphelp.dll is loaded and two registry keys might be opened or queried:\n  HKCM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers   HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers\nIf the application needs to be shimmed an undocumented __ COMPAT_LAYER environment variable will be set in the new child process. The kernel creates the various data structures, sets up the process space then loads ntdll.dll into that new process space.\nIn that space, the kernel will set the context struct to begin executing the ntdll.dll function called LdrInitializedThunk(). This function effectively sets up everything the process will need such as:\nInitialize the heap\n   Maps and initializes the appropriate DLL’s  Initializes Tread Local Storage (TLS)   Fiber Local Storage (FLS)  Import Address Tables (IAT’s)   Export Address Tables (EAT’s)   Process the Manifest files (Which might also have compatibility settings)   Read the application compatibility database and loading the shim engine\nAfter all the initialization is done, the kernel will reset the threat’s context to the ntdll.dll function RtlUserThreatStart() which will in turn begin executing the actual original entry point for the executable that was specified with CreateProcess(). If the child process needs to be shimmed, both the parent and child processes will load apphelp.dll and verify the sdb file:\nFigure 5 Confusing procmon log output of a program named 'LaunchWithoutShim.exe' executing a program called, 'HelloWorldShimmed.exe'. Procmon is a part of SysInternals by Mark Russinovich\nPage | 6\nIf the sdb file cannot be found or opened the Application Event Log will record, ‘Unable to open shim database version registry key’. Assuming the sdb file is found and loaded without error, it is then parsed to further verify that the file should indeed be shimmed by checking the sdb file for more name filters and other file criteria; there is always at least one filter, but by default it is a match-all wildcard character: *. The loaded sdb file will be further parsed to find the specific Fix (or Fixes) that will be applied along with a reference to a DLL where that Fix is implemented. The specified DLL is then loaded into the suspended process, and allowed to execute DllMain() following the initialization of the other system DLLs. If the Fix does not reference a DLL then the native system shim database(s) are loaded in order find the appropriate DLL where that particular fix is implemented. Most of the predefined Fixes are found in %WINDIR%\\AppPatch\\sysmain.sdb and most of those fixes are implemented in %WINDIR%\\AppPatch\\AcGeneral.dll.\nIf the Fix is not predefined in sysmain.sdb it is called a Custom Fix. Anyone can create a custom fix by creating a DLL which exports the following functions:\n  GetHookAPIs(char *,ushort *,ulong *)   NotifyShims(char *, unsigned __int16 *, unsigned __int32 *)\nThe DLL containing the Fix is typically hooks the IAT of the target to intercept specific functions. For example the VirtualRegistry Fix will hook all registry related calls and manipulate them accordingly. GetProcAddress() is also hooked to anticipate dynamic calls to the would-be hooked functions. Sdb files have undocumented features such as hot patching which is currently only used by Microsoft to implement the functionality in Fixit patches (discussed later). After ntdll.dll loads the AppInit DLLs in the child process, it then loads the shim engine which implemented with apphelp.dll. This shim engine will clear the environment variable __COMPAT_LAYER then apply the Fixes and patches (if any) to the target module. It is possible to have more than one sdb apply Fixes to the same process but this leads to undefined behavior due to the uncertain order in which the shims are applied.\nPrior Work The earliest mention of shims relating to security was in 2007 when a software engineer named Alex Ionescu started to publish a number of blog posts titled, ‘Secrets of the Application Compatilibity Database (SDB)’. This was planned to be a 7 part series but unfortunately Ionescu stopped after the fourth post.  In the years preceding and following, a small number of disparate bloggers posted various technical details and mentions of shims, but typically with the focus of application compatibility. Below is a general timeline of major shim references:\n1.  June 2005. A Microsoft Employee named Chris Jackson’s started an MSDN blog\ncalled, ‘The App Compat Guy’. Around January 2007 he began posting information about the ACT and blogging about shims.\nhttp://blogs.msdn.com/b/cjacks/\n2.  May 2007. Ionescu ‘Secrets of the Application Compatilibity Database (SDB)’\nwww.alex-ionescu.com/?p=39\nPage | 7\n3.  August 2008. A blogger with the handle ‘wedday’ posted some technical details about how the shim engine worked based on the shim engine’s debug output.\nhttp://wedday.blogspot.co.uk/2008/08/shimeng.html\n4.  July 2009. Another Microsoft Employee named ‘Maarten van de Bospoort’ wrote a blog post titled ‘Disabling a Shim’. However his solution was to disable the shim engine via group policy which is not advised because Windows relies on the shim engine for EMET and Fixit patches (discussed later). (Bospoort, 2009) http://blogs.msdn.com/b/maartenb/archive/2009/07/24/disabling-a-shim.aspx 5.  February 2010. A developer who goes by the name, ‘Jochen Kalmbach’ posted a\ntool that will display the shims that would be activated by a particular file.\nhttp://blog.kalmbach-software.de/2010/02/22/the-shim-database/\n6.  April 2012. A company named ‘Recx’ posted a compilation of research notes titled ‘Windows AppCompat Research Notes’ where deep technical insight and control flow of the shim engine was discussed. (Ollie, 2012) http://recxltd.blogspot.co.uk/2012/04/windows-appcompat-research-notes-part- 1.html\n7.  May 2012. Microsoft updated its Application Compatibility Toolkit (ACT) Technical Reference where background information is given on the ACT along with details of individual fixes. This article also links to the AppHelp.dll documentation.\nhttps://technet.microsoft.com/en-us/library/hh825181.aspx\n8.  May 2012. “Shim: A New Method of Injection” by the Journal of Computer Hooligans\nftp://os2.fannet.ru/fileechoes/programming/XA_159.PDF\n9.  October 2013. Mark Baggett gave a talk at DerbyCon titled, ‘Windows – Own3d by Default’. He is the first to discuss the use of shims in a post exploitation context.\nhttp://www.irongeek.com/i.php?page=videos/derbycon3/4206-windows-0wn3d-by- default-mark-baggett\n10. March 2014. Jon Erickson presented at Black Hat Asia ‘Persist-It – Using and\nAbusing Microsoft Fix It Patches’ where he describes how Fixit patches work and how his tool can be used to analyze them. (Erickson, 2014) https://www.blackhat.com/docs/asia-14/materials/Erickson/Asia-14-Erickson-Persist- It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf https://www.blackhat.com/docs/asia-14/materials/Erickson/WP-Asia-14-Erickson- Persist-It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf\n11. May 2014. Graham Posts ‘Shimming your Way Past UAC’ (Graham, 2014). This provided the first public source code reference for how the ACT can be used to bypass a UAC prompt.\nhttp://blog.ddifrontline.com/4#more-4\n12. December 2014. Jon Erickson presents ‘The active use and exploitation of\nMicrosoft's Application Compatibility Framework’ at SysScan 360 and CodeBlue in Japan.\nhttp://sdb.io/erickson-codeblue.pdf\n13. Jan 2015. Sean Pierce (me) Shmoocon Epilogue “Forensic Analysis of Advanced\nPersistence through the Application Compatibility Toolkit”\nPage | 8\nIn the wild The frame of reference for leveraging malicious shims is centered around post exploitation where it is assumed the attacker has administrative privileges in order to write the necessary registry keys to install shims on a system wide basis. Listed below are numerous examples of malicious shims being used in cyber-espionage and cyber-crime activities.\nWhile the ACT offers many avenues to perform arbitrary code execution, attackers routinely use only a few of the basic Fixes:\nBlackEnergy: There are variants of this malware that have been used in cyber- crime & cyber-espionage and has been under continuous development since June 2007. Modern variations support components such as rootkits and 64-bit plugins. In April 2013 the authors responsible for BlackEnergy added the UAC bypass ‘RedirectEXE’ Fix making BlackEnergy the first publically known malicious use of the ACT. They also used the ‘DisableNXShowUI’ Fix to disable Data Execution Prevention (DEP) in its host process. (F-Secure, 2015) (Aquilino, 2014) (Cherepanov R. L., 2014) BlackEnergy 2 hash: 26b9816b3f9e2f350cc92ef4c30a097c6fec7798 BlackEnergy 3 hash: 78636f7bbd52ea80d79b4e2a7882403092bbb02d\nGootKit: This is a backdoor that was initially observed in April of 2014 and is purportedly created by the actor ‘MzH’ (hFireF0X, 2015). It used the UAC bypassing ‘RedirectEXE’ Fix to target the auto-elevated ‘cliconfg.exe’ (SQL Server Client Network Utility). In March 2015, the malware author(s) leveraged the in-memory patching as discussed by Jon Erickson at his talks at BlackHat Asia in August 2014. The authors of Gootkit most likely used Erickson’s publically available sample code to generate the sdb files (23 in all), but for unknown reasons the Gootkit authors did not use Erickson’s stealth installation technique (they still use the traditional native sdb installer, sdbinst.exe).\n(Pernet, 2015) (Dr. WEB, 2014) (Erickson, 2014) GootKit: f9772fcfbcaac9c4873989a1759a5c654eec440e\nRoaming Tiger: This is a cyber-espionage group outed by Eset’s Anton Cherepanov at ZeroNights 2014. Cherepanov observed Roaming Tiger targeting countries belonging to the Russia and Commonwealth of Independent States (CIS) with phishing documents to get initial code execution which then used the ACT UAC bypass technique and then installed ACT enabled persistence. What makes this case unique is that Roaming Tiger registered specially crafted 32-bit and 64-bit shim databases for ‘explorer.exe’ and two other processes. These sdb files described custom Fixes named ‘AcProtect_Apps’ and specified that those Fixes were contained within the library ‘AcProtect.dll’ as seen in Figure 6. As a result the AcProtect.dll was injected into every target process that matched the sdb criteria.\n(Cherepanov A. , 2014)\nPage | 9\nFigure 6 sdb-explorer showing the shim (Fix) name and DLL reference (bottom two boxes), and the DLL file reference (top)\nSearch Protect by Conduit: This has been classified by multiple anti-virus venders as a Potentially Unwanted Program (PUP) starting in August 2013. In January of 2015 Search Protect was observed using the ACT for targeted persistence by creating a 32-bit shim layer named ‘VC32Ldr♦☻’ which applies the ‘InjectDll’ Fix to ‘chrome.exe’, ‘firefox.exe’, ‘iexplorer.exe’, ‘software_remove_tool.exe’, and ‘software_reporter_tool.exe’. For the 64-bit processes, a custom Fix named, ‘VC64Shim’ was defined as being in the ‘VCLdr64.dll’; similar to Roaming Tiger. This resulted in that DLL being injected into ‘iexplore.exe’, ‘chrome.exe’, and ‘explorer.zza’. The custom fix was most likely used because there is no predefined ‘InjectDll’ Fix for 64-bit processes.\nBy using the sdb-explorer.exe tool developed by Jon Erickson of iSIGHT Partners, the output below will show that the Fix injected \\\\.\\globalroot\\systemroot\\apppatch\\nbin\\vc32loader.dll into every process that matched one of the target filenames listed above.\nSearch Protect shim: 175abbeaf62f08716f7975190e550b95\nPage | 10\nFigure 7 sdb-explorer output for Search Protect shim\nUpatre: This was first observed in August 2013 (msft-mmpc, 2013) and acts as a downloader for other malware such as Zbot, Dyre, and Dridex. As early as February 2015 Upatre started installing other malware with administrative privileges by using Graham’s UAC bypass technique (Inocencio, 2014) (Author, 2015).\nUpatre hash: 1d38c362198ad67329fdf58b4743165e\nDRIDEX: This is the successor to CRIDEX, both of which focus on stealing personal and banking information. This latest variant was upgraded to use webinjects, more evasion techniques and relies on spam or Upatre for delivery.\nAt the same time Upatre implemented Graham’s code, Dridex also started using it but in a slightly different manner: Unlike Upatre, Dridex targeted ‘iscsicli.exe’ and used the ‘RedirectEXE’ Fix to execute a batch script to simply open up a port in the Window’s Firewall. After that, the batch script uninstalled the shim and destroyed all evidence of there being a shim (Drapeau, 2015).\nThis is most likely due to the fact that Graham’s technique used the native ‘sdbinst.exe’ installer, which adds an entry into the add/remove programs’ list.\nThe commands used are:\nPage | 11\n\"C:\\Windows\\system32\\sdbinst.exe\" /q \"C:\\Users\\%USERNAME%\\AppData\\Local\\Temp\\\\..\\..\\LocalLow\\com.%USERNAME%.\nsdb\"\nThe batch script:\nstart C:\\Users\\user_name\\AppData\\Local\\edg3FAC.exe C:\\Users\\user_name\\Desktop\\malware.exe sdbinst.exe /q /u \"C:\\Users\\user_name\\AppData\\LocalLow\\$$$.sdb\" reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Custom\\iscsicli.exe\" /f reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\InstalledSDB\\{f48a0c57-7c48-461c-9957- ab255ddc986e}\" /f del C:\\Windows\\AppPatch\\Custom\\{f48a0c57-7c48-461c-9957- ab255ddc986e}.sdb del %LOCALAPPDATA%Low\\$$$.sdb del %LOCALAPPDATA%Low\\$$$.bat\nDridex hash: 2dcf82bfc86397969059e118f3feab10\nPage | 12\nOther Offensive Uses Attackers have been observed using the ACT predominantly as a UAC bypass, as a persistence mechanism, and only recently has one family (GootKit) used the in-memory patching capability. However there are still over 800 more ‘Fixes’ and ‘Modes’ that can be used for an array of offensive purposes, the examples listed below will be demonstrated during the talk. Incident Responders and Malware Analysts need to be aware of how shims can modify a process before and during execution, because malicious shims are capable of leveraging many rootkit-like functions:\n  Evasion, and System Integrity Subversion: The autoruns.exe utility (part of the\nSysInternals Suite) is a tool created by Mark Russinovich which displays many of the common auto-start locations for executables in Windows. Autoruns does not detect shims as having any kind of auto-start capability and furthermore can be shimmed to hide auto-start locations such as registry keys with the ‘VirtualRegistry’ Fix. This type of tool subversion is not unheard of but what makes the ACT uniquely powerful is that the malicious shim could be developed in as little as 30 seconds. The same process can be reapplied for both 64-bit and 32-bit versions of regedit.exe (the native Windows registry editor).\n  Manipulating a Process with Redirections: Fixes such as ‘VirtualRegistry’,\n‘CorrectFilePaths’, ’VirtualizeDeleteFile’, ‘RedirectShortcut’ and ‘APILogger’.\nDepending on the application, these fixes could be used to intercept and manipulate sensitive information such as credentials, and debugging logs. The primary example being web browsers.\n  Persistence & Trojanizing: Almost any process can be a host for malicious activity\nwith ‘InjectDll’, ‘LoadLibraryRedirect’, ‘RedirectShortcut’, ‘RedirectEXE’, ‘ShimViaEAT’, ‘LoadLibraryfromCWD’ and much more can be accomplished with in- memory patching.\n  Denial of Service: The “TerminateExe” Fix is the most trait forward way to prevent processes from running, however many of the fixes can be used to achieve the same goals such as ‘IgnoreLoadLibrary’, ‘RedirectEXE’, and ‘DeprecatedServiceShim’. The last shim will allow the denial or redirection of any service that the process was attempting to start.\n  Disabling Defenses: Shims can also incorporate simple Fixes such as\n‘DisableWindowsDefender’, ‘DisableASLR’, 'DisableAdvancedRPCClientHardening', ‘DisableSeh’, and ‘DisableNX’ which would be useful when executing malware or attempting to exploit a vulnerability. This is especially powerful when one considers that vulnerabilities like MS08-067 can simply be restored as Mark Baggett mentioned in his 2013 DerbyCon talk (Baggett, 2013).\n  Malware Obfuscation: As a malware analyst this section has been divided into three\ncategories based on the target/host executable:\no  Benign Executables – The shimmed executable can be a generic program\nthat has been signed and/or whitelisted. The classic ‘InjectDll’ and ‘LoadLibraryRedirect’ Fixes could be leveraged via a UNC path but patching in new code and/or utilizing existing code akin to ROP (Return Oriented Programming) chains would be a much stealthier and would be very difficult to analyze.\no  Dependently Malicious Executables – The target executable is purposefully\nbuilt to work in tandem with its shim for malicious functionally. As a result the target would fail to display any malicious behaviors without the malicious shim\nPage | 13\nto interfere. A classic example would be a subtle ‘kill switch’ being disabled via a shim like the ‘IgnoreException’ Fix. Another example would be hot patching instructions to redirect program flow to malicious code existing elsewhere in the binary.\no  Obfuscated Executable – The target executable will fail completely without\nthe shim. This can be done with code injection and/or hot patching. Such an executable could be partially or completely encrypted.\n\nIn-Memory Patching. This can offer the most wide array of stealth, defense and general anti-analysis capabilities:\no  Hooking any function o  Add/Remove/Edit Instructions o\nInserting strings/data where needed\n  Changing destination IP’s/hostnames   Changing/Randomizing Indicators\no  Early detection of debugging and/or other analysis tools.\nOne can learn more about what each documented Fix does here:\nhttps://technet.microsoft.com/en-us/library/cc765984(v=ws.10).aspx\nTools Current Analysis Tools There are a number of publicly available tools that are indispensable when analyzing a suspicious sdb file. Below is an inventory of the major ones:\n  Compatibility Administrator: The free tool by Microsoft to aid customers in creating,\ntesting, and installing shim database files as mentioned above. It is the only tool with a graphical user interface (GUI) and uses that to display sdb files in a logical manner. However it fails to open most custom made sdb files (such as those made with sdb-explorer) and fails to display most of the technical details or even the existence of in-memory patches and custom Fixes.\nLink: http://www.microsoft.com/en-us/download/details.aspx?id=7352\n  sdbinst.exe: The native installer that the Compatibility Administrator uses to install\nsdb files.\nLink: https://support.microsoft.com/en-us/kb/308235\n  sdb-explorer.exe: Created by Jon Erickson and for his BlackHat Asia talk ‘Using and\nAbusing Microsoft’s Fix It Patches’ in March 2014. Unlike the Compatibility Administrator sdb-explorer displays tremendous amounts of technical information for a given shim database including disassembling the shims patch code for x86. sdb- explorer can also create in-memory patch code and stealthily install a shim by manually adding the required registry keys. This technique bypasses the sdbinst safe guard of creating an entry in the Add/Remove Programs list.\nLink: https://github.com/evil-e/sdb-explorer\n  sdb2xml.exe: - Created by Heath Stewart of Microsoft in November 2007 extracts\nsome data as XML from a shim database. (Stewart, 2007) Link: http://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx\nPage | 14\n  shims.exe: - The only non-free application on this list. Created by David Tomczak in March 2015, this tool similarly displays information about shim database files, shim statistics, and patch information in a much prettier format than the other tools, but does not automatically disassemble the patched bytes.\nLink: https://tzworks.net/prototype_page.php?proto_id=33\n  python-sdb: - A python sdb file parser. Created by William Ballenthin in July 2015,\nthis tool similarly displays information about shim database files.\nLink: https://github.com/williballenthin/python-sdb\nDefense Tools\nTargeted persistence is currently not detected as a form of persistence by any analysis tools (notably SysInternals’ autoruns). As a result, the code that is being released attempts to uninstall malicious shims whenever they are detected. Some tools even have built-in shim-defenses as proof of concept code for developers. The following are several examples of these tools:\nShim-Process-Scanner: This scanner checks the memory of every running process for Application Compatibility Flags. Features:\n  Will search other processes for shim flags   WMI event trigger on install registries\nShim-Detector-Lite: Shims have total control of file redirection and Registry re-mapping for the target executable so this tool checks in-memory data structures for undocumented Application Compatibility Flags. Features:\n  Will detect and alert on installation of a custom shim database (sdb)\nShim-Guard-Service: This tools starts as a service when Windows starts up and monitors the registry for any shim installations, then promptly uninstalls them. Features:\n  Runs as a service   Detects and alerts on newly installed shims   Uninstalls detected shims\nShim-Guard-Lite\n  Flexible WMI based script   Alerts on newly installed shims   Uninstalls detected shims\nShim-File-Scanner\n  Scans Files/Folders for non-default shims and analyzes them   Checks registry for installed shims   Tests a file to see if any shim can be applied to them   Future:\no  Shell Extension for file/folder scanner\nPage | 15\nForensics Tools\nThe tools listed below focus on a forensic perspective for which I have created two plugins that will assist with both the live and dead analysis of a system afflicted by malicious shims:\nshimScanner: Attempts to find evidence for active sdb files in-memory via the open source memory analysis framework Volatility. Features:\n  Searches the Registry for installed sdb files   Searches each process for shim flags   Future:\no  Pull request for Volatility autoruns plugin o  Add analyzing ability\nsdbFileIngestModule: Is a File Ingest Module that detects and analyzes sdb files for the open source digital forensics tool Autopsy which is a graphical interface for the Sleuth Kit tools. Features:\n  Searches disk image for sdb files   Parses Registry for installed sdb files   Uses results from sdb-explorer (windows only tool)\nPenetration Testing Tools\nRun Self as Admin\n  Builds an shim database, installs it, bypasses UAC\nSubversion-Shims\n  Hides auto run keys from autoruns   Hides auto run keys from regedit   Prevents SysInternals tools from launching\nStealth-Shim\n  Hot patching code that will conceal flags that the above tools search for   Unload custom App Comp DLL Helper with FreeLibraryAndExitThread()\nPuttyRider-Shim\n\nInjects the putty rider DLL into Putty\nDuring the course of this research it became obvious that to ensure compatibility, Microsoft built Windows to effectively lie to all non-native code. Therefore 32-bit and 64-bit versions are available but will only work in their native code environment. All tools have been tested primarily on 64-bit Windows 7 Professional and should work on x86/x64 on Windows XP, Vista, Win7, and Win 8 depending on certain compatibility issues (joke).\nPage | 16\nDefenses Aside from using the given tools above, the only other technical defense from a malicious shim is by disabling the Shim Engine via Group Policy. However, that is not recommended because shims are heavily integrated into Windows for normal operations; such as auto elevating any executable matching the filename *instal*.\nIn late April 2015, Microsoft released an optional update named KB3045645 for Windows 7 and above which, according to their description will “force a UAC prompt when a customized .sdb file is created in Windows” (Microsoft Support , 2015). Contrary to the official description, this patch effectively removes the <autoElevate>true</autoElevate> property from the sdbinst.exe file and does not present a UAC prompt when a customized sdb files are created or applied to a process. This prevents the traditional UAC bypass method used by GootKit and other malware families. However the update is classified as Optional so it will not install by default and sdbinst.exe was merely the official installer for sdb files, so a UAC bypass is still possible by manually adding the necessary registry keys.\nFigure 8. Optional Patch which will disable sdbinst.exe auto-elevation\nPrior to KB3045645 malware relied on sdbinst.exe auto-elevating to install a ‘RedirectEXE’ fix in order to bypass a UAC prompt. Barring the use of that patch, some system administrators may choose to increase the UAC security setting to “Always notify” but this will of course annoy users into allowing everything especially over long periods of time.\nNote: one particularly annoying part of Dridex is that the UAC prompt will appear in an infinite loop until the user clicks ‘Yes’.\nPage | 17\nFigure 9 More details see http://support.microsoft.com/en-us/kb/975787\nMoving Forward I would recommend that Microsoft treat sdb files as they do any other executable file and enable and enforce code signing. I also recommend Windows Defender and other security software vendors to scan sdb files for suspicious attributes such as, ‘RedirectEXE’ for auto- elevated apps, ‘TerminateExe’ for security apps, and ‘InjectDll’ for any app. Currently only the security venders GData and Kaspersky appear to be aware of malicious shims and will sometimes detect sdb files that are dropped by malware or sdb files attempting a UAC bypass. In February 2015 a malware analyst named Takahio Haruyama created a generic Indicator of Compromise (IOC) for the for the Volatility plugin openioc_scan to trigger on the UAC bypass used by Dridex. (Haruyama, 2015)\nAwareness of malicious shims capabilities combined with the tools described above, are good but it is expected that in the near future more sophisticated ACT enabled in-memory patching and malware obfuscation techniques will become more prevalent and beyond that I hypothesize more advanced attacks will include insertion of malicious sdb configurations into the native system sdb files, and the use of wildcards in file names (but this would require much more reverse engineering). This will likewise require defenders to continue to adapt and innovate to better defend their environments.\nConclusion Defenders such as Incident Responders and Malware Analysts should be aware of how shim databases can be used to leverage rootkit-like functionality from the features found in the Application Compatibility Toolkit. Malicious shim database files have been observed in the wild with increasing frequency and complexity. Given the features and ease-of-use found in the ACT, attackers will soon start utilizing the more advanced methods demonstrated here, which has prompted me to create and distribute the tools necessary to prevent, detect, and combat this new avenue of post-exploitation.\nPage | 18\nBibliography Aquilino, B. (2014, 6 30). Beware BlackEnergy If Involved In Europe/Ukraine Diplomacy. Retrieved from\nF-Secure: https://www.f-secure.com/weblog/archives/00002721.html\nAuthor. (2015, 2 8). Upatre downloader malware using AppCompat for automatic UAC elevation.\nRetrieved from Bleen. All the integers between 6 and 7:\nhttp://lupwa.org/bleen/2015/02/08/upatre-downloader-malware-using-appcompat-for- automatic-uac-elevation/\nBospoort, M. v. (2009, 7 23). Disabling a Shim. Retrieved from Maarten's blog:\nhttp://blogs.msdn.com/b/maartenb/archive/2009/07/24/disabling-a-shim.aspx\nChen, R. (2005, 8 24). Buying an entire Egghead Software store. Retrieved from The Old New Thing -\nMSDN Blogs: http://blogs.msdn.com/b/oldnewthing/archive/2005/08/24/455557.aspx\nCherepanov, A. (2014). Roaming tiger. Zeronights 2014 (p. 20). Moscow:\nhttp://2014.zeronights.org/assets/files/slides/roaming_tiger_zeronights_2014.pdf.\nCherepanov, R. L. (2014, 1 25). Last-minute paper: Back in BlackEnergy: 2014 targeted attacks in the\nUkraine and Poland. Retrieved from Virus Bulletin:\nhttps://www.virusbtn.com/conference/vb2014/abstracts/LM3-LipovskyCherepanov.xml\nDr. WEB. (2014, 4 9). Retrieved from BackDoor.Gootkit.112—a new multi-purpose backdoor:\nhttps://news.drweb.com/show/?i=4338&lng=en\nDrapeau, P. (2015, 1 16). Firewall Rule Changes and Compatibility Trickery. Retrieved from Kill Chain. The\nConfer Blog: http://www.confer.net/kill-chain-the-confer-blog/80-firewall-rule-changes-and- compatibility-trickery\nErickson, J. (2014). Persist It: Using and Abusing Microsoft Fix It Patches. BlackHat Asia (p. 14).\nSingapore: https://www.blackhat.com/docs/asia-14/materials/Erickson/WP-Asia-14-Erickson- Persist-It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf.\nF-Secure. (2015). BLACKENERGY & QUEDAGH. Retrieved from f-secure.com: https://www.f-\nsecure.com/documents/996508/1030745/blackenergy_whitepaper.pdf\nGraham, C. (2014, 5 27). Shimming Your Way Past UAC. Retrieved from Digital Defense Incorporated:\nhttp://blog.ddifrontline.com/4#more-4\nHancke, P. (2009). The Windows 7 App Compat Story. Retrieved from Microsoft Tech-ed Afraca 2009:\nhttp://download.microsoft.com/download/6/7/3/673B71D0-6D4F-4591-9940- D33DF9135487/WCL304_Win7_app_compat_story_Hancke.pptx\nHaruyama, T. (2015, 2 26). Github. Retrieved from TakahiroHaruyama / openioc_scan:\nhttps://github.com/TakahiroHaruyama/openioc_scan/blob/master/IOCs/generic/cdcd5fdb- fcd3-4947-8c76-d2fbdc1b5f82_UAC_COM.ioc\nhFireF0X. (2015, 1 9). FireF0X. Retrieved from Twitter:\nhttps://twitter.com/hfiref0x/status/553777371682443264\nPage | 19\nInocencio, R. (2014, 11 5). Banking Trojan DRIDEX Uses Macros for Infection. Retrieved from Security Intelligence Blog: http://blog.trendmicro.com/trendlabs-security-intelligence/banking-trojan- dridex-uses-macros-for-infection/\nMicrosoft. (2009, 10 29). Deploy an Application Compatibility Database by Using SDBInst. Retrieved from\nTechNet: https://technet.microsoft.com/en-us/library/ee732408(v=WS.10).aspx\nMicrosoft Support . (2015, 4 29). Retrieved from Update to force a UAC prompt when a customized .sdb\nfile is created in Windows: https://support.microsoft.com/en-us/kb/3045645\nmsft-mmpc. (2013, 10 31). Upatre: Emerging Up(d)at(er) in the wild. Retrieved from Microsoft Malware Protect Center: http://blogs.technet.com/b/mmpc/archive/2013/10/31/upatre-emerging-up-d- at-er-in-the-wild.aspx\nOllie. (2012, 4 28). Windows AppCompat Research Notes - Part 1. Retrieved from Research, Develop,\nAssess, Consult & Educate: http://recxltd.blogspot.co.uk/2012/04/windows-appcompat- research-notes-part-1.html\nPernet, C. (2015, 3 30). Fake Judicial Spam Leads to Backdoor with Fake Certificate Authority. Retrieved\nfrom TrendLabs Security Intelligence Blog: http://blog.trendmicro.com/trendlabs-security- intelligence/fake-judicial-spam-leads-to-backdoor-with-fake-certificate-authority/\nSS_TSS@mail.ru. (2012, May). Journal of Computer Hooligans. Retrieved from\nftp://os2.fannet.ru/fileechoes/programming/XA_159.PDF\nStewart, H. (2007, 11 3). Shim Database to XML. Retrieved from Setup & Install by Heath Stewart:\nhttp://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx\nBaggett, M. (2013, February 23).  2013 Posts and Publications. Retrieved October 23, 2013, from In\nDepth Defense: http://www.indepthdefense.com/2013/02/2013-posts-and-publications.html\nIonescu, A. (2007, May 20).  Secrets of the Application Compatilibity Database (SDB) – Part 1. Retrieved\nApril 15, 2015, from Alex Ionescu's Blog: http://www.alex-ionescu.com/?p=39\nIonescu, A. (2007, May 21).  Secrets of the Application Compatilibity Database (SDB) – Part 2. Retrieved\nApril 15, 2015, from Alex Ionescu's Blog: http://www.alex-ionescu.com/?p=40\nIonescu, A. (2007, May 26).  Secrets of the Application Compatilibity Database (SDB) – Part 3. Retrieved\nApril 15, 2015, from Alex Ionescu’s Blog: http://www.alex-ionescu.com/?p=41\nMark Russinovich, B. C. (2013, August 1).  Autoruns for Windows v11.70. Retrieved September 5, 2013, from Windows Sysinternals: http://technet.microsoft.com/en-us/sysinternals/bb963902.aspx\nMicrosoft. (2013, September 6).  !chkimg. Retrieved October 2, 2013, from Dev Center:\nhttp://msdn.microsoft.com/en-us/library/windows/hardware/ff562217%28v=vs.85%29.aspx\nMicrosoft. (2013, October 1).  Application Compatibility Database. Retrieved October 23, 2013, from\nMicrosoft Developer Network:http://msdn.microsoft.com/library/bb432182.aspx\nMicrosoft. (2013).  Fix it Solution Center. Retrieved 2013 24-October from Microsoft Support:\nhttp://support.microsoft.com/fixit/\nPage | 20\nMicrosoft. (2012, October 1).  Microsoft Security Advisory: Vulnerability in Microsoft XML Core Services\ncould allow remote code execution. Retrieved September 5, 2013, from Microsoft Support:\nhttp://support.microsoft.com/kb/2719615\nMicrosoft. (2012, December 7).  Shim Database Types. Retrieved September 5, 2013, from Microsoft\nDeveloper Network: http://msdn.microsoft.com/en-us/library/bb432483%28v=vs.85%29.aspx\nSikka, N. (2013, September 17).  CVE-2013-3893: Fix it workaround available. Retrieved October 02,\n2013, from Security Research & Defense:\nhttp://blogs.technet.com/b/srd/archive/2013/09/17/cve-2013-3893-fix-it-workaround-available.aspx\nStewart, H. (2007, November 3).  Shim Database to XML. Retrieved September 5, 2013, from Setup &\nInstall by Heath Stewart: http://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx\nPage | 21",
+  "ID_list": [
+    "T1546.011"
+  ],
+  "Name_list": [
+    "AppInit DLLs",
+    "Code Signing",
+    "Execution",
+    "Graphical User Interface",
+    "Hooking",
+    "Persistence",
+    "Phishing",
+    "Rootkit",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1546.011": [
+      {
+        "sentence": "Malicious Application Compatibility Shims Table of Contents Introduction ..................................................................................................................................................",
+        "score": 0.4285
+      },
+      {
+        "sentence": "2 How the Windows Image Loader works with the Shim Engine ....................................................................",
+        "score": 0.5377
+      },
+      {
+        "sentence": "14 Current Analysis Tools.............................................................................................................................",
+        "score": 0.3024
+      },
+      {
+        "sentence": "15 Forensics Tools ........................................................................................................................................",
+        "score": 0.3008
+      },
+      {
+        "sentence": "18 Bibliography ................................................................................................................................................",
+        "score": 0.3168
+      },
+      {
+        "sentence": "19 Page | 1 Introduction One of the many reasons why Microsoft has dominated the personal computer market is because they have gone to extraordinary lengths to ensure backwards compatibility in (most) of their products, and many third party products.",
+        "score": 0.4846
+      },
+      {
+        "sentence": "This is currently implemented by the Application Compatibility Framework (ACF) which holds a position of considerable tactical value on modern computer systems because, by design, the ACF is capable of intercepting application API calls and manipulating the Portable Executable (PE) file loading process.",
+        "score": 0.6638
+      },
+      {
+        "sentence": "Actors in the wild have been observed leveraging a few of the simple components of the ACF and it is expected that the number of exploitations will rise and grow in sophistication.",
+        "score": 0.3711
+      },
+      {
+        "sentence": "Some of these more advanced malicious techniques will be demonstrated and I will be releasing the source code of several new tools that help mitigate this new threat.",
+        "score": 0.4225
+      },
+      {
+        "sentence": "Background Raymond Chen is a developer on the Windows Team at Microsoft and maintains a blog called ‘The Old New Thing’ in which he describes many fascinating stories and deep technical insights into the history of Windows.",
+        "score": 0.4891
+      },
+      {
+        "sentence": "On August 24th 2005 he wrote: “During the development of Windows 95, application compatibility was of course a very high priority.",
+        "score": 0.5259
+      },
+      {
+        "sentence": "To make sure that coverage was as broad as possible, the development manager for Windows 95 took his pick-up truck, drove down to the local Egghead Software store (back when Egghead still existed), and bought one copy of every single PC program in the store...",
+        "score": 0.3797
+      },
+      {
+        "sentence": "In exchange for taking responsibility for ensuring that Windows 95 was compatible with your adopted programs, you [the developer] got to keep them [the applications] after Windows 95 shipped.” (Chen, 2005) In any given Windows 7 machine one can find hard coded references to ‘3DFrogFrenzy’, ‘Acrobat5’, ‘WordPerfect8’, ‘Works99’ and many other applications dating back to the early 1990’s.",
+        "score": 0.5998
+      },
+      {
+        "sentence": "These programs do not correctly function on modern Windows machines, so in an effort to compensate for poor coding (on all sides), Microsoft has sacrificed security for developer convenience by allowing anyone to create and install Shim database (sdb) files.",
+        "score": 0.5919
+      },
+      {
+        "sentence": "These database files contain the specific details on how Windows should manipulate (in other words ‘shim’) a target program with predefined ‘Fixes’.",
+        "score": 0.5347
+      },
+      {
+        "sentence": "The Application Compatibility Toolkit (ACT) contains hundreds of configurations for thousands of programs (like those listed above) primarily contained within the file %WINDIR%\\AppPatch\\sysmain.sdb.",
+        "score": 0.638
+      },
+      {
+        "sentence": "Microsoft provides a free tool called the Application Compatibility Administrator which allows users to create and apply specific Fixes such as ‘DisableNX’, ‘ModifyShellLinkPath’, ‘VirtualRegistry’, ‘DisableAdvancedRPCClientHardening’, ‘ForceAdminAccess’, ‘InjectDll’ (my favorite), ‘DisableSeh’, ‘ShellExecuteXP’ and many others.",
+        "score": 0.6149
+      },
+      {
+        "sentence": "Page | 2 Figure 1.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "The Application Compatibility Toolkit (ACT) – Compatibility Administrator The Application Compatibility Toolkit can be used to create and install a shim by guiding the user through a Wizard which first asks for a path to the target executable.",
+        "score": 0.6872
+      },
+      {
+        "sentence": "The ACT will then analyze the file for criteria to filter on such as file name, file size, link date, PE checksum, etc.",
+        "score": 0.3975
+      },
+      {
+        "sentence": "Then the user will be presented with a list of ‘Modes’ where each ‘Mode’ is effectively a bundle of individual Fixes that can be applied to a process and its children (A ‘Mode’ or ‘Compatibility Mode’ are sometimes referred to as a ‘Layer’).",
+        "score": 0.5153
+      },
+      {
+        "sentence": "An example of a Mode would be ‘VistaSP1VersionLie’ as opposed to a Fix such as, ‘Emulate Cursor’.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "After the Mode screen, the wizard will show a list of Fixes.",
+        "score": 0.4254
+      },
+      {
+        "sentence": "By default the 32-bit Compatibility Administrator will show a list of 367 Fixes, however if the Compatibility Administrator is executed from the command line with the ‘/x’ parameter the list of Fixes will increase to 811 to include undocumented Fixes.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "After finishing the wizard, a user can save the sdb file, and then install it by right clicking on the database icon and clicking ‘Install’.",
+        "score": 0.4269
+      },
+      {
+        "sentence": "The Application Compatibility Toolkit (ACT) – Compatibility Administrator Page | 3 The installer will create a GUID, copy the sdb file into %SystemRoot%\\AppPatch\\Custom\\<GUID>.sdb then add a registry key using an internal database name in the format of HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Custom\\<GUID>.sdb and \\InstalledSDB\\<GUID>.sdb.",
+        "score": 0.5264
+      },
+      {
+        "sentence": "If everything is successful, the installer will add an entry to the Add/Remove programs list.",
+        "score": 0.447
+      },
+      {
+        "sentence": "Obviously if a user has administrative access, they could simply add the keys to the registry directly.",
+        "score": 0.3131
+      },
+      {
+        "sentence": "Registry keys:  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Custom  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\InstalledSDB Figure 2 Install Registry Keys (1) Figure 3.",
+        "score": 0.4857
+      },
+      {
+        "sentence": "Install Registry Keys (2) Default Install File Locations  %WINDIR%\\AppPatch\\Custom\\  %WINDIR%\\AppPatch\\Custom\\Custom64\\ Figure 4 - Default Install Path.",
+        "score": 0.4949
+      },
+      {
+        "sentence": "Even a UNC path After the sdb file installation is complete all processes launched after that point will be subjected to the file matching rules of this shim database.",
+        "score": 0.5896
+      },
+      {
+        "sentence": "For efficiency reasons, Windows caches metadata for each executed file and stores that data in the Application Compatibility Cache.",
+        "score": 0.5416
+      },
+      {
+        "sentence": "In effect, the cache is a record of all executed processes since the computer was last rebooted.",
+        "score": 0.4079
+      },
+      {
+        "sentence": "The forensic value from this data is used by some tools such as Mandiant’s Page | 4 Shim Cache Parser ® and was the subject of the MS15-001 elevation of privilege vulnerability in January 2015.",
+        "score": 0.5438
+      },
+      {
+        "sentence": "Seven months prior to the MS15-001 patch, a forensics expert named Chris Graham published a blog post titled, ‘Shimming Your way Past UAC’.",
+        "score": 0.4548
+      },
+      {
+        "sentence": "In this entry he provided a detailed walk through (including source code) on how to generate and install an sdb file that would use the ‘RedirectEXE’ Fix to redirect the execution (while retaining the privileges) of a target executable (Graham, 2014).",
+        "score": 0.5598
+      },
+      {
+        "sentence": "The processes that are targeted by this method rely on the fact that these executables are signed by Microsoft and have a manifest file property of <autoElevate>true</autoElevate> such as SndVol.exe.",
+        "score": 0.5448
+      },
+      {
+        "sentence": "The MS15-001 did nothing to prevent this UAC bypass technique and as a result it is still being exploited in the wild.",
+        "score": 0.3708
+      },
+      {
+        "sentence": "However, in April 2015 Microsoft did push out an optional update (KB3045645) which removed the auto-elevating manifest property from sdbinst.exe (the system sdb installer).",
+        "score": 0.5512
+      },
+      {
+        "sentence": "More details can be found in the Defenses section.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "Shims are heavily integrated into Windows for normal operations, such as auto elevating any executable matching the filename *instal*.",
+        "score": 0.5384
+      },
+      {
+        "sentence": "Microsoft also uses shims to test and fix their own products such as Outlook and Word rather than updating/patching them the traditional way.",
+        "score": 0.6104
+      },
+      {
+        "sentence": "When evaluating compatibility issues with Windows Vista, the ACT was used to collect data via shimming exeplorer.exe and other system processes (Hancke, 2009).",
+        "score": 0.5433
+      },
+      {
+        "sentence": "Primarily Microsoft uses shims to implement most of the functionality in products such as the Enhanced Mitigation Experience Toolkit (EMET) and Windows Fixit patches which are used to mitigate critical vulnerabilities as a stopgap measure between patch cycles.",
+        "score": 0.7022
+      },
+      {
+        "sentence": "Shim strengths from an attacker’s point of view are:  Nearly every process is vulnerable.",
+        "score": 0.3305
+      },
+      {
+        "sentence": "This is useful because the ‘InjectDll’ is not a predefined Fix for 64-bit shims.  With a few exceptions, all modern Windows OS versions support shims and natively ship with the auto-elevated shim database installer sdbinst.exe.",
+        "score": 0.8118
+      },
+      {
+        "sentence": "The native installer will add an entry in the Add/Remove programs list but this can be bypassed by directly adding to the appropriate keys.",
+        "score": 0.4417
+      },
+      {
+        "sentence": "Shim weaknesses from an attacker’s pointer of view:  An attacker needs administrative rights to execute the shim database installer and/or write to the necessary registry keys.",
+        "score": 0.5819
+      },
+      {
+        "sentence": "Page | 5  Programs only need to change their names to avoid being shimmed.",
+        "score": 0.6872
+      },
+      {
+        "sentence": "There are no currently available tools that allow wildcards in file names, but the functionality does exist as seen in the native shim databases such as sysmain.sdb.  Shims only run in user-mode so they cannot manipulate kernel-mode modules.",
+        "score": 0.6416
+      },
+      {
+        "sentence": "How the Windows Image Loader works with the Shim Engine When a new process needs to be created, a program will use one of the functions in ntdll.dll, such as CreateProcess().",
+        "score": 0.5829
+      },
+      {
+        "sentence": "To determine if the new process needs to be shimmed, apphelp.dll is loaded and two registry keys might be opened or queried:  HKCM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers If the application needs to be shimmed an undocumented __ COMPAT_LAYER environment variable will be set in the new child process.",
+        "score": 0.5764
+      },
+      {
+        "sentence": "The kernel creates the various data structures, sets up the process space then loads ntdll.dll into that new process space.",
+        "score": 0.6065
+      },
+      {
+        "sentence": "In that space, the kernel will set the context struct to begin executing the ntdll.dll function called LdrInitializedThunk().",
+        "score": 0.5992
+      },
+      {
+        "sentence": "If the child process needs to be shimmed, both the parent and child processes will load apphelp.dll and verify the sdb file: Figure 5 Confusing procmon log output of a program named 'LaunchWithoutShim.exe' executing a program called, 'HelloWorldShimmed.exe'.",
+        "score": 0.666
+      },
+      {
+        "sentence": "Procmon is a part of SysInternals by Mark Russinovich Page | 6 If the sdb file cannot be found or opened the Application Event Log will record, ‘Unable to open shim database version registry key’.",
+        "score": 0.5742
+      },
+      {
+        "sentence": "Assuming the sdb file is found and loaded without error, it is then parsed to further verify that the file should indeed be shimmed by checking the sdb file for more name filters and other file criteria; there is always at least one filter, but by default it is a match-all wildcard character: *.",
+        "score": 0.5258
+      },
+      {
+        "sentence": "The loaded sdb file will be further parsed to find the specific Fix (or Fixes) that will be applied along with a reference to a DLL where that Fix is implemented.",
+        "score": 0.5831
+      },
+      {
+        "sentence": "The specified DLL is then loaded into the suspended process, and allowed to execute DllMain() following the initialization of the other system DLLs.",
+        "score": 0.5642
+      },
+      {
+        "sentence": "If the Fix does not reference a DLL then the native system shim database(s) are loaded in order find the appropriate DLL where that particular fix is implemented.",
+        "score": 0.6913
+      },
+      {
+        "sentence": "Most of the predefined Fixes are found in %WINDIR%\\AppPatch\\sysmain.sdb and most of those fixes are implemented in %WINDIR%\\AppPatch\\AcGeneral.dll.",
+        "score": 0.6117
+      },
+      {
+        "sentence": "If the Fix is not predefined in sysmain.sdb it is called a Custom Fix.",
+        "score": 0.4605
+      },
+      {
+        "sentence": "Anyone can create a custom fix by creating a DLL which exports the following functions:  GetHookAPIs(char *,ushort *,ulong *)  NotifyShims(char *, unsigned __int16 *, unsigned __int32 *) The DLL containing the Fix is typically hooks the IAT of the target to intercept specific functions.",
+        "score": 0.5306
+      },
+      {
+        "sentence": "For example the VirtualRegistry Fix will hook all registry related calls and manipulate them accordingly.",
+        "score": 0.4814
+      },
+      {
+        "sentence": "GetProcAddress() is also hooked to anticipate dynamic calls to the would-be hooked functions.",
+        "score": 0.4636
+      },
+      {
+        "sentence": "Sdb files have undocumented features such as hot patching which is currently only used by Microsoft to implement the functionality in Fixit patches (discussed later).",
+        "score": 0.5512
+      },
+      {
+        "sentence": "After ntdll.dll loads the AppInit DLLs in the child process, it then loads the shim engine which implemented with apphelp.dll.",
+        "score": 0.7179
+      },
+      {
+        "sentence": "This shim engine will clear the environment variable __COMPAT_LAYER then apply the Fixes and patches (if any) to the target module.",
+        "score": 0.5595
+      },
+      {
+        "sentence": "It is possible to have more than one sdb apply Fixes to the same process but this leads to undefined behavior due to the uncertain order in which the shims are applied.",
+        "score": 0.6883
+      },
+      {
+        "sentence": "Prior Work The earliest mention of shims relating to security was in 2007 when a software engineer named Alex Ionescu started to publish a number of blog posts titled, ‘Secrets of the Application Compatilibity Database (SDB)’.",
+        "score": 0.6029
+      },
+      {
+        "sentence": "This was planned to be a 7 part series but unfortunately Ionescu stopped after the fourth post.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "In the years preceding and following, a small number of disparate bloggers posted various technical details and mentions of shims, but typically with the focus of application compatibility.",
+        "score": 0.5522
+      },
+      {
+        "sentence": "Below is a general timeline of major shim references: 1.",
+        "score": 0.5742
+      },
+      {
+        "sentence": "A Microsoft Employee named Chris Jackson’s started an MSDN blog called, ‘The App Compat Guy’.",
+        "score": 0.3014
+      },
+      {
+        "sentence": "Around January 2007 he began posting information about the ACT and blogging about shims. http://blogs.msdn.com/b/cjacks/ 2.",
+        "score": 0.4668
+      },
+      {
+        "sentence": "Ionescu ‘Secrets of the Application Compatilibity Database (SDB)’ www.alex-ionescu.com/?p=39 Page | 7 3.",
+        "score": 0.5004
+      },
+      {
+        "sentence": "A blogger with the handle ‘wedday’ posted some technical details about how the shim engine worked based on the shim engine’s debug output. http://wedday.blogspot.co.uk/2008/08/shimeng.html 4.",
+        "score": 0.54
+      },
+      {
+        "sentence": "Another Microsoft Employee named ‘Maarten van de Bospoort’ wrote a blog post titled ‘Disabling a Shim’.",
+        "score": 0.4913
+      },
+      {
+        "sentence": "However his solution was to disable the shim engine via group policy which is not advised because Windows relies on the shim engine for EMET and Fixit patches (discussed later). (Bospoort, 2009) http://blogs.msdn.com/b/maartenb/archive/2009/07/24/disabling-a-shim.aspx 5.",
+        "score": 0.6165
+      },
+      {
+        "sentence": "A developer who goes by the name, ‘Jochen Kalmbach’ posted a tool that will display the shims that would be activated by a particular file. http://blog.kalmbach-software.de/2010/02/22/the-shim-database/ 6.",
+        "score": 0.6044
+      },
+      {
+        "sentence": "A company named ‘Recx’ posted a compilation of research notes titled ‘Windows AppCompat Research Notes’ where deep technical insight and control flow of the shim engine was discussed. (Ollie, 2012) http://recxltd.blogspot.co.uk/2012/04/windows-appcompat-research-notes-part- 1.html 7.",
+        "score": 0.6505
+      },
+      {
+        "sentence": "Microsoft updated its Application Compatibility Toolkit (ACT) Technical Reference where background information is given on the ACT along with details of individual fixes.",
+        "score": 0.588
+      },
+      {
+        "sentence": "This article also links to the AppHelp.dll documentation. https://technet.microsoft.com/en-us/library/hh825181.aspx 8.",
+        "score": 0.4918
+      },
+      {
+        "sentence": "May 2012. “Shim: A New Method of Injection” by the Journal of Computer Hooligans ftp://os2.fannet.ru/fileechoes/programming/XA_159.PDF 9.",
+        "score": 0.4841
+      },
+      {
+        "sentence": "Mark Baggett gave a talk at DerbyCon titled, ‘Windows – Own3d by Default’.",
+        "score": 0.3863
+      },
+      {
+        "sentence": "He is the first to discuss the use of shims in a post exploitation context. http://www.irongeek.com/i.php?page=videos/derbycon3/4206-windows-0wn3d-by- default-mark-baggett 10.",
+        "score": 0.6903
+      },
+      {
+        "sentence": "March 2014.",
+        "score": 0.3077
+      },
+      {
+        "sentence": "Jon Erickson presented at Black Hat Asia ‘Persist-It – Using and Abusing Microsoft Fix It Patches’ where he describes how Fixit patches work and how his tool can be used to analyze them. (Erickson, 2014) https://www.blackhat.com/docs/asia-14/materials/Erickson/Asia-14-Erickson-Persist- It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf https://www.blackhat.com/docs/asia-14/materials/Erickson/WP-Asia-14-Erickson- Persist-It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf 11.",
+        "score": 0.5022
+      },
+      {
+        "sentence": "Graham Posts ‘Shimming your Way Past UAC’ (Graham, 2014).",
+        "score": 0.4657
+      },
+      {
+        "sentence": "This provided the first public source code reference for how the ACT can be used to bypass a UAC prompt. http://blog.ddifrontline.com/4#more-4 12.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "Jon Erickson presents ‘The active use and exploitation of Microsoft's Application Compatibility Framework’ at SysScan 360 and CodeBlue in Japan. http://sdb.io/erickson-codeblue.pdf 13.",
+        "score": 0.5137
+      },
+      {
+        "sentence": "Sean Pierce (me) Shmoocon Epilogue “Forensic Analysis of Advanced Persistence through the Application Compatibility Toolkit” Page | 8 In the wild The frame of reference for leveraging malicious shims is centered around post exploitation where it is assumed the attacker has administrative privileges in order to write the necessary registry keys to install shims on a system wide basis.",
+        "score": 0.7214
+      },
+      {
+        "sentence": "Listed below are numerous examples of malicious shims being used in cyber-espionage and cyber-crime activities.",
+        "score": 0.5698
+      },
+      {
+        "sentence": "While the ACT offers many avenues to perform arbitrary code execution, attackers routinely use only a few of the basic Fixes: BlackEnergy: There are variants of this malware that have been used in cyber- crime & cyber-espionage and has been under continuous development since June 2007.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "Modern variations support components such as rootkits and 64-bit plugins.",
+        "score": 0.4466
+      },
+      {
+        "sentence": "In April 2013 the authors responsible for BlackEnergy added the UAC bypass ‘RedirectEXE’ Fix making BlackEnergy the first publically known malicious use of the ACT.",
+        "score": 0.477
+      },
+      {
+        "sentence": "They also used the ‘DisableNXShowUI’ Fix to disable Data Execution Prevention (DEP) in its host process. (F-Secure, 2015) (Aquilino, 2014) (Cherepanov R.",
+        "score": 0.5121
+      },
+      {
+        "sentence": "L., 2014) BlackEnergy 2 hash: 26b9816b3f9e2f350cc92ef4c30a097c6fec7798 BlackEnergy 3 hash: 78636f7bbd52ea80d79b4e2a7882403092bbb02d GootKit: This is a backdoor that was initially observed in April of 2014 and is purportedly created by the actor ‘MzH’ (hFireF0X, 2015).",
+        "score": 0.4462
+      },
+      {
+        "sentence": "It used the UAC bypassing ‘RedirectEXE’ Fix to target the auto-elevated ‘cliconfg.exe’ (SQL Server Client Network Utility).",
+        "score": 0.3986
+      },
+      {
+        "sentence": "In March 2015, the malware author(s) leveraged the in-memory patching as discussed by Jon Erickson at his talks at BlackHat Asia in August 2014.",
+        "score": 0.5077
+      },
+      {
+        "sentence": "The authors of Gootkit most likely used Erickson’s publically available sample code to generate the sdb files (23 in all), but for unknown reasons the Gootkit authors did not use Erickson’s stealth installation technique (they still use the traditional native sdb installer, sdbinst.exe). (Pernet, 2015) (Dr.",
+        "score": 0.5204
+      },
+      {
+        "sentence": "WEB, 2014) (Erickson, 2014) GootKit: f9772fcfbcaac9c4873989a1759a5c654eec440e Roaming Tiger: This is a cyber-espionage group outed by Eset’s Anton Cherepanov at ZeroNights 2014.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "Cherepanov observed Roaming Tiger targeting countries belonging to the Russia and Commonwealth of Independent States (CIS) with phishing documents to get initial code execution which then used the ACT UAC bypass technique and then installed ACT enabled persistence.",
+        "score": 0.386
+      },
+      {
+        "sentence": "What makes this case unique is that Roaming Tiger registered specially crafted 32-bit and 64-bit shim databases for ‘explorer.exe’ and two other processes.",
+        "score": 0.705
+      },
+      {
+        "sentence": "These sdb files described custom Fixes named ‘AcProtect_Apps’ and specified that those Fixes were contained within the library ‘AcProtect.dll’ as seen in Figure 6.",
+        "score": 0.5395
+      },
+      {
+        "sentence": "As a result the AcProtect.dll was injected into every target process that matched the sdb criteria. (Cherepanov A. , 2014) Page | 9 Figure 6 sdb-explorer showing the shim (Fix) name and DLL reference (bottom two boxes), and the DLL file reference (top) Search Protect by Conduit: This has been classified by multiple anti-virus venders as a Potentially Unwanted Program (PUP) starting in August 2013.",
+        "score": 0.7262
+      },
+      {
+        "sentence": "In January of 2015 Search Protect was observed using the ACT for targeted persistence by creating a 32-bit shim layer named ‘VC32Ldr♦☻’ which applies the ‘InjectDll’ Fix to ‘chrome.exe’, ‘firefox.exe’, ‘iexplorer.exe’, ‘software_remove_tool.exe’, and ‘software_reporter_tool.exe’.",
+        "score": 0.7784
+      },
+      {
+        "sentence": "For the 64-bit processes, a custom Fix named, ‘VC64Shim’ was defined as being in the ‘VCLdr64.dll’; similar to Roaming Tiger.",
+        "score": 0.6133
+      },
+      {
+        "sentence": "This resulted in that DLL being injected into ‘iexplore.exe’, ‘chrome.exe’, and ‘explorer.zza’.",
+        "score": 0.4965
+      },
+      {
+        "sentence": "The custom fix was most likely used because there is no predefined ‘InjectDll’ Fix for 64-bit processes.",
+        "score": 0.5831
+      },
+      {
+        "sentence": "By using the sdb-explorer.exe tool developed by Jon Erickson of iSIGHT Partners, the output below will show that the Fix injected \\\\.\\globalroot\\systemroot\\apppatch\\nbin\\vc32loader.dll into every process that matched one of the target filenames listed above.",
+        "score": 0.6327
+      },
+      {
+        "sentence": "Search Protect shim: 175abbeaf62f08716f7975190e550b95 Page | 10 Figure 7 sdb-explorer output for Search Protect shim Upatre: This was first observed in August 2013 (msft-mmpc, 2013) and acts as a downloader for other malware such as Zbot, Dyre, and Dridex.",
+        "score": 0.6578
+      },
+      {
+        "sentence": "As early as February 2015 Upatre started installing other malware with administrative privileges by using Graham’s UAC bypass technique (Inocencio, 2014) (Author, 2015).",
+        "score": 0.4496
+      },
+      {
+        "sentence": "Upatre hash: 1d38c362198ad67329fdf58b4743165e DRIDEX: This is the successor to CRIDEX, both of which focus on stealing personal and banking information.",
+        "score": 0.381
+      },
+      {
+        "sentence": "This latest variant was upgraded to use webinjects, more evasion techniques and relies on spam or Upatre for delivery.",
+        "score": 0.3598
+      },
+      {
+        "sentence": "At the same time Upatre implemented Graham’s code, Dridex also started using it but in a slightly different manner: Unlike Upatre, Dridex targeted ‘iscsicli.exe’ and used the ‘RedirectEXE’ Fix to execute a batch script to simply open up a port in the Window’s Firewall.",
+        "score": 0.3802
+      },
+      {
+        "sentence": "After that, the batch script uninstalled the shim and destroyed all evidence of there being a shim (Drapeau, 2015).",
+        "score": 0.4621
+      },
+      {
+        "sentence": "This is most likely due to the fact that Graham’s technique used the native ‘sdbinst.exe’ installer, which adds an entry into the add/remove programs’ list.",
+        "score": 0.5253
+      },
+      {
+        "sentence": "However there are still over 800 more ‘Fixes’ and ‘Modes’ that can be used for an array of offensive purposes, the examples listed below will be demonstrated during the talk.",
+        "score": 0.4267
+      },
+      {
+        "sentence": "Incident Responders and Malware Analysts need to be aware of how shims can modify a process before and during execution, because malicious shims are capable of leveraging many rootkit-like functions:  Evasion, and System Integrity Subversion: The autoruns.exe utility (part of the SysInternals Suite) is a tool created by Mark Russinovich which displays many of the common auto-start locations for executables in Windows.",
+        "score": 0.6921
+      },
+      {
+        "sentence": "Autoruns does not detect shims as having any kind of auto-start capability and furthermore can be shimmed to hide auto-start locations such as registry keys with the ‘VirtualRegistry’ Fix.",
+        "score": 0.5911
+      },
+      {
+        "sentence": "This type of tool subversion is not unheard of but what makes the ACT uniquely powerful is that the malicious shim could be developed in as little as 30 seconds.",
+        "score": 0.6163
+      },
+      {
+        "sentence": "The same process can be reapplied for both 64-bit and 32-bit versions of regedit.exe (the native Windows registry editor).  Manipulating a Process with Redirections: Fixes such as ‘VirtualRegistry’, ‘CorrectFilePaths’, ’VirtualizeDeleteFile’, ‘RedirectShortcut’ and ‘APILogger’.",
+        "score": 0.5898
+      },
+      {
+        "sentence": "The last shim will allow the denial or redirection of any service that the process was attempting to start.  Disabling Defenses: Shims can also incorporate simple Fixes such as ‘DisableWindowsDefender’, ‘DisableASLR’, 'DisableAdvancedRPCClientHardening', ‘DisableSeh’, and ‘DisableNX’ which would be useful when executing malware or attempting to exploit a vulnerability.",
+        "score": 0.5627
+      },
+      {
+        "sentence": "This is especially powerful when one considers that vulnerabilities like MS08-067 can simply be restored as Mark Baggett mentioned in his 2013 DerbyCon talk (Baggett, 2013).  Malware Obfuscation: As a malware analyst this section has been divided into three categories based on the target/host executable: o Benign Executables – The shimmed executable can be a generic program that has been signed and/or whitelisted.",
+        "score": 0.6712
+      },
+      {
+        "sentence": "The classic ‘InjectDll’ and ‘LoadLibraryRedirect’ Fixes could be leveraged via a UNC path but patching in new code and/or utilizing existing code akin to ROP (Return Oriented Programming) chains would be a much stealthier and would be very difficult to analyze. o Dependently Malicious Executables – The target executable is purposefully built to work in tandem with its shim for malicious functionally.",
+        "score": 0.6688
+      },
+      {
+        "sentence": "As a result the target would fail to display any malicious behaviors without the malicious shim Page | 13 to interfere.",
+        "score": 0.6212
+      },
+      {
+        "sentence": "A classic example would be a subtle ‘kill switch’ being disabled via a shim like the ‘IgnoreException’ Fix.",
+        "score": 0.5754
+      },
+      {
+        "sentence": "Another example would be hot patching instructions to redirect program flow to malicious code existing elsewhere in the binary. o Obfuscated Executable – The target executable will fail completely without the shim.",
+        "score": 0.6713
+      },
+      {
+        "sentence": "This can be done with code injection and/or hot patching.",
+        "score": 0.4258
+      },
+      {
+        "sentence": "Such an executable could be partially or completely encrypted.  In-Memory Patching.",
+        "score": 0.551
+      },
+      {
+        "sentence": "This can offer the most wide array of stealth, defense and general anti-analysis capabilities: o Hooking any function o Add/Remove/Edit Instructions o Inserting strings/data where needed  Changing destination IP’s/hostnames  Changing/Randomizing Indicators o Early detection of debugging and/or other analysis tools.",
+        "score": 0.5415
+      },
+      {
+        "sentence": "One can learn more about what each documented Fix does here: https://technet.microsoft.com/en-us/library/cc765984(v=ws.10).aspx Tools Current Analysis Tools There are a number of publicly available tools that are indispensable when analyzing a suspicious sdb file.",
+        "score": 0.5123
+      },
+      {
+        "sentence": "Below is an inventory of the major ones:  Compatibility Administrator: The free tool by Microsoft to aid customers in creating, testing, and installing shim database files as mentioned above.",
+        "score": 0.5757
+      },
+      {
+        "sentence": "It is the only tool with a graphical user interface (GUI) and uses that to display sdb files in a logical manner.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "However it fails to open most custom made sdb files (such as those made with sdb-explorer) and fails to display most of the technical details or even the existence of in-memory patches and custom Fixes.",
+        "score": 0.5399
+      },
+      {
+        "sentence": "Link: http://www.microsoft.com/en-us/download/details.aspx?id=7352  sdbinst.exe: The native installer that the Compatibility Administrator uses to install sdb files.",
+        "score": 0.5362
+      },
+      {
+        "sentence": "Link: https://support.microsoft.com/en-us/kb/308235  sdb-explorer.exe: Created by Jon Erickson and for his BlackHat Asia talk ‘Using and Abusing Microsoft’s Fix It Patches’ in March 2014.",
+        "score": 0.5585
+      },
+      {
+        "sentence": "Unlike the Compatibility Administrator sdb-explorer displays tremendous amounts of technical information for a given shim database including disassembling the shims patch code for x86. sdb- explorer can also create in-memory patch code and stealthily install a shim by manually adding the required registry keys.",
+        "score": 0.6984
+      },
+      {
+        "sentence": "This technique bypasses the sdbinst safe guard of creating an entry in the Add/Remove Programs list.",
+        "score": 0.6085
+      },
+      {
+        "sentence": "Link: https://github.com/evil-e/sdb-explorer  sdb2xml.exe: - Created by Heath Stewart of Microsoft in November 2007 extracts some data as XML from a shim database. (Stewart, 2007) Link: http://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx Page | 14  shims.exe: - The only non-free application on this list.",
+        "score": 0.5988
+      },
+      {
+        "sentence": "Created by David Tomczak in March 2015, this tool similarly displays information about shim database files, shim statistics, and patch information in a much prettier format than the other tools, but does not automatically disassemble the patched bytes.",
+        "score": 0.6039
+      },
+      {
+        "sentence": "Link: https://tzworks.net/prototype_page.php?proto_id=33  python-sdb: - A python sdb file parser.",
+        "score": 0.4015
+      },
+      {
+        "sentence": "Created by William Ballenthin in July 2015, this tool similarly displays information about shim database files.",
+        "score": 0.4503
+      },
+      {
+        "sentence": "Link: https://github.com/williballenthin/python-sdb Defense Tools Targeted persistence is currently not detected as a form of persistence by any analysis tools (notably SysInternals’ autoruns).",
+        "score": 0.5328
+      },
+      {
+        "sentence": "As a result, the code that is being released attempts to uninstall malicious shims whenever they are detected.",
+        "score": 0.6495
+      },
+      {
+        "sentence": "Some tools even have built-in shim-defenses as proof of concept code for developers.",
+        "score": 0.587
+      },
+      {
+        "sentence": "The following are several examples of these tools: Shim-Process-Scanner: This scanner checks the memory of every running process for Application Compatibility Flags.",
+        "score": 0.4922
+      },
+      {
+        "sentence": "Features:  Will search other processes for shim flags  WMI event trigger on install registries Shim-Detector-Lite: Shims have total control of file redirection and Registry re-mapping for the target executable so this tool checks in-memory data structures for undocumented Application Compatibility Flags.",
+        "score": 0.612
+      },
+      {
+        "sentence": "Features:  Will detect and alert on installation of a custom shim database (sdb) Shim-Guard-Service: This tools starts as a service when Windows starts up and monitors the registry for any shim installations, then promptly uninstalls them.",
+        "score": 0.6389
+      },
+      {
+        "sentence": "Features:  Searches the Registry for installed sdb files  Searches each process for shim flags  Future: o Pull request for Volatility autoruns plugin o Add analyzing ability sdbFileIngestModule: Is a File Ingest Module that detects and analyzes sdb files for the open source digital forensics tool Autopsy which is a graphical interface for the Sleuth Kit tools.",
+        "score": 0.4952
+      },
+      {
+        "sentence": "Therefore 32-bit and 64-bit versions are available but will only work in their native code environment.",
+        "score": 0.484
+      },
+      {
+        "sentence": "All tools have been tested primarily on 64-bit Windows 7 Professional and should work on x86/x64 on Windows XP, Vista, Win7, and Win 8 depending on certain compatibility issues (joke).",
+        "score": 0.4473
+      },
+      {
+        "sentence": "Page | 16 Defenses Aside from using the given tools above, the only other technical defense from a malicious shim is by disabling the Shim Engine via Group Policy.",
+        "score": 0.4507
+      },
+      {
+        "sentence": "However, that is not recommended because shims are heavily integrated into Windows for normal operations; such as auto elevating any executable matching the filename *instal*.",
+        "score": 0.7121
+      },
+      {
+        "sentence": "In late April 2015, Microsoft released an optional update named KB3045645 for Windows 7 and above which, according to their description will “force a UAC prompt when a customized .sdb file is created in Windows” (Microsoft Support , 2015).",
+        "score": 0.4257
+      },
+      {
+        "sentence": "Contrary to the official description, this patch effectively removes the <autoElevate>true</autoElevate> property from the sdbinst.exe file and does not present a UAC prompt when a customized sdb files are created or applied to a process.",
+        "score": 0.5088
+      },
+      {
+        "sentence": "This prevents the traditional UAC bypass method used by GootKit and other malware families.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "However the update is classified as Optional so it will not install by default and sdbinst.exe was merely the official installer for sdb files, so a UAC bypass is still possible by manually adding the necessary registry keys.",
+        "score": 0.498
+      },
+      {
+        "sentence": "Optional Patch which will disable sdbinst.exe auto-elevation Prior to KB3045645 malware relied on sdbinst.exe auto-elevating to install a ‘RedirectEXE’ fix in order to bypass a UAC prompt.",
+        "score": 0.47
+      },
+      {
+        "sentence": "Barring the use of that patch, some system administrators may choose to increase the UAC security setting to “Always notify” but this will of course annoy users into allowing everything especially over long periods of time.",
+        "score": 0.3498
+      },
+      {
+        "sentence": "Page | 17 Figure 9 More details see http://support.microsoft.com/en-us/kb/975787 Moving Forward I would recommend that Microsoft treat sdb files as they do any other executable file and enable and enforce code signing.",
+        "score": 0.5712
+      },
+      {
+        "sentence": "I also recommend Windows Defender and other security software vendors to scan sdb files for suspicious attributes such as, ‘RedirectEXE’ for auto- elevated apps, ‘TerminateExe’ for security apps, and ‘InjectDll’ for any app.",
+        "score": 0.5233
+      },
+      {
+        "sentence": "Currently only the security venders GData and Kaspersky appear to be aware of malicious shims and will sometimes detect sdb files that are dropped by malware or sdb files attempting a UAC bypass.",
+        "score": 0.5381
+      },
+      {
+        "sentence": "This will likewise require defenders to continue to adapt and innovate to better defend their environments.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "Conclusion Defenders such as Incident Responders and Malware Analysts should be aware of how shim databases can be used to leverage rootkit-like functionality from the features found in the Application Compatibility Toolkit.",
+        "score": 0.7219
+      },
+      {
+        "sentence": "Malicious shim database files have been observed in the wild with increasing frequency and complexity.",
+        "score": 0.5758
+      },
+      {
+        "sentence": "Given the features and ease-of-use found in the ACT, attackers will soon start utilizing the more advanced methods demonstrated here, which has prompted me to create and distribute the tools necessary to prevent, detect, and combat this new avenue of post-exploitation.",
+        "score": 0.4316
+      },
+      {
+        "sentence": "Page | 18 Bibliography Aquilino, B. (2014, 6 30).",
+        "score": 0.3737
+      },
+      {
+        "sentence": "Beware BlackEnergy If Involved In Europe/Ukraine Diplomacy.",
+        "score": 0.4202
+      },
+      {
+        "sentence": "Retrieved from F-Secure: https://www.f-secure.com/weblog/archives/00002721.html Author. (2015, 2 8).",
+        "score": 0.4753
+      },
+      {
+        "sentence": "Upatre downloader malware using AppCompat for automatic UAC elevation.",
+        "score": 0.4156
+      },
+      {
+        "sentence": "Retrieved from Bleen.",
+        "score": 0.4504
+      },
+      {
+        "sentence": "All the integers between 6 and 7: http://lupwa.org/bleen/2015/02/08/upatre-downloader-malware-using-appcompat-for- automatic-uac-elevation/ Bospoort, M. v. (2009, 7 23).",
+        "score": 0.522
+      },
+      {
+        "sentence": "Disabling a Shim.",
+        "score": 0.458
+      },
+      {
+        "sentence": "Retrieved from Maarten's blog: http://blogs.msdn.com/b/maartenb/archive/2009/07/24/disabling-a-shim.aspx Chen, R. (2005, 8 24).",
+        "score": 0.4306
+      },
+      {
+        "sentence": "Buying an entire Egghead Software store.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "Retrieved from The Old New Thing - MSDN Blogs: http://blogs.msdn.com/b/oldnewthing/archive/2005/08/24/455557.aspx Cherepanov, A. (2014).",
+        "score": 0.4725
+      },
+      {
+        "sentence": "Cherepanov, R.",
+        "score": 0.3068
+      },
+      {
+        "sentence": "L. (2014, 1 25).",
+        "score": 0.302
+      },
+      {
+        "sentence": "Last-minute paper: Back in BlackEnergy: 2014 targeted attacks in the Ukraine and Poland.",
+        "score": 0.337
+      },
+      {
+        "sentence": "Retrieved from Virus Bulletin: https://www.virusbtn.com/conference/vb2014/abstracts/LM3-LipovskyCherepanov.xml Dr.",
+        "score": 0.4929
+      },
+      {
+        "sentence": "WEB. (2014, 4 9).",
+        "score": 0.3559
+      },
+      {
+        "sentence": "Retrieved from BackDoor.Gootkit.112—a new multi-purpose backdoor: https://news.drweb.com/show/?i=4338&lng=en Drapeau, P. (2015, 1 16).",
+        "score": 0.5181
+      },
+      {
+        "sentence": "Firewall Rule Changes and Compatibility Trickery.",
+        "score": 0.3769
+      },
+      {
+        "sentence": "Retrieved from Kill Chain.",
+        "score": 0.4496
+      },
+      {
+        "sentence": "The Confer Blog: http://www.confer.net/kill-chain-the-confer-blog/80-firewall-rule-changes-and- compatibility-trickery Erickson, J. (2014).",
+        "score": 0.3691
+      },
+      {
+        "sentence": "Persist It: Using and Abusing Microsoft Fix It Patches.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "Singapore: https://www.blackhat.com/docs/asia-14/materials/Erickson/WP-Asia-14-Erickson- Persist-It-Using-And-Abusing-Microsofts-Fix-It-Patches.pdf.",
+        "score": 0.463
+      },
+      {
+        "sentence": "F-Secure. (2015).",
+        "score": 0.359
+      },
+      {
+        "sentence": "Retrieved from f-secure.com: https://www.f- secure.com/documents/996508/1030745/blackenergy_whitepaper.pdf Graham, C. (2014, 5 27).",
+        "score": 0.4639
+      },
+      {
+        "sentence": "Shimming Your Way Past UAC.",
+        "score": 0.4201
+      },
+      {
+        "sentence": "Retrieved from Digital Defense Incorporated: http://blog.ddifrontline.com/4#more-4 Hancke, P. (2009).",
+        "score": 0.4124
+      },
+      {
+        "sentence": "The Windows 7 App Compat Story.",
+        "score": 0.4724
+      },
+      {
+        "sentence": "Retrieved from Microsoft Tech-ed Afraca 2009: http://download.microsoft.com/download/6/7/3/673B71D0-6D4F-4591-9940- D33DF9135487/WCL304_Win7_app_compat_story_Hancke.pptx Haruyama, T. (2015, 2 26).",
+        "score": 0.5117
+      },
+      {
+        "sentence": "Retrieved from TakahiroHaruyama / openioc_scan: https://github.com/TakahiroHaruyama/openioc_scan/blob/master/IOCs/generic/cdcd5fdb- fcd3-4947-8c76-d2fbdc1b5f82_UAC_COM.ioc hFireF0X. (2015, 1 9).",
+        "score": 0.495
+      },
+      {
+        "sentence": "Retrieved from Twitter: https://twitter.com/hfiref0x/status/553777371682443264 Page | 19 Inocencio, R. (2014, 11 5).",
+        "score": 0.347
+      },
+      {
+        "sentence": "Banking Trojan DRIDEX Uses Macros for Infection.",
+        "score": 0.39
+      },
+      {
+        "sentence": "Retrieved from Security Intelligence Blog: http://blog.trendmicro.com/trendlabs-security-intelligence/banking-trojan- dridex-uses-macros-for-infection/ Microsoft. (2009, 10 29).",
+        "score": 0.4563
+      },
+      {
+        "sentence": "Deploy an Application Compatibility Database by Using SDBInst.",
+        "score": 0.5755
+      },
+      {
+        "sentence": "Retrieved from TechNet: https://technet.microsoft.com/en-us/library/ee732408(v=WS.10).aspx Microsoft Support . (2015, 4 29).",
+        "score": 0.4544
+      },
+      {
+        "sentence": "Retrieved from Update to force a UAC prompt when a customized .sdb file is created in Windows: https://support.microsoft.com/en-us/kb/3045645 msft-mmpc. (2013, 10 31).",
+        "score": 0.4536
+      },
+      {
+        "sentence": "Upatre: Emerging Up(d)at(er) in the wild.",
+        "score": 0.3685
+      },
+      {
+        "sentence": "Retrieved from Microsoft Malware Protect Center: http://blogs.technet.com/b/mmpc/archive/2013/10/31/upatre-emerging-up-d- at-er-in-the-wild.aspx Ollie. (2012, 4 28).",
+        "score": 0.5452
+      },
+      {
+        "sentence": "Windows AppCompat Research Notes - Part 1.",
+        "score": 0.4208
+      },
+      {
+        "sentence": "Retrieved from Research, Develop, Assess, Consult & Educate: http://recxltd.blogspot.co.uk/2012/04/windows-appcompat- research-notes-part-1.html Pernet, C. (2015, 3 30).",
+        "score": 0.5016
+      },
+      {
+        "sentence": "Fake Judicial Spam Leads to Backdoor with Fake Certificate Authority.",
+        "score": 0.4106
+      },
+      {
+        "sentence": "Retrieved from TrendLabs Security Intelligence Blog: http://blog.trendmicro.com/trendlabs-security- intelligence/fake-judicial-spam-leads-to-backdoor-with-fake-certificate-authority/ SS_TSS@mail.ru. (2012, May).",
+        "score": 0.4337
+      },
+      {
+        "sentence": "Journal of Computer Hooligans.",
+        "score": 0.3232
+      },
+      {
+        "sentence": "Retrieved from ftp://os2.fannet.ru/fileechoes/programming/XA_159.PDF Stewart, H. (2007, 11 3).",
+        "score": 0.4113
+      },
+      {
+        "sentence": "Shim Database to XML.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "Retrieved from Setup & Install by Heath Stewart: http://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx Baggett, M. (2013, February 23).",
+        "score": 0.5408
+      },
+      {
+        "sentence": "Retrieved October 23, 2013, from In Depth Defense: http://www.indepthdefense.com/2013/02/2013-posts-and-publications.html Ionescu, A. (2007, May 20).",
+        "score": 0.4235
+      },
+      {
+        "sentence": "Secrets of the Application Compatilibity Database (SDB) – Part 1.",
+        "score": 0.4622
+      },
+      {
+        "sentence": "Retrieved April 15, 2015, from Alex Ionescu's Blog: http://www.alex-ionescu.com/?p=39 Ionescu, A. (2007, May 21).",
+        "score": 0.4229
+      },
+      {
+        "sentence": "Secrets of the Application Compatilibity Database (SDB) – Part 2.",
+        "score": 0.4651
+      },
+      {
+        "sentence": "Retrieved April 15, 2015, from Alex Ionescu's Blog: http://www.alex-ionescu.com/?p=40 Ionescu, A. (2007, May 26).",
+        "score": 0.4235
+      },
+      {
+        "sentence": "Secrets of the Application Compatilibity Database (SDB) – Part 3.",
+        "score": 0.464
+      },
+      {
+        "sentence": "Retrieved April 15, 2015, from Alex Ionescu’s Blog: http://www.alex-ionescu.com/?p=41 Mark Russinovich, B.",
+        "score": 0.4404
+      },
+      {
+        "sentence": "C. (2013, August 1).",
+        "score": 0.3443
+      },
+      {
+        "sentence": "Autoruns for Windows v11.70.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "Retrieved September 5, 2013, from Windows Sysinternals: http://technet.microsoft.com/en-us/sysinternals/bb963902.aspx Microsoft. (2013, September 6). !chkimg.",
+        "score": 0.4169
+      },
+      {
+        "sentence": "Retrieved October 2, 2013, from Dev Center: http://msdn.microsoft.com/en-us/library/windows/hardware/ff562217%28v=vs.85%29.aspx Microsoft. (2013, October 1).",
+        "score": 0.4741
+      },
+      {
+        "sentence": "Application Compatibility Database.",
+        "score": 0.5156
+      },
+      {
+        "sentence": "Retrieved October 23, 2013, from Microsoft Developer Network:http://msdn.microsoft.com/library/bb432182.aspx Microsoft. (2013).",
+        "score": 0.4112
+      },
+      {
+        "sentence": "Fix it Solution Center.",
+        "score": 0.3993
+      },
+      {
+        "sentence": "Retrieved 2013 24-October from Microsoft Support: http://support.microsoft.com/fixit/ Page | 20 Microsoft. (2012, October 1).",
+        "score": 0.462
+      },
+      {
+        "sentence": "Microsoft Security Advisory: Vulnerability in Microsoft XML Core Services could allow remote code execution.",
+        "score": 0.306
+      },
+      {
+        "sentence": "Retrieved September 5, 2013, from Microsoft Support: http://support.microsoft.com/kb/2719615 Microsoft. (2012, December 7).",
+        "score": 0.4152
+      },
+      {
+        "sentence": "Shim Database Types.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "Retrieved September 5, 2013, from Microsoft Developer Network: http://msdn.microsoft.com/en-us/library/bb432483%28v=vs.85%29.aspx Sikka, N. (2013, September 17).",
+        "score": 0.435
+      },
+      {
+        "sentence": "CVE-2013-3893: Fix it workaround available.",
+        "score": 0.3608
+      },
+      {
+        "sentence": "Retrieved October 02, 2013, from Security Research & Defense: http://blogs.technet.com/b/srd/archive/2013/09/17/cve-2013-3893-fix-it-workaround-available.aspx Stewart, H. (2007, November 3).",
+        "score": 0.4098
+      },
+      {
+        "sentence": "Shim Database to XML.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "Retrieved September 5, 2013, from Setup & Install by Heath Stewart: http://blogs.msdn.com/b/heaths/archive/2007/11/02/sdb2xml.aspx Page | 21",
+        "score": 0.5525
+      }
+    ]
+  }
+}

@@ -1,0 +1,213 @@
+{
+  "original_txt": "Note\nAccess to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nThe DLL loader is the part of the operating system (OS) that resolves references to DLLs, loads them, and links them. Dynamic-link library (DLL) redirection is one of the techniques by which you can influence the behavior of the DLL loader, and control which one of several candidate DLLs it actually loads.\nOther names for this feature include .local, Dot Local, DotLocal, and Dot Local Debugging.\nDLL versioning problems\nIf your application depends on a specific version of a shared DLL, and another application is installed with a newer or older version of that DLL, then that can cause compatibility problems and instability; it can cause your app to start to fail.\nThe DLL loader looks in the folder that the calling process was loaded from (the executable's folder) before it looks in other file system locations. So one workaround is to install the DLL that your app needs in your executable's folder. That effectively makes the DLL private.\nBut that doesn't solve the problem for COM. Two incompatible versions of a COM server can be installed and registered (even in different file system locations), but there's only one place to register the COM server. So only the latest registered COM server will be activated.\nYou can use redirection to solve these problems.\nLoading and testing private binaries\nThe rules that the DLL loader follows ensure that system DLLs are loaded from the Windows system locations—for example, the system folder (%SystemRoot%\\system32\n). Those rules avoid planting attacks: where an adversary puts code that they wrote in a location that they can write to, and then convince some process to load and execute it. But the loader's rules also make it more difficult to work on OS components, because to run them requires updating the system; and that's a very impactful change.\nBut you can use redirection to load private copies of DLLs (for purposes such as testing, or measuring the performance impact of a code change).\nIf you want to contribute to the source code in the public WindowsAppSDK GitHub repository, then you'll want to test your changes. And, again, that's a scenario for which you can use redirection to load your private copies of DLLs instead of the versions that ship with the Windows App SDK.\nYour options\nIn fact, there are two ways to ensure that your app uses the version of the DLL that you want it to:\n- DLL redirection. Continue to read this topic for more details.\n- Side-by-side components. Described in the topic Isolated applications and side-by-side assemblies.\nTip\nIf you're a developer or an administrator, then you should use DLL redirection for existing applications. That's because it doesn't require any changes to the app itself. But if you're creating a new app, or updating an existing app, and you want to isolate your app from potential problems, then create a side-by-side component.\nOptional: configure the registry\nTo enable DLL redirection machine-wide, you must create a new registry value. Under the key HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\n, create a new DWORD value with the name DevOverrideEnable. Set the value to 1, and restart your computer. Or use the command below (and restart your computer).\nreg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\" /v DevOverrideEnable /t REG_DWORD /d 1\nWith that registry value set, DotLocal DLL redirection is respected even if the app has an application manifest.\nCreate a redirection file or folder\nTo use DLL redirection, you'll create a redirection file or a redirection folder (depending on the kind of app you have), as we'll see in later sections in this topic.\nHow to redirect DLLs for packaged apps\nA packaged app requires a special folder structure for DLL redirection. The following path is where the loader will look when redirection is enabled:\n<Drive>:\\<path_to_package>\\microsoft.system.package.metadata\\application.local\\\nIf you're able to edit your .vcxproj\nfile, then a convenient way to cause that special folder to be created and deployed with your package is to add some extra steps to the build in your .vcxproj\n:\n<ItemDefinitionGroup>\n<PreBuildEvent>\n<Command>\ndel $(FinalAppxManifestName) 2>nul\n<!-- [[Using_.local_(DotLocal)_with_a_packaged_app]] This makes the extra DLL deployed via F5 get loaded instead of the system one. -->\nif NOT EXIST $(IntDir)\\microsoft.system.package.metadata\\application.local MKDIR $(IntDir)\\microsoft.system.package.metadata\\application.local\nif EXIST \"<A.dll>\" copy /y \"<A.dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul\nif EXIST \"<B.dll>\" copy /y \"<B.dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul\n</Command>\n</PreBuildEvent>\n</ItemDefinitionGroup>\n<ItemGroup>\n<!-- Include any locally built system experience -->\n<Media Include=\"$(IntDir)\\microsoft.system.package.metadata\\application.local\\**\">\n<Link>microsoft.system.package.metadata\\application.local</Link>\n</Media>\n</ItemGroup>\nLet's walk through some of what that configuration does.\nSet up a\nPreBuildEvent\nfor your Visual Studio Start Without Debugging (or Start Debugging) experience.<ItemDefinitionGroup> <PreBuildEvent>\nEnsure that you have the correct folder structure in your intermediate directory.\n<!-- [[Using_.local_(DotLocal)_with_modern_apps]] This makes the extra DLL deployed via Start get loaded instead of the system one. --> if NOT EXIST $(IntDir)\\microsoft.system.package.metadata\\application.local MKDIR $(IntDir)\\microsoft.system.package.metadata\\application.local\nCopy any DLLs that you've built locally (and wish to use in preference to the system-deployed DLLs) into the\napplication.local\ndirectory. You can pick up DLLs from just about anywhere (we recommended that you use the available macros for your.vcxproj\n). Just be sure that those DLLs build before this project does; otherwise they'll be missing. Two template copy commands are shown here; use as many as you need, and edit the<path-to-local-dll>\nplaceholders.if EXIST \"<path-to-local-dll>\" copy /y \"<path-to-local-dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul if EXIST \"<path-to-local-dll>\" copy /y \"<path-to-local-dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul </Command> </PreBuildEvent>\nLastly, indicate that you want to include the special directory and its contents in the deployed package.\n<ItemGroup> <!-- Include any locally built system experience --> <Media Include=\"$(IntDir)\\microsoft.system.package.metadata\\application.local\\**\"> <Link>microsoft.system.package.metadata\\application.local</Link> </Media> </ItemGroup>\nThe approach described here (using an intermediate directory) keeps your source code control enlistment clean, and reduces the possibility of accidentally committing a compiled binary.\nNext, all you need to do is to (re)deploy your project. In order to get a clean, full (re)deployment, you might also have to uninstall/clean out the existing deployment on your target device.\nCopying the binaries manually\nIf you're not able to use your .vcxproj\nin the way shown above, then you can achieve the same ends by hand on your target device with a couple of simple steps.\nDetermine the package's installation folder. You can do that in PowerShell by issuing the command\nGet-AppxPackage\n, and looking for the InstallLocation that's returned.Use that InstallLocation to change the ACLs to allow yourself to create folders/copy files. Edit the\n<InstallLocation>\nplaceholders in this script, and run the script:cd <InstallLocation>\\Microsoft.system.package.metadata takeown /F . /A icacls . /grant Administrators:F md <InstallLocation>\\Microsoft.system.package.metadata\\application.local\nLastly, manually copy any DLLs that you've built locally (and wish to use in preference to the system-deployed DLLs) into the\napplication.local\ndirectory, and [re]start the app.\nVerify that everything worked\nTo confirm that the correct DLL is being loaded at runtime, you can use Visual Studio with the debugger attached.\n- Open the Modules window (Debug > Windows > Modules).\n- Find the DLL, and make sure that the Path indicates the redirected copy, and not the system-deployed version.\n- Confirm that only one copy of a given DLL is loaded.\nHow to redirect DLLs for unpackaged apps\nThe redirection file must be named <your_app_name>.local\n. So if your app's name is Editor.exe\n, then name your redirection file Editor.exe.local\n. You must install the redirection file in the executable's folder. You must also install the DLLs in the executable's folder.\nThe contents of a redirection file are ignored; its presence alone causes the DLL loader to check the executable's folder first whenever it loads a DLL. To mitigate the COM problem, that redirection applies both to full path and partial name loading. So redirection happens in the COM case and also regardless of the path specified to LoadLibrary or LoadLibraryEx. If the DLL isn't found in the executable's folder, then loading follows its usual search order. For example, if the app C:\\myapp\\myapp.exe\ncalls LoadLibrary using the following path:\nC:\\Program Files\\Common Files\\System\\mydll.dll\nAnd if both C:\\myapp\\myapp.exe.local\nand C:\\myapp\\mydll.dll\nexist, then LoadLibrary loads C:\\myapp\\mydll.dll\n. Otherwise, LoadLibrary loads C:\\Program Files\\Common Files\\System\\mydll.dll\n.\nAlternatively, if a folder named C:\\myapp\\myapp.exe.local\nexists, and it contains mydll.dll\n, then LoadLibrary loads C:\\myapp\\myapp.exe.local\\mydll.dll\n.\nIf you're using DLL redirection, and the app doesn't have access to all drives and directories in the search order, then LoadLibrary stops searching as soon as access is denied. If you're not using DLL redirection, then LoadLibrary skips directories that it can't access, and then it continues searching.\nIt's good practice to install app DLLs in the same folder that contains the app; even if you're not using DLL redirection. That ensures that installing the app doesn't overwrite other copies of the DLL (thereby causing other apps to fail). Also, if you follow this good practice, then other apps don't overwrite your copy of the DLL (and don't cause your app to fail).",
+  "sanitized_txt": "Note Access to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nThe DLL loader is the part of the operating system (OS) that resolves references to DLLs, loads them, and links them. Dynamic-link library (DLL) redirection is one of the techniques by which you can influence the behavior of the DLL loader, and control which one of several candidate DLLs it actually loads.\nOther names for this feature include .local, Dot Local, DotLocal, and Dot Local Debugging.\nDLL versioning problems If your application depends on a specific version of a shared DLL, and another application is installed with a newer or older version of that DLL, then that can cause compatibility problems and instability; it can cause your app to start to fail.\nThe DLL loader looks in the folder that the calling process was loaded from (the executable's folder) before it looks in other file system locations. So one workaround is to install the DLL that your app needs in your executable's folder. That effectively makes the DLL private.\nBut that doesn't solve the problem for COM. Two incompatible versions of a COM server can be installed and registered (even in different file system locations), but there's only one place to register the COM server. So only the latest registered COM server will be activated.\nYou can use redirection to solve these problems.\nLoading and testing private binaries The rules that the DLL loader follows ensure that system DLLs are loaded from the Windows system locations—for example, the system folder (%SystemRoot%\\system32 ). Those rules avoid planting attacks: where an adversary puts code that they wrote in a location that they can write to, and then convince some process to load and execute it. But the loader's rules also make it more difficult to work on OS components, because to run them requires updating the system; and that's a very impactful change.\nBut you can use redirection to load private copies of DLLs (for purposes such as testing, or measuring the performance impact of a code change).\nIf you want to contribute to the source code in the public WindowsAppSDK GitHub repository, then you'll want to test your changes. And, again, that's a scenario for which you can use redirection to load your private copies of DLLs instead of the versions that ship with the Windows App SDK.\nYour options In fact, there are two ways to ensure that your app uses the version of the DLL that you want it to:\n- DLL redirection. Continue to read this topic for more details.\n- Side-by-side components. Described in the topic Isolated applications and side-by-side assemblies.\nTip If you're a developer or an administrator, then you should use DLL redirection for existing applications. That's because it doesn't require any changes to the app itself. But if you're creating a new app, or updating an existing app, and you want to isolate your app from potential problems, then create a side-by-side component.\nOptional: configure the registry To enable DLL redirection machine-wide, you must create a new registry value. Under the key HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options , create a new DWORD value with the name DevOverrideEnable. Set the value to 1, and restart your computer. Or use the command below (and restart your computer).\nreg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\" /v DevOverrideEnable /t REG_DWORD /d 1 With that registry value set, DotLocal DLL redirection is respected even if the app has an application manifest.\nCreate a redirection file or folder To use DLL redirection, you'll create a redirection file or a redirection folder (depending on the kind of app you have), as we'll see in later sections in this topic.\nHow to redirect DLLs for packaged apps A packaged app requires a special folder structure for DLL redirection. The following path is where the loader will look when redirection is enabled:\n<Drive>:\\<path_to_package>\\microsoft.system.package.metadata\\application.local\\ If you're able to edit your .vcxproj file, then a convenient way to cause that special folder to be created and deployed with your package is to add some extra steps to the build in your .vcxproj :\n<ItemDefinitionGroup> <PreBuildEvent> <Command> del $(FinalAppxManifestName) 2>nul <!-- [[Using_.local_(DotLocal)_with_a_packaged_app]] This makes the extra DLL deployed via F5 get loaded instead of the system one. --> if NOT EXIST $(IntDir)\\microsoft.system.package.metadata\\application.local MKDIR $(IntDir)\\microsoft.system.package.metadata\\application.local if EXIST \"<A.dll>\" copy /y \"<A.dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul if EXIST \"<B.dll>\" copy /y \"<B.dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul </Command> </PreBuildEvent> </ItemDefinitionGroup> <ItemGroup> <!-- Include any locally built system experience --> <Media Include=\"$(IntDir)\\microsoft.system.package.metadata\\application.local\\**\"> <Link>microsoft.system.package.metadata\\application.local</Link> </Media> </ItemGroup> Let's walk through some of what that configuration does.\nSet up a PreBuildEvent for your Visual Studio Start Without Debugging (or Start Debugging) experience.<ItemDefinitionGroup> <PreBuildEvent> Ensure that you have the correct folder structure in your intermediate directory.\n<!-- [[Using_.local_(DotLocal)_with_modern_apps]] This makes the extra DLL deployed via Start get loaded instead of the system one. --> if NOT EXIST $(IntDir)\\microsoft.system.package.metadata\\application.local MKDIR $(IntDir)\\microsoft.system.package.metadata\\application.local Copy any DLLs that you've built locally (and wish to use in preference to the system-deployed DLLs) into the application.local directory. You can pick up DLLs from just about anywhere (we recommended that you use the available macros for your.vcxproj ). Just be sure that those DLLs build before this project does; otherwise they'll be missing. Two template copy commands are shown here; use as many as you need, and edit the<path-to-local-dll> placeholders.if EXIST \"<path-to-local-dll>\" copy /y \"<path-to-local-dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul if EXIST \"<path-to-local-dll>\" copy /y \"<path-to-local-dll>\" $(IntDir)\\microsoft.system.package.metadata\\application.local 2>nul </Command> </PreBuildEvent> Lastly, indicate that you want to include the special directory and its contents in the deployed package.\n<ItemGroup> <!-- Include any locally built system experience --> <Media Include=\"$(IntDir)\\microsoft.system.package.metadata\\application.local\\**\"> <Link>microsoft.system.package.metadata\\application.local</Link> </Media> </ItemGroup> The approach described here (using an intermediate directory) keeps your source code control enlistment clean, and reduces the possibility of accidentally committing a compiled binary.\nNext, all you need to do is to (re)deploy your project. In order to get a clean, full (re)deployment, you might also have to uninstall/clean out the existing deployment on your target device.\nCopying the binaries manually If you're not able to use your .vcxproj in the way shown above, then you can achieve the same ends by hand on your target device with a couple of simple steps.\nDetermine the package's installation folder. You can do that in PowerShell by issuing the command Get-AppxPackage , and looking for the InstallLocation that's returned.Use that InstallLocation to change the ACLs to allow yourself to create folders/copy files. Edit the <InstallLocation> placeholders in this script, and run the script:cd <InstallLocation>\\Microsoft.system.package.metadata takeown /F . /A icacls . /grant Administrators:F md <InstallLocation>\\Microsoft.system.package.metadata\\application.local Lastly, manually copy any DLLs that you've built locally (and wish to use in preference to the system-deployed DLLs) into the application.local directory, and [re]start the app.\nVerify that everything worked To confirm that the correct DLL is being loaded at runtime, you can use Visual Studio with the debugger attached.\n- Open the Modules window (Debug > Windows > Modules).\n- Find the DLL, and make sure that the Path indicates the redirected copy, and not the system-deployed version.\n- Confirm that only one copy of a given DLL is loaded.\nHow to redirect DLLs for unpackaged apps The redirection file must be named <your_app_name>.local . So if your app's name is Editor.exe , then name your redirection file Editor.exe.local . You must install the redirection file in the executable's folder. You must also install the DLLs in the executable's folder.\nThe contents of a redirection file are ignored; its presence alone causes the DLL loader to check the executable's folder first whenever it loads a DLL. To mitigate the COM problem, that redirection applies both to full path and partial name loading. So redirection happens in the COM case and also regardless of the path specified to LoadLibrary or LoadLibraryEx. If the DLL isn't found in the executable's folder, then loading follows its usual search order. For example, if the app C:\\myapp\\myapp.exe calls LoadLibrary using the following path:\nC:\\Program Files\\Common Files\\System\\mydll.dll And if both C:\\myapp\\myapp.exe.local and C:\\myapp\\mydll.dll exist, then LoadLibrary loads C:\\myapp\\mydll.dll . Otherwise, LoadLibrary loads C:\\Program Files\\Common Files\\System\\mydll.dll .\nAlternatively, if a folder named C:\\myapp\\myapp.exe.local exists, and it contains mydll.dll , then LoadLibrary loads C:\\myapp\\myapp.exe.local\\mydll.dll .\nIf you're using DLL redirection, and the app doesn't have access to all drives and directories in the search order, then LoadLibrary stops searching as soon as access is denied. If you're not using DLL redirection, then LoadLibrary skips directories that it can't access, and then it continues searching.\nIt's good practice to install app DLLs in the same folder that contains the app; even if you're not using DLL redirection. That ensures that installing the app doesn't overwrite other copies of the DLL (thereby causing other apps to fail). Also, if you follow this good practice, then other apps don't overwrite your copy of the DLL (and don't cause your app to fail).",
+  "ID_list": [
+    "T1038"
+  ],
+  "Name_list": [
+    "Execution",
+    "Impact",
+    "PowerShell",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1038": [
+      {
+        "sentence": "You can try signing in or changing directories.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "You can try changing directories.",
+        "score": 0.4202
+      },
+      {
+        "sentence": "The DLL loader is the part of the operating system (OS) that resolves references to DLLs, loads them, and links them.",
+        "score": 0.7008
+      },
+      {
+        "sentence": "Dynamic-link library (DLL) redirection is one of the techniques by which you can influence the behavior of the DLL loader, and control which one of several candidate DLLs it actually loads.",
+        "score": 0.6994
+      },
+      {
+        "sentence": "Other names for this feature include .local, Dot Local, DotLocal, and Dot Local Debugging.",
+        "score": 0.361
+      },
+      {
+        "sentence": "DLL versioning problems If your application depends on a specific version of a shared DLL, and another application is installed with a newer or older version of that DLL, then that can cause compatibility problems and instability; it can cause your app to start to fail.",
+        "score": 0.6006
+      },
+      {
+        "sentence": "The DLL loader looks in the folder that the calling process was loaded from (the executable's folder) before it looks in other file system locations.",
+        "score": 0.6741
+      },
+      {
+        "sentence": "So one workaround is to install the DLL that your app needs in your executable's folder.",
+        "score": 0.6487
+      },
+      {
+        "sentence": "That effectively makes the DLL private.",
+        "score": 0.3918
+      },
+      {
+        "sentence": "But that doesn't solve the problem for COM.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "Two incompatible versions of a COM server can be installed and registered (even in different file system locations), but there's only one place to register the COM server.",
+        "score": 0.5494
+      },
+      {
+        "sentence": "Loading and testing private binaries The rules that the DLL loader follows ensure that system DLLs are loaded from the Windows system locations—for example, the system folder (%SystemRoot%\\system32 ).",
+        "score": 0.7874
+      },
+      {
+        "sentence": "Those rules avoid planting attacks: where an adversary puts code that they wrote in a location that they can write to, and then convince some process to load and execute it.",
+        "score": 0.4982
+      },
+      {
+        "sentence": "But the loader's rules also make it more difficult to work on OS components, because to run them requires updating the system; and that's a very impactful change.",
+        "score": 0.4108
+      },
+      {
+        "sentence": "But you can use redirection to load private copies of DLLs (for purposes such as testing, or measuring the performance impact of a code change).",
+        "score": 0.6111
+      },
+      {
+        "sentence": "And, again, that's a scenario for which you can use redirection to load your private copies of DLLs instead of the versions that ship with the Windows App SDK.",
+        "score": 0.6909
+      },
+      {
+        "sentence": "Your options In fact, there are two ways to ensure that your app uses the version of the DLL that you want it to: - DLL redirection.",
+        "score": 0.6873
+      },
+      {
+        "sentence": "Continue to read this topic for more details. - Side-by-side components.",
+        "score": 0.3
+      },
+      {
+        "sentence": "Tip If you're a developer or an administrator, then you should use DLL redirection for existing applications.",
+        "score": 0.5378
+      },
+      {
+        "sentence": "But if you're creating a new app, or updating an existing app, and you want to isolate your app from potential problems, then create a side-by-side component.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Optional: configure the registry To enable DLL redirection machine-wide, you must create a new registry value.",
+        "score": 0.3829
+      },
+      {
+        "sentence": "Under the key HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options , create a new DWORD value with the name DevOverrideEnable.",
+        "score": 0.3568
+      },
+      {
+        "sentence": "Or use the command below (and restart your computer). reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\" /v DevOverrideEnable /t REG_DWORD /d 1 With that registry value set, DotLocal DLL redirection is respected even if the app has an application manifest.",
+        "score": 0.4478
+      },
+      {
+        "sentence": "Create a redirection file or folder To use DLL redirection, you'll create a redirection file or a redirection folder (depending on the kind of app you have), as we'll see in later sections in this topic.",
+        "score": 0.5274
+      },
+      {
+        "sentence": "How to redirect DLLs for packaged apps A packaged app requires a special folder structure for DLL redirection.",
+        "score": 0.6929
+      },
+      {
+        "sentence": "You can pick up DLLs from just about anywhere (we recommended that you use the available macros for your.vcxproj ).",
+        "score": 0.6172
+      },
+      {
+        "sentence": "Just be sure that those DLLs build before this project does; otherwise they'll be missing.",
+        "score": 0.5393
+      },
+      {
+        "sentence": "Next, all you need to do is to (re)deploy your project.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "Copying the binaries manually If you're not able to use your .vcxproj in the way shown above, then you can achieve the same ends by hand on your target device with a couple of simple steps.",
+        "score": 0.406
+      },
+      {
+        "sentence": "Determine the package's installation folder.",
+        "score": 0.4406
+      },
+      {
+        "sentence": "You can do that in PowerShell by issuing the command Get-AppxPackage , and looking for the InstallLocation that's returned.Use that InstallLocation to change the ACLs to allow yourself to create folders/copy files.",
+        "score": 0.396
+      },
+      {
+        "sentence": "Edit the <InstallLocation> placeholders in this script, and run the script:cd <InstallLocation>\\Microsoft.system.package.metadata takeown /F . /A icacls . /grant Administrators:F md <InstallLocation>\\Microsoft.system.package.metadata\\application.local Lastly, manually copy any DLLs that you've built locally (and wish to use in preference to the system-deployed DLLs) into the application.local directory, and [re]start the app.",
+        "score": 0.5488
+      },
+      {
+        "sentence": "Verify that everything worked To confirm that the correct DLL is being loaded at runtime, you can use Visual Studio with the debugger attached. - Open the Modules window (Debug > Windows > Modules). - Find the DLL, and make sure that the Path indicates the redirected copy, and not the system-deployed version. - Confirm that only one copy of a given DLL is loaded.",
+        "score": 0.7017
+      },
+      {
+        "sentence": "How to redirect DLLs for unpackaged apps The redirection file must be named <your_app_name>.local .",
+        "score": 0.6569
+      },
+      {
+        "sentence": "So if your app's name is Editor.exe , then name your redirection file Editor.exe.local .",
+        "score": 0.5266
+      },
+      {
+        "sentence": "You must install the redirection file in the executable's folder.",
+        "score": 0.537
+      },
+      {
+        "sentence": "You must also install the DLLs in the executable's folder.",
+        "score": 0.6612
+      },
+      {
+        "sentence": "The contents of a redirection file are ignored; its presence alone causes the DLL loader to check the executable's folder first whenever it loads a DLL.",
+        "score": 0.6877
+      },
+      {
+        "sentence": "To mitigate the COM problem, that redirection applies both to full path and partial name loading.",
+        "score": 0.5769
+      },
+      {
+        "sentence": "So redirection happens in the COM case and also regardless of the path specified to LoadLibrary or LoadLibraryEx.",
+        "score": 0.481
+      },
+      {
+        "sentence": "If the DLL isn't found in the executable's folder, then loading follows its usual search order.",
+        "score": 0.7663
+      },
+      {
+        "sentence": "For example, if the app C:\\myapp\\myapp.exe calls LoadLibrary using the following path: C:\\Program Files\\Common Files\\System\\mydll.dll And if both C:\\myapp\\myapp.exe.local and C:\\myapp\\mydll.dll exist, then LoadLibrary loads C:\\myapp\\mydll.dll .",
+        "score": 0.5592
+      },
+      {
+        "sentence": "Otherwise, LoadLibrary loads C:\\Program Files\\Common Files\\System\\mydll.dll .",
+        "score": 0.612
+      },
+      {
+        "sentence": "Alternatively, if a folder named C:\\myapp\\myapp.exe.local exists, and it contains mydll.dll , then LoadLibrary loads C:\\myapp\\myapp.exe.local\\mydll.dll .",
+        "score": 0.6033
+      },
+      {
+        "sentence": "If you're using DLL redirection, and the app doesn't have access to all drives and directories in the search order, then LoadLibrary stops searching as soon as access is denied.",
+        "score": 0.6169
+      },
+      {
+        "sentence": "If you're not using DLL redirection, then LoadLibrary skips directories that it can't access, and then it continues searching.",
+        "score": 0.574
+      },
+      {
+        "sentence": "It's good practice to install app DLLs in the same folder that contains the app; even if you're not using DLL redirection.",
+        "score": 0.7035
+      },
+      {
+        "sentence": "That ensures that installing the app doesn't overwrite other copies of the DLL (thereby causing other apps to fail).",
+        "score": 0.6204
+      },
+      {
+        "sentence": "Also, if you follow this good practice, then other apps don't overwrite your copy of the DLL (and don't cause your app to fail).",
+        "score": 0.628
+      }
+    ]
+  }
+}

@@ -1,0 +1,826 @@
+{
+  "original_txt": "A highly sophisticated strain of malware known as P2PInfect is raising new concerns in the cybersecurity community. Developed in Rust, a language known for its safety and efficiency, this cross-platform worm uses several different methods of propagation to infect devices powered by different architectures. The malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands. Some strains attempt to abuse SSH while others exploit vulnerabilities in Redis, a popular in-memory database, to spread rapidly across networks. Â\nThe most intriguing aspect of P2PInfect is its evolving nature; as researchers dig deeper to understand its goals, the worm continues to adapt, and expand to target new architectures. Nozomi Networks Labs has identified a strain of P2Pinfect that targets a new IoT architecture - ARM. Â\nThis blog provides a comprehensive overview of recent P2PInfect worm operations and behavior, along with how they have changed over time. We analyze a new set of samples to investigate the worm's defence techniques, and provide detections at the end of the blog. By delving into the technical details and ongoing efforts to mitigate its threats, we aim to inform and educate readers about this emerging cybersecurity threat and the broader implications the malware holds for digital security in our interconnected world.\nTracking the Timeline of P2PInfect Strains\nAccording to our data, the first strains of this threat date back to at least July 2023. Malware authors have been gradually introducing support for more and more platforms mainly focusing on the x86-64 platform of CPUs. Redis is only officially supported in Linux, but P2PInfect creators are designing malware to spread to as many platforms as possible. It is also feasible to install Redis in Windows machines using the Windows Subsystem for Linux (WSL) and the P2PInfect developers are aware of this. For this reason, the actors also ship Windows DLLs inside the ELF binaries to increase the number of devices they can infect.\nRecently, Cado Security Labs made a noteworthy discovery. They came across the first MIPS samples in the wild, determining that including Windows, DLLS is just one part of the strategy to broaden the potential range of targeted devices. This revelation has expanded the scope to potentially affect a wider array of devices.\nTo this discovery, we add a new set of samples that target another typical IoT architecture: ARM, something that hasnât been reported by other researchers so far. The corresponding example SHA-256 hashes found by Nozomi Networks Labs are the following:\n- 4421298c97f245f4e7eafb4f3873b0a95fe22682766c5dfb9c22ccfef8b91ad1\n- 8ca16968634b5c7bb0343fff806da827ad00866748fce022da9fb0addc50ee99\nA version of this malware that utilizes SSH protocol for propagation was intercepted by our chain of globally distributed honeypots on November 6, 2023, something that hasnât been observed by the researchers when the threat was first analyzed back in July 2023. Our honeypots began recording the initial infection commands in October 2023, and this trend has continued to grow consistently until the current month of January 2024. The majority of these malicious connections originate from locations in China, Hong Kong and Singapore.\nOn Windows, the compilation timestamps stored as part of the MZ-PE header structure of executables are commonly used to build timelines, even though they can be forged by attackers and on newer versions of Windows donât necessarily represent the timestamps but rather checksums. However, the ELF format of executables commonly found on *nix systems doesnât even have such a field. Still, some conclusions can be made based on the metadata left by the compiler as well as metadata from third-party systems like VirusTotal.\nIn addition, here we actually do have Windows executables embedded into ELF files, the only thing that is left is to automatically extract all of them. Here is an example SHA-256 hash of the same DLL found inside x86-64, ARM and MIPS samples:\n- a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e\nWe have also uploaded it to VirusTotal to share it with the community. If its compilation timestamps (Figure 2) were not forged by attackers, they may indicate that attackers finished developing Windows payloads months before the first widespread distribution in July.\nTurning our attention to the technical aspects of this identified threat, we've uncovered several self-defense techniques detailed in the following section.\nTracing the Transformation of Malware Executables\nHigh-level Functionality\nWritten in Rust, the P2PInfect malware mainly consists of two executable modules: the smaller (~0.5Mb) auxiliary module commonly having a filename âbashâ and a larger, main payload. The purpose of the former is to ensure the correct work of the main payload performing all the required validations, updates and revivals where necessary. The main payload is capable of performing various operations, including propagating and delivering other modules with filenames that speak for themselves like miner and winminer. As its name suggests, the malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.\nAs we will see below, some parts of it are less static than others.\nSelf-Defense Techniques\nSamples packed with higher versions of the UPX tool generally canât be unpacked by lower versions of it, complicating the analysis and detection if automated analysis systems are using outdated versions of UPX. In general, attackers will use the latest version available. Interestingly, the latest variants of this malware tend to utilize a particular version of the UPX packer: 4.0.2. This version is newer than 3.94 and 3.95 which are widely used by other attackers, but well below the most recent version available, which is 4.2.2. The use of version 4.0.2. provides an idea of how the project was developing as this version became available to the public on January 30, 2023, while the next version 4.1.0 not used by attackers was released on August 8, 2023. It could mean that the main part of the development was taking place starting from early in 2023, and after the toolset was set up, the attackers didnât bother updating it.\nThe authors' commitment to safeguarding the samples from dynamic analysis and remediation becomes clear when we examine the various security measures employed in P2PInfect. In addition to disabling core dumps through the 'setrlimit' syscall (Figure 3)Â and the process debugging protection noted by Cado Security, this family of malware employs additional security measures across various layers.\nAs mentioned earlier, the âbashâ binary is dropped into the system to ensure the continued âhealthâ of the P2PInfect sample in case a new version is released or its integrity is compromised (e.g., binary modification or the main process is not active). This âbashâ binary is not downloaded from the botnet, itâs dropped from the sample. To establish effective communication with it, the primary sample listens on the loopback address via a TCP port. This approach can lead to a consistent behavior pattern that analysts can readily identify, and there is also the potential risk that the selected port may already be in use. To mitigate these concerns, the dropped executable is intentionally made non-functional until the malware modifies it during runtime. This measure also prevents the extraction of a functional payload from the primary executable.\nTo find the memory to be modified inside the âtemplate bashâ executable to make it ready to be executed, P2PInfect looks for two markers âthisisportâ and âpassword12345678â to dynamically replace them with two random values.\nWhen the offset of the marker is found, a random port between 60100 and 60150 is generated and then an underscore â_â is appended to allow the bash executable to know where the port string ends. This TCP port range is the same as the range of ports used to communicate with other peers within the P2P network.\nThe password marker is replaced with 16 random characters that will be used to encrypt the communication between both executables. This additional layer of protection provides an additional level of protection to conceal the transmitted content from curious eyes.\nFinally, lots of main ELF payloads are distributed inside wrapper ELF files that just print a famous âHello, World!â message pretending this is its only functionality.\nAn example of it would be a sample d1ad42ab5289447cbd803e186d2115e1b2ea3bf3486dc92c7ef5153f572dfd65 containing the main P2PInfect payload 32365440cbe93909b1dfd4364bcdb0c31953f4d6be97a675eb3984126cc49295 inside (Figure 9).\nOnce the device is infected it's ready to spread to other devices. To infect new targets, P2PInfect executes a bruteforce attack against the device with the SSH server and, after a successful login, different commands are executed to download and run the malware (Figure 8).\nAn example of such a sample is the following, illustrated in Figure 9:\n- 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de\nConclusion\nThe P2PInfect malware family continues to expand its reach across various architectures and platforms, representing a significant and evolving threat in the realm of cybersecurity. Its unique characteristics, such as its use of Rust and exploitation of Redis vulnerabilities, highlight the ongoing challenges presented by modern malware.\nWhile researchers and cybersecurity experts are making strides in understanding and combating this worm, P2PInfect serves as a stark reminder of the dynamic nature of cyber threats and the importance of staying ahead in the ever-evolving cybersecurity landscape. As we forge ahead, it is crucial for individuals and organizations alike to remain informed and proactive in their cybersecurity practices to mitigate the risks posed by such sophisticated threats.\nDetections\nYARA\n// Created by Nozomi Networks Labs\nrule p2pinfect_linux { Â\nmeta: Â Â Â Â\nÂ Â author = \"Nozomi Networks Labs\" Â Â Â Â\nÂ Â date = \"2023-12-13\" Â Â Â Â\nÂ Â x_threat_name = \"P2PInfect\" Â Â Â Â\nÂ Â name = \"P2PInfect - WORM\" Â Â Â Â\nÂ Â description = \"Multiplatform worm that targets Redis servers.\" Â Â Â Â\nÂ Â reference = \"https://www.cadosecurity.com/redis-p2pinfect/\" Â Â Â Â\nÂ Â x_mitre_technique = \"T1190, T1059, T1107, T1068, T1071\" Â Â Â Â\nÂ Â tlp = \"green\" Â Â Â Â\nÂ Â hash = \"6d0e4c03cf4731b9b05c3e575a92db9beabccf243263d703c7b332597c8ed591\"\nstrings:\nÂ Â $str_0 = \"\\x00need_slow_targets\" ascii\nÂ Â $str_1 = \"\\x00need_fast_targets\" ascii\nÂ Â $str_2 = \"\\x00attacker_not_valid_secs\" ascii\nÂ Â $str_3 = \"\\x00file_servers_online_check_delay_secs\" ascii\nÂ Â $str_4 = \"ReloadConfstruct\" ascii fullword\nÂ Â $str_5 = \"Failed to disable core-dumps via rlimit\" ascii\nÂ Â $str_6 = \"Failed to check tracer presence via /proc/self/status\" ascii\nÂ Â $str_7 = \"AWS_ACCESS_KEY_ID=\\\"?(.*?)\\\"?[\" ascii\nÂ Â $big_num = {433ce8229fc5f04b}\ncondition:\nÂ Â uint32(0) == 0x464c457f and (3 of ($str_*) or $big_num)\n}\n// Created by Nozomi Networks Labs\nrule p2pinfect_dll { Â Â\nmeta: Â Â Â Â\nÂ Â author = \"Nozomi Networks Labs\" Â Â Â Â\nÂ Â date = \"2023-12-20\" Â Â Â Â\nÂ Â x_threat_name = \"P2PInfect\" Â Â Â Â\nÂ Â Â name = \"P2PInfect - WORM\" Â Â Â Â\nÂ Â Â description = \"Multiplatform worm that targets Redis servers.\" Â Â Â Â\nÂ Â Â reference = \"https://www.cadosecurity.com/redis-p2pinfect/\" Â Â Â Â\nÂ Â Â x_mitre_technique = \"T1190, T1059, T1107, T1068, T1071\" Â Â Â Â\nÂ Â Â tlp = \"green\" Â Â Â Â\nÂ Â Â hash = \"a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e\" Â Â\nstrings: Â Â Â Â\nÂ Â Â $exp_dll = \"\\x00exp.dll\\x00\" Â Â Â Â\nÂ Â Â $rm_onload = \"\\x00RedisModule_OnLoad\\x00\" Â Â Â Â\nÂ Â Â $system_exec = \"\\x00system.exec\\x00\" Â Â Â Â\nÂ Â Â $redis_module = \"\\x00RedisModule_\" Â Â Â Â\nÂ Â Â $onexit_table = \"onexit_table\" fullword Â Â Â Â\nÂ Â Â $lookup_func = \"RtlLookupFunctionEntry\" fullword Â Â\ncondition: Â Â Â Â\nÂ Â Â uint16(0) == 0x5a4d and all of them and #redis_module > 20\n}\nIPs\n117.45.170[.]79\n118.122.1[.]20\n120.222.158[.]89\n124.127.58[.]234\n124.88.250[.]55\n183.233.174[.]44\n193.151.148[.]30\n218.56.32[.]85\n35.220.253[.]187\n36.110.27[.]178\n36.7.171[.]21\n43.128.15[.]83\n43.133.238[.]3\n43.134.161[.]34\n43.134.225[.]133\n43.135.173[.]88\n43.155.137[.]204\n43.155.142[.]210\n43.155.169[.]55\n43.155.183[.]210\n43.155.85[.]140\n43.156.18[.]95\n43.159.50[.]150\n47.106.228[.]20\n47.113.222[.]202\n61.157.177[.]227\n61.49.105[.]174\n62.234.11[.]186\n8.134.178[.]4\n8.137.14[.]175\n8.217.135[.]13\n8.218.146[.]78\n8.219.52[.]90\nURLs\nhxxp://103.219.60.221:60146/linux\nhxxp://110.191.238.10:60110/linux\nhxxp://110.39.11.163:60108/linux\nhxxp://118.44.95.82:60104/linux\nhxxp://133.242.68.165:60144/linux\nhxxp://150.138.83.155:60124/linux\nhxxp://154.0.31.161:60106/linux\nhxxp://159.65.54.223:60104/linux\nhxxp://18.183.15.88:60103/linux\nhxxp://193.148.252.194:60119/linux\nhxxp://20.191.185.44:60101/linux\nhxxp://27.191.237.5:60127/linux\nhxxp://43.132.150.184:60134/linux\nhxxp://43.155.153.147:60118/linux\nhxxp://45.138.174.199:60117/linux\nhxxp://47.236.101.172:60119/linux\nhxxp://47.245.92.210:60147/linux\nhxxp://50.17.152.237:60129/linux\nhxxp://61.160.213.239:60147/linux\nhxxp://74.208.103.29:60116/linux\nhxxp://8.134.144.81:60147/linux\nhxxp://8.217.0.228:60140/linux\nhxxp://8.218.146.1:60115/linux\nhxxp://89.168.78.92:60130/linux\nSHA-256 hashes\n- 000bf4ef861996b4b11451beec52c79ef4ec68ec56ec38dfd1481b7fbea96911\n- 006aaab764e9b249c98cae072872a8b2b1bd8c6a8a44fb9682722cc2cc830ce0\n- 0111f06b27c95361a8222cd1e80957fb232c799ba93950dfae65ab1c972f7b3a\n- 030789780e91092f1934239ec4d5c2c2ca17d9e3889daac76178107b15b199f6\n- 04c3d68ccc274b82bdd59e7fbdc1d314b9ece6dc5ba8e96ed383a159284036d4\n- 070bab71b39062c686a40856a2d2198642e4c4d565636ab0cc52d5bdb4395fea\n- 07501540d43527f9c0417629162edeeeb66cbb6bb545d20cec86dcad296f621d\n- 0c1045eaa5241ae599ce551d2f618e1d3648cd647ecf5b4f5f59fd4da1d1cd03\n- 0ecfa32eaa13cc010784d46ba1e68e7d951dc7d95a38da1a2a54e7c22fa7c89b\n- 103e2ba056d4b2a074e82902f31b17100aece6d0e0e9dfb0b6e2d102fe6f9dcb\n- 10dc62048cfd3392178fc351f89271a98bdc3df750a4beb60a0f9763ef6cc70f\n- 150df742a24ef6b146d468d67ae453b73a05e0275c995afcf05654f8dca3b9df\n- 15542fe695b3beabe329934b4be5bafcc6a7bed70a4b9b46a2777ae07032b569\n- 1c2363532c8b83243bb1933d7213ceb80e9a095280a26175421a70ef3b7834e9\n- 1e2686c1a674630311fdab9b74df54605309076b6d2c3acb4dbc0e7c0080bfa4\n- 1e963c97bfa850522984b09e80c1be7bcd372ad527bcfdd0787922d27fdb253d\n- 22fe687809d73835d943deb396a84152615cec56d483072de68c0e734446b8b1\n- 23fd0e7b1560cdd41df020456fc7ca8ada49c80fdcaa73880779f18b5dc6d954\n- 24e9524c3c2f23f9cfd34919881f06c6312a0d3c96459bb995b325aa24caeb69\n- 25620e3539baa874e66cd3e87a225d88378abacdf4c2b962acdb3e86ceb936eb\n- 286f87b793f6f86d24d500d22cf103285c1e3aad5193ac0027d5c826ff9952ef\n- 2ce525ef39f57a3e232eb7a08bec5afde05ebbe5f1794c6260b812ddffebb7e8\n- 2e895366e84312413a157d5cd1e01440d54d0108fcb95ec4c455cdc019b31200\n- 3034fee705440af41d7ed3f25e5c5af4d11d2ca066dbd797032bd63f5f433626\n- 317115f0f0e11c6693cc010f260138d3364cefc41662d5fce825517ae3675080\n- 32365440cbe93909b1dfd4364bcdb0c31953f4d6be97a675eb3984126cc49295\n- 3814554e9b418c25ed1548d3282d56a96e1021608cb5133e6875b104c5e7113e\n- 39c6e11c8a50d28536423cd34153c323c34d0166805c4157490c834fe3b75ae3\n- 3a43116d507d58f3c9717f2cb0a3d06d0c5a7dc29f601e9c2b976ee6d9c8713f\n- 3d8712914d2f1525ef89cc15002c63e3ec533db38c87c272ff704218b68c737c\n- 3e7233085678ca016ce6228cb50d735e4175533843be0b36012c853083938906\n- 40cc94f348dca65b36ce74b6be9f225b25491f04f4d764ab7b0214b59d7407de\n- 412f87a2a4245c371e428607dec3cb6c22c15d387dc5db69cd47146e15090216\n- 42fb6c13c0ece7133e79dc055b0acb96007a50255ceba6861cc31a987b3e5987\n- 43ca01e3123ebdfc546d4edfc7eb06d020757ad9b98b2fef3f49e4632362a672\n- 4421298c97f245f4e7eafb4f3873b0a95fe22682766c5dfb9c22ccfef8b91ad1\n- 44e6811fa8a44b2f5f1b60acbbc3f116e90f2d35ff418551c034fc9d9b96bb4c\n- 470bc66a0e13ce093e1aef9843b7903e7c01b252b9bd4b11551d25437c6210e1\n- 47714c45c9172f914e783b49c143daa433356a828526f38071db11743cc96ef7\n- 491b859987de3835f77b21d737df5c8c201ccc1d25f48e07803cc73d9e9e336e\n- 4b259143cf710d62b5d8767fcc4c5434fd8684334519dc4045c430ee73a9398b\n- 4cb3c2f676c158d1d84ed1c2b4600157bb848e29e13fde615ab4675e433d4905\n- 4e5bb1db1e306c9e7324195d083abcdb55b4ed1689a498e35ad7ef46650c45e4\n- 4f4b6391f66b388c0e0d5b0c2ba775e9402434af115dfa9455423c72efc0f27f\n- 50f76c9dea3255b9e4d33c02df0ae8d32cf8909bae6103770afdb44bb2f78f64\n- 532dd10bde4bfa9a5032231449ec15d94ed8cbf128b24cacdcef3370039e8ded\n- 537a0f4c1a490f769780b9a378414e06c6c4bc1ec1e70109adafadb43fe5648f\n- 54ecbd099384f39fd1055133b7a6ef8f64a6c1a76b1bef712da4f69c9bfa3f77\n- 55385b542cbe730199159ef403d7292efd8f5d439da4a3f8fff84e94fb0b6abe\n- 59c49add8a988087c2cc8dc6c783465990c94ce82608b1eee1dadd30bf2604aa\n- 5cf9b01fb73e16f1b8cd2bd4846a829d9d4d9f3270d8644065ce9b67e32b85c9\n- 68f7104eb6591175866b79784b14d81f587508574537a376a7c92f3563241973\n- 69d83816f675f70f3e703a260504c50df341acd46f8470bb4357a9fde8a7d3d2\n- 6a22025d0309d9cf0923fe633b15d6a73ff7b66000e8797a637224269dcddde2\n- 6ae60971d812d7dad63af579faeee3fd2aa03bc0528765b3477ccef6cc92010f\n- 6d0e4c03cf4731b9b05c3e575a92db9beabccf243263d703c7b332597c8ed591\n- 6fa48f060e313c108cc74da76a6b4ab3073a4f352c7ff4a4650eec7fd9042b1c\n- 71f7b35c831207eb2f479d3c3eaf37cc54717cf55e6be00b85a6a8376d61839f\n- 759d79f7f5ac7fd8bab551bf78c6e28c169c72bdb463642e3732b5dcfa0dd753\n- 7819a5217c6d91e828128afdae760147714604c74c5c315ee51dc65d4aaecf72\n- 796e84ed257f40cd8b77968839051ea815a027a9e5210298cc491c2ebfa9f4c3\n- 79f99b9df8626b3bd28ccea20e111081cc886b4d41a0eafb53412231a0c44da7\n- 7ca878dc7c8a9b9e9b54faf9b1b354e657ad890ba2cf67b26f3d66d1a7757479\n- 7d22d02813997c6403159593589efb00d172e22143bbe436ea2df06a130a3445\n- 83216df7dcb8760e451c4bb8db5a520a64c5bae589d0712203c3ab03086eeae0\n- 8594830664b030dd772449279a1738ebbbb419798b0ec5dc547518b954d38877\n- 8ca16968634b5c7bb0343fff806da827ad00866748fce022da9fb0addc50ee99\n- 8df14ce418fcede6be48ddaa16517c6f5249888f654680a85c43850914f0a959\n- 9659f5e59c17163b48431bd98b34d5185ae534d27e0bb5f42ff2edc9335931b3\n- 9883db5f74aa42af6a8ae387e9f54c5f1f2c6a7dd032b58c88ab742670ce00f9\n- 99afa8c5b0a61669fb9c960b97568aca175a35fadd60129ee441dd55ee27c20f\n- 9b35e4bb82b36c81a064b1178f38926f82b767ccd07b0838be536876b56bc852\n- 9dd1b238c27ec151bf76da9a825875ff190480813876ad68cebf6a1cddd552a6\n- 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de\n- 9f2686ea42fdbb538ed55efa73896996005b5649cedb91be8907e3143be43d8a\n- 9f2efc2cb95ca881b534c55e54b57ef1992fddd3078035e15a8ba3f9a41a2f33\n- a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e\n- a6cc37de6c8e5b83b9f70b1332ec24e3913c97d511ac21eae2141053ba926508\n- aa9d34bbd2743dd5299d8cc1e7f24a54955d7d54cc3bfd45424e32fbcc540d62\n- ab3163775d27efa38a60b1f4fdcedcf0d3c493ccd72a06ee3660d97a7725328f\n- aba5eac208c82899a9b0abe4215e42ddce8eefcd5f4186b47fb1188e306972e7\n- ad32d8b2c7bc9eec9fd183a00ebb78cbf886760347ff5e826a071fba7d5f5219\n- b02b49b4d4c7e6fe3abae02ccfc2524347700f40e1856f6d0ec40dd247fd24f4\n- b0a1cc6968bf9bf7f8a7f3f15a5ceace28cc0899604f2122a1e16e8c225f224a\n- b445789bea083a1a8264ab6d8478d38a78a4dd5a32cefcc3b9367097cabfd807\n- b46a466bef3078ee336a1fadcf62a439656ab9f68f6b3dd84ba341c9442bb96f\n- b697d6ee591e4409548db6dfd0c4b32e1640bea01e2001d9ebd413e8f6d7dfbc\n- b6d2a14ac7e1158c1d4b7152b7fcdb1409be7ea9866363682256f15514f037b3\n- b9013d8429073c3abebc45d8bfb3881243e2bb6115860c947837a0563f6a6bf7\n- bb4ef9da07041f8665d76b90dce3e7a26b3695fb0e68b94b4077a544133b8a7b\n- bb9f1507f2fb1eeb31a79ce14728c5788a1c847b51281428a965e36d7dc24224\n- bbfeeb48447c5861dde7cc5860920d9381492ad7a7d03242dd36f863cf50c26f\n- bcb193953a4d3ba76ab0b516e2394a41443d53064ad06cd3b9b40bb8a3a98dfe\n- bfd3c1a4655079a8c8a15067964b0b5b3a133c8c8e778863b70fbb4769a837b6\n- c1ecc8c4a6a00aa00e59b23bf9cf08983aa8c4313ae62be39e91272edcdff6b4\n- c2e6a50d7354c20d020710f9a07ea5c4ccf21a9030743bec69fe2f8538884ab0\n- c3ef4d4441362483f9cd3cc22524f85f2c022178bdf8070f05b03a5f6177fbb2\n- c61645672143c1369353642df218181c1843821600c095671b56aff73c082b3d\n- cda9251a687b9629587a852deddf1d3d8d830d474a6787fa0ef123f557084a7c\n- cfb461e10de99a2c08fe985ecaf73ea357a2dc1c47ca8c3749bc613db7a3fc02\n- d03f1bd2a8cf7067db9a92c91cc7620dece14473ad27747488cb4491be8f6f18\n- d14f22cb372690b2f6e77260a3717fdbd2a80346496ba1279704a4d2004df3ed\n- d1ad42ab5289447cbd803e186d2115e1b2ea3bf3486dc92c7ef5153f572dfd65\n- d3d5b9239d35321e3ca6b75fcda62e4d81439be5804e7bd8c78c0626aabbd328\n- d5e17064b884584dcd075830bc50f596e4e4d3a4264342fbd5cfa8ec036d734b\n- df98a431664f1a1249719fd415a22ca51d3858b4b3f7f2eeb21ec688d20084b0\n- eb99f302346405ca63cac6cce8b43d86af899ef5f1bdcfaf1f55454a92c49cdd\n- efb9845889bfb16fc99cd0a44593c2482c64e0089af8cb950ee746b3e236b2da\n- efeb88732ad4538aafe369d6a604f6948e302a819271b4a7f817525801a2ed18\n- f04e97fb3a053f5c6a60499e99ba58ef840b1b40882119d6cea64fa052697d82\n- f20703057d771f5470095e063255f9ffa9fa5caafc44995b6590d6485ad647b8\n- f54586112d54a8fd9b3f94ee199d2f05da2877ec72db7496fc464620048c7bec\n- f6bd75914a01074be877c4a205745f170ed5d13c0d85acbd2e74c60a982f0117\n- f721c8acc4436de8d8e5bfc76e654d6e982d6bda5a969c11d53c79785b30d79a\n- fa56376c093ac3a5d5b349e6c8f02b4dc5d19b11d57103039e2b9bd861b07955\n- faf035ddbfc2304f7eafbc62d60f25b8460083efb21ae3642ca3e4eea0ab2fe0",
+  "sanitized_txt": "A highly sophisticated strain of malware known as P2PInfect is raising new concerns in the cybersecurity community. Developed in Rust, a language known for its safety and efficiency, this cross-platform worm uses several different methods of propagation to infect devices powered by different architectures. The malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands. Some strains attempt to abuse SSH while others exploit vulnerabilities in Redis, a popular in-memory database, to spread rapidly across networks. Â The most intriguing aspect of P2PInfect is its evolving nature; as researchers dig deeper to understand its goals, the worm continues to adapt, and expand to target new architectures. Nozomi Networks Labs has identified a strain of P2Pinfect that targets a new IoT architecture - ARM. Â This blog provides a comprehensive overview of recent P2PInfect worm operations and behavior, along with how they have changed over time. We analyze a new set of samples to investigate the worm's defence techniques, and provide detections at the end of the blog. By delving into the technical details and ongoing efforts to mitigate its threats, we aim to inform and educate readers about this emerging cybersecurity threat and the broader implications the malware holds for digital security in our interconnected world.\nTracking the Timeline of P2PInfect Strains According to our data, the first strains of this threat date back to at least July 2023. Malware authors have been gradually introducing support for more and more platforms mainly focusing on the x86-64 platform of CPUs. Redis is only officially supported in Linux, but P2PInfect creators are designing malware to spread to as many platforms as possible. It is also feasible to install Redis in Windows machines using the Windows Subsystem for Linux (WSL) and the P2PInfect developers are aware of this. For this reason, the actors also ship Windows DLLs inside the ELF binaries to increase the number of devices they can infect.\nRecently, Cado Security Labs made a noteworthy discovery. They came across the first MIPS samples in the wild, determining that including Windows, DLLS is just one part of the strategy to broaden the potential range of targeted devices. This revelation has expanded the scope to potentially affect a wider array of devices.\nTo this discovery, we add a new set of samples that target another typical IoT architecture: ARM, something that hasnât been reported by other researchers so far. The corresponding example SHA-256 hashes found by Nozomi Networks Labs are the following:\n- 4421298c97f245f4e7eafb4f3873b0a95fe22682766c5dfb9c22ccfef8b91ad1 - 8ca16968634b5c7bb0343fff806da827ad00866748fce022da9fb0addc50ee99 A version of this malware that utilizes SSH protocol for propagation was intercepted by our chain of globally distributed honeypots on November 6, 2023, something that hasnât been observed by the researchers when the threat was first analyzed back in July 2023. Our honeypots began recording the initial infection commands in October 2023, and this trend has continued to grow consistently until the current month of January 2024. The majority of these malicious connections originate from locations in China, Hong Kong and Singapore.\nOn Windows, the compilation timestamps stored as part of the MZ-PE header structure of executables are commonly used to build timelines, even though they can be forged by attackers and on newer versions of Windows donât necessarily represent the timestamps but rather checksums. However, the ELF format of executables commonly found on *nix systems doesnât even have such a field. Still, some conclusions can be made based on the metadata left by the compiler as well as metadata from third-party systems like VirusTotal.\nIn addition, here we actually do have Windows executables embedded into ELF files, the only thing that is left is to automatically extract all of them. Here is an example SHA-256 hash of the same DLL found inside x86-64, ARM and MIPS samples:\n- a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e We have also uploaded it to VirusTotal to share it with the community. If its compilation timestamps (Figure 2) were not forged by attackers, they may indicate that attackers finished developing Windows payloads months before the first widespread distribution in July.\nTurning our attention to the technical aspects of this identified threat, we've uncovered several self-defense techniques detailed in the following section.\nTracing the Transformation of Malware Executables High-level Functionality Written in Rust, the P2PInfect malware mainly consists of two executable modules: the smaller (~0.5Mb) auxiliary module commonly having a filename âbashâ and a larger, main payload. The purpose of the former is to ensure the correct work of the main payload performing all the required validations, updates and revivals where necessary. The main payload is capable of performing various operations, including propagating and delivering other modules with filenames that speak for themselves like miner and winminer. As its name suggests, the malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.\nAs we will see below, some parts of it are less static than others.\nSelf-Defense Techniques Samples packed with higher versions of the UPX tool generally canât be unpacked by lower versions of it, complicating the analysis and detection if automated analysis systems are using outdated versions of UPX. In general, attackers will use the latest version available. Interestingly, the latest variants of this malware tend to utilize a particular version of the UPX packer: 4.0.2. This version is newer than 3.94 and 3.95 which are widely used by other attackers, but well below the most recent version available, which is 4.2.2. The use of version 4.0.2. provides an idea of how the project was developing as this version became available to the public on January 30, 2023, while the next version 4.1.0 not used by attackers was released on August 8, 2023. It could mean that the main part of the development was taking place starting from early in 2023, and after the toolset was set up, the attackers didnât bother updating it.\nThe authors' commitment to safeguarding the samples from dynamic analysis and remediation becomes clear when we examine the various security measures employed in P2PInfect. In addition to disabling core dumps through the 'setrlimit' syscall (Figure 3)Â and the process debugging protection noted by Cado Security, this family of malware employs additional security measures across various layers.\nAs mentioned earlier, the âbashâ binary is dropped into the system to ensure the continued âhealthâ of the P2PInfect sample in case a new version is released or its integrity is compromised (e.g., binary modification or the main process is not active). This âbashâ binary is not downloaded from the botnet, itâs dropped from the sample. To establish effective communication with it, the primary sample listens on the loopback address via a TCP port. This approach can lead to a consistent behavior pattern that analysts can readily identify, and there is also the potential risk that the selected port may already be in use. To mitigate these concerns, the dropped executable is intentionally made non-functional until the malware modifies it during runtime. This measure also prevents the extraction of a functional payload from the primary executable.\nTo find the memory to be modified inside the âtemplate bashâ executable to make it ready to be executed, P2PInfect looks for two markers âthisisportâ and âpassword12345678â to dynamically replace them with two random values.\nWhen the offset of the marker is found, a random port between 60100 and 60150 is generated and then an underscore â_â is appended to allow the bash executable to know where the port string ends. This TCP port range is the same as the range of ports used to communicate with other peers within the P2P network.\nThe password marker is replaced with 16 random characters that will be used to encrypt the communication between both executables. This additional layer of protection provides an additional level of protection to conceal the transmitted content from curious eyes.\nFinally, lots of main ELF payloads are distributed inside wrapper ELF files that just print a famous âHello, World!â message pretending this is its only functionality.\nAn example of it would be a sample d1ad42ab5289447cbd803e186d2115e1b2ea3bf3486dc92c7ef5153f572dfd65 containing the main P2PInfect payload 32365440cbe93909b1dfd4364bcdb0c31953f4d6be97a675eb3984126cc49295 inside (Figure 9).\nOnce the device is infected it's ready to spread to other devices. To infect new targets, P2PInfect executes a bruteforce attack against the device with the SSH server and, after a successful login, different commands are executed to download and run the malware (Figure 8).\nAn example of such a sample is the following, illustrated in Figure 9:\n- 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de Conclusion The P2PInfect malware family continues to expand its reach across various architectures and platforms, representing a significant and evolving threat in the realm of cybersecurity. Its unique characteristics, such as its use of Rust and exploitation of Redis vulnerabilities, highlight the ongoing challenges presented by modern malware.\nWhile researchers and cybersecurity experts are making strides in understanding and combating this worm, P2PInfect serves as a stark reminder of the dynamic nature of cyber threats and the importance of staying ahead in the ever-evolving cybersecurity landscape. As we forge ahead, it is crucial for individuals and organizations alike to remain informed and proactive in their cybersecurity practices to mitigate the risks posed by such sophisticated threats.\nÂ Â $str_0 = \"\\x00need_slow_targets\" ascii Â Â $str_1 = \"\\x00need_fast_targets\" ascii Â Â $str_2 = \"\\x00attacker_not_valid_secs\" ascii Â Â $str_3 = \"\\x00file_servers_online_check_delay_secs\" ascii Â Â $str_4 = \"ReloadConfstruct\" ascii fullword Â Â $str_5 = \"Failed to disable core-dumps via rlimit\" ascii Â Â $str_6 = \"Failed to check tracer presence via /proc/self/status\" ascii Â Â $str_7 = \"AWS_ACCESS_KEY_ID=\\\"?(.*?)\\\"?[\" ascii Â Â $big_num = {433ce8229fc5f04b} condition:",
+  "ID_list": [
+    "T1059",
+    "T1068",
+    "T1071",
+    "T1107",
+    "T1190"
+  ],
+  "Name_list": [
+    "Discovery"
+  ],
+  "TTP_sentences": {
+    "T1059": [
+      {
+        "sentence": "A highly sophisticated strain of malware known as P2PInfect is raising new concerns in the cybersecurity community.",
+        "score": 0.3532
+      },
+      {
+        "sentence": "Developed in Rust, a language known for its safety and efficiency, this cross-platform worm uses several different methods of propagation to infect devices powered by different architectures.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "The malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.",
+        "score": 0.4006
+      },
+      {
+        "sentence": "Some strains attempt to abuse SSH while others exploit vulnerabilities in Redis, a popular in-memory database, to spread rapidly across networks. Â The most intriguing aspect of P2PInfect is its evolving nature; as researchers dig deeper to understand its goals, the worm continues to adapt, and expand to target new architectures.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "Nozomi Networks Labs has identified a strain of P2Pinfect that targets a new IoT architecture - ARM. Â This blog provides a comprehensive overview of recent P2PInfect worm operations and behavior, along with how they have changed over time.",
+        "score": 0.4066
+      },
+      {
+        "sentence": "We analyze a new set of samples to investigate the worm's defence techniques, and provide detections at the end of the blog.",
+        "score": 0.4883
+      },
+      {
+        "sentence": "By delving into the technical details and ongoing efforts to mitigate its threats, we aim to inform and educate readers about this emerging cybersecurity threat and the broader implications the malware holds for digital security in our interconnected world.",
+        "score": 0.4101
+      },
+      {
+        "sentence": "Tracking the Timeline of P2PInfect Strains According to our data, the first strains of this threat date back to at least July 2023.",
+        "score": 0.3549
+      },
+      {
+        "sentence": "Malware authors have been gradually introducing support for more and more platforms mainly focusing on the x86-64 platform of CPUs.",
+        "score": 0.4542
+      },
+      {
+        "sentence": "Redis is only officially supported in Linux, but P2PInfect creators are designing malware to spread to as many platforms as possible.",
+        "score": 0.3851
+      },
+      {
+        "sentence": "It is also feasible to install Redis in Windows machines using the Windows Subsystem for Linux (WSL) and the P2PInfect developers are aware of this.",
+        "score": 0.347
+      },
+      {
+        "sentence": "For this reason, the actors also ship Windows DLLs inside the ELF binaries to increase the number of devices they can infect.",
+        "score": 0.4681
+      },
+      {
+        "sentence": "They came across the first MIPS samples in the wild, determining that including Windows, DLLS is just one part of the strategy to broaden the potential range of targeted devices.",
+        "score": 0.4288
+      },
+      {
+        "sentence": "To this discovery, we add a new set of samples that target another typical IoT architecture: ARM, something that hasnât been reported by other researchers so far.",
+        "score": 0.4289
+      },
+      {
+        "sentence": "The corresponding example SHA-256 hashes found by Nozomi Networks Labs are the following: - 4421298c97f245f4e7eafb4f3873b0a95fe22682766c5dfb9c22ccfef8b91ad1 - 8ca16968634b5c7bb0343fff806da827ad00866748fce022da9fb0addc50ee99 A version of this malware that utilizes SSH protocol for propagation was intercepted by our chain of globally distributed honeypots on November 6, 2023, something that hasnât been observed by the researchers when the threat was first analyzed back in July 2023.",
+        "score": 0.3811
+      },
+      {
+        "sentence": "Our honeypots began recording the initial infection commands in October 2023, and this trend has continued to grow consistently until the current month of January 2024.",
+        "score": 0.4483
+      },
+      {
+        "sentence": "The majority of these malicious connections originate from locations in China, Hong Kong and Singapore.",
+        "score": 0.3804
+      },
+      {
+        "sentence": "On Windows, the compilation timestamps stored as part of the MZ-PE header structure of executables are commonly used to build timelines, even though they can be forged by attackers and on newer versions of Windows donât necessarily represent the timestamps but rather checksums.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "However, the ELF format of executables commonly found on *nix systems doesnât even have such a field.",
+        "score": 0.5189
+      },
+      {
+        "sentence": "Still, some conclusions can be made based on the metadata left by the compiler as well as metadata from third-party systems like VirusTotal.",
+        "score": 0.4032
+      },
+      {
+        "sentence": "In addition, here we actually do have Windows executables embedded into ELF files, the only thing that is left is to automatically extract all of them.",
+        "score": 0.5375
+      },
+      {
+        "sentence": "Here is an example SHA-256 hash of the same DLL found inside x86-64, ARM and MIPS samples: - a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e We have also uploaded it to VirusTotal to share it with the community.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "If its compilation timestamps (Figure 2) were not forged by attackers, they may indicate that attackers finished developing Windows payloads months before the first widespread distribution in July.",
+        "score": 0.4446
+      },
+      {
+        "sentence": "Turning our attention to the technical aspects of this identified threat, we've uncovered several self-defense techniques detailed in the following section.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "Tracing the Transformation of Malware Executables High-level Functionality Written in Rust, the P2PInfect malware mainly consists of two executable modules: the smaller (~0.5Mb) auxiliary module commonly having a filename âbashâ and a larger, main payload.",
+        "score": 0.497
+      },
+      {
+        "sentence": "The purpose of the former is to ensure the correct work of the main payload performing all the required validations, updates and revivals where necessary.",
+        "score": 0.4353
+      },
+      {
+        "sentence": "The main payload is capable of performing various operations, including propagating and delivering other modules with filenames that speak for themselves like miner and winminer.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "As its name suggests, the malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.",
+        "score": 0.4107
+      },
+      {
+        "sentence": "As we will see below, some parts of it are less static than others.",
+        "score": 0.3774
+      },
+      {
+        "sentence": "Self-Defense Techniques Samples packed with higher versions of the UPX tool generally canât be unpacked by lower versions of it, complicating the analysis and detection if automated analysis systems are using outdated versions of UPX.",
+        "score": 0.416
+      },
+      {
+        "sentence": "In general, attackers will use the latest version available.",
+        "score": 0.3367
+      },
+      {
+        "sentence": "Interestingly, the latest variants of this malware tend to utilize a particular version of the UPX packer: 4.0.2.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "This version is newer than 3.94 and 3.95 which are widely used by other attackers, but well below the most recent version available, which is 4.2.2.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "The use of version 4.0.2. provides an idea of how the project was developing as this version became available to the public on January 30, 2023, while the next version 4.1.0 not used by attackers was released on August 8, 2023.",
+        "score": 0.4071
+      },
+      {
+        "sentence": "It could mean that the main part of the development was taking place starting from early in 2023, and after the toolset was set up, the attackers didnât bother updating it.",
+        "score": 0.4355
+      },
+      {
+        "sentence": "The authors' commitment to safeguarding the samples from dynamic analysis and remediation becomes clear when we examine the various security measures employed in P2PInfect.",
+        "score": 0.3814
+      },
+      {
+        "sentence": "In addition to disabling core dumps through the 'setrlimit' syscall (Figure 3)Â and the process debugging protection noted by Cado Security, this family of malware employs additional security measures across various layers.",
+        "score": 0.4045
+      },
+      {
+        "sentence": "As mentioned earlier, the âbashâ binary is dropped into the system to ensure the continued âhealthâ of the P2PInfect sample in case a new version is released or its integrity is compromised (e.g., binary modification or the main process is not active).",
+        "score": 0.4597
+      },
+      {
+        "sentence": "This âbashâ binary is not downloaded from the botnet, itâs dropped from the sample.",
+        "score": 0.5124
+      },
+      {
+        "sentence": "To establish effective communication with it, the primary sample listens on the loopback address via a TCP port.",
+        "score": 0.3429
+      },
+      {
+        "sentence": "This approach can lead to a consistent behavior pattern that analysts can readily identify, and there is also the potential risk that the selected port may already be in use.",
+        "score": 0.3425
+      },
+      {
+        "sentence": "To mitigate these concerns, the dropped executable is intentionally made non-functional until the malware modifies it during runtime.",
+        "score": 0.4936
+      },
+      {
+        "sentence": "This measure also prevents the extraction of a functional payload from the primary executable.",
+        "score": 0.422
+      },
+      {
+        "sentence": "To find the memory to be modified inside the âtemplate bashâ executable to make it ready to be executed, P2PInfect looks for two markers âthisisportâ and âpassword12345678â to dynamically replace them with two random values.",
+        "score": 0.399
+      },
+      {
+        "sentence": "When the offset of the marker is found, a random port between 60100 and 60150 is generated and then an underscore â_â is appended to allow the bash executable to know where the port string ends.",
+        "score": 0.4305
+      },
+      {
+        "sentence": "This TCP port range is the same as the range of ports used to communicate with other peers within the P2P network.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "The password marker is replaced with 16 random characters that will be used to encrypt the communication between both executables.",
+        "score": 0.4341
+      },
+      {
+        "sentence": "This additional layer of protection provides an additional level of protection to conceal the transmitted content from curious eyes.",
+        "score": 0.3228
+      },
+      {
+        "sentence": "Finally, lots of main ELF payloads are distributed inside wrapper ELF files that just print a famous âHello, World!â message pretending this is its only functionality.",
+        "score": 0.4825
+      },
+      {
+        "sentence": "An example of it would be a sample d1ad42ab5289447cbd803e186d2115e1b2ea3bf3486dc92c7ef5153f572dfd65 containing the main P2PInfect payload 32365440cbe93909b1dfd4364bcdb0c31953f4d6be97a675eb3984126cc49295 inside (Figure 9).",
+        "score": 0.4152
+      },
+      {
+        "sentence": "To infect new targets, P2PInfect executes a bruteforce attack against the device with the SSH server and, after a successful login, different commands are executed to download and run the malware (Figure 8).",
+        "score": 0.4228
+      },
+      {
+        "sentence": "An example of such a sample is the following, illustrated in Figure 9: - 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de Conclusion The P2PInfect malware family continues to expand its reach across various architectures and platforms, representing a significant and evolving threat in the realm of cybersecurity.",
+        "score": 0.4551
+      },
+      {
+        "sentence": "Its unique characteristics, such as its use of Rust and exploitation of Redis vulnerabilities, highlight the ongoing challenges presented by modern malware.",
+        "score": 0.3532
+      },
+      {
+        "sentence": "While researchers and cybersecurity experts are making strides in understanding and combating this worm, P2PInfect serves as a stark reminder of the dynamic nature of cyber threats and the importance of staying ahead in the ever-evolving cybersecurity landscape.",
+        "score": 0.3802
+      },
+      {
+        "sentence": "As we forge ahead, it is crucial for individuals and organizations alike to remain informed and proactive in their cybersecurity practices to mitigate the risks posed by such sophisticated threats.",
+        "score": 0.3449
+      }
+    ],
+    "T1068": [
+      {
+        "sentence": "A highly sophisticated strain of malware known as P2PInfect is raising new concerns in the cybersecurity community.",
+        "score": 0.3095
+      },
+      {
+        "sentence": "Developed in Rust, a language known for its safety and efficiency, this cross-platform worm uses several different methods of propagation to infect devices powered by different architectures.",
+        "score": 0.419
+      },
+      {
+        "sentence": "Some strains attempt to abuse SSH while others exploit vulnerabilities in Redis, a popular in-memory database, to spread rapidly across networks. Â The most intriguing aspect of P2PInfect is its evolving nature; as researchers dig deeper to understand its goals, the worm continues to adapt, and expand to target new architectures.",
+        "score": 0.5381
+      },
+      {
+        "sentence": "Nozomi Networks Labs has identified a strain of P2Pinfect that targets a new IoT architecture - ARM. Â This blog provides a comprehensive overview of recent P2PInfect worm operations and behavior, along with how they have changed over time.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "We analyze a new set of samples to investigate the worm's defence techniques, and provide detections at the end of the blog.",
+        "score": 0.3161
+      },
+      {
+        "sentence": "By delving into the technical details and ongoing efforts to mitigate its threats, we aim to inform and educate readers about this emerging cybersecurity threat and the broader implications the malware holds for digital security in our interconnected world.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "Malware authors have been gradually introducing support for more and more platforms mainly focusing on the x86-64 platform of CPUs.",
+        "score": 0.4178
+      },
+      {
+        "sentence": "Redis is only officially supported in Linux, but P2PInfect creators are designing malware to spread to as many platforms as possible.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "For this reason, the actors also ship Windows DLLs inside the ELF binaries to increase the number of devices they can infect.",
+        "score": 0.3122
+      },
+      {
+        "sentence": "They came across the first MIPS samples in the wild, determining that including Windows, DLLS is just one part of the strategy to broaden the potential range of targeted devices.",
+        "score": 0.4321
+      },
+      {
+        "sentence": "This revelation has expanded the scope to potentially affect a wider array of devices.",
+        "score": 0.3537
+      },
+      {
+        "sentence": "To this discovery, we add a new set of samples that target another typical IoT architecture: ARM, something that hasnât been reported by other researchers so far.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "On Windows, the compilation timestamps stored as part of the MZ-PE header structure of executables are commonly used to build timelines, even though they can be forged by attackers and on newer versions of Windows donât necessarily represent the timestamps but rather checksums.",
+        "score": 0.3068
+      },
+      {
+        "sentence": "In addition, here we actually do have Windows executables embedded into ELF files, the only thing that is left is to automatically extract all of them.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "Here is an example SHA-256 hash of the same DLL found inside x86-64, ARM and MIPS samples: - a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e We have also uploaded it to VirusTotal to share it with the community.",
+        "score": 0.3245
+      },
+      {
+        "sentence": "If its compilation timestamps (Figure 2) were not forged by attackers, they may indicate that attackers finished developing Windows payloads months before the first widespread distribution in July.",
+        "score": 0.3566
+      },
+      {
+        "sentence": "Turning our attention to the technical aspects of this identified threat, we've uncovered several self-defense techniques detailed in the following section.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "The purpose of the former is to ensure the correct work of the main payload performing all the required validations, updates and revivals where necessary.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "Self-Defense Techniques Samples packed with higher versions of the UPX tool generally canât be unpacked by lower versions of it, complicating the analysis and detection if automated analysis systems are using outdated versions of UPX.",
+        "score": 0.307
+      },
+      {
+        "sentence": "In general, attackers will use the latest version available.",
+        "score": 0.4442
+      },
+      {
+        "sentence": "This version is newer than 3.94 and 3.95 which are widely used by other attackers, but well below the most recent version available, which is 4.2.2.",
+        "score": 0.4238
+      },
+      {
+        "sentence": "The authors' commitment to safeguarding the samples from dynamic analysis and remediation becomes clear when we examine the various security measures employed in P2PInfect.",
+        "score": 0.3048
+      },
+      {
+        "sentence": "As mentioned earlier, the âbashâ binary is dropped into the system to ensure the continued âhealthâ of the P2PInfect sample in case a new version is released or its integrity is compromised (e.g., binary modification or the main process is not active).",
+        "score": 0.4062
+      },
+      {
+        "sentence": "To find the memory to be modified inside the âtemplate bashâ executable to make it ready to be executed, P2PInfect looks for two markers âthisisportâ and âpassword12345678â to dynamically replace them with two random values.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "Once the device is infected it's ready to spread to other devices.",
+        "score": 0.3122
+      },
+      {
+        "sentence": "To infect new targets, P2PInfect executes a bruteforce attack against the device with the SSH server and, after a successful login, different commands are executed to download and run the malware (Figure 8).",
+        "score": 0.3767
+      },
+      {
+        "sentence": "An example of such a sample is the following, illustrated in Figure 9: - 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de Conclusion The P2PInfect malware family continues to expand its reach across various architectures and platforms, representing a significant and evolving threat in the realm of cybersecurity.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "Its unique characteristics, such as its use of Rust and exploitation of Redis vulnerabilities, highlight the ongoing challenges presented by modern malware.",
+        "score": 0.5762
+      },
+      {
+        "sentence": "While researchers and cybersecurity experts are making strides in understanding and combating this worm, P2PInfect serves as a stark reminder of the dynamic nature of cyber threats and the importance of staying ahead in the ever-evolving cybersecurity landscape.",
+        "score": 0.399
+      },
+      {
+        "sentence": "As we forge ahead, it is crucial for individuals and organizations alike to remain informed and proactive in their cybersecurity practices to mitigate the risks posed by such sophisticated threats.",
+        "score": 0.3841
+      }
+    ],
+    "T1071": [
+      {
+        "sentence": "A highly sophisticated strain of malware known as P2PInfect is raising new concerns in the cybersecurity community.",
+        "score": 0.3396
+      },
+      {
+        "sentence": "Developed in Rust, a language known for its safety and efficiency, this cross-platform worm uses several different methods of propagation to infect devices powered by different architectures.",
+        "score": 0.4222
+      },
+      {
+        "sentence": "The malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.",
+        "score": 0.6738
+      },
+      {
+        "sentence": "Some strains attempt to abuse SSH while others exploit vulnerabilities in Redis, a popular in-memory database, to spread rapidly across networks. Â The most intriguing aspect of P2PInfect is its evolving nature; as researchers dig deeper to understand its goals, the worm continues to adapt, and expand to target new architectures.",
+        "score": 0.4241
+      },
+      {
+        "sentence": "Nozomi Networks Labs has identified a strain of P2Pinfect that targets a new IoT architecture - ARM. Â This blog provides a comprehensive overview of recent P2PInfect worm operations and behavior, along with how they have changed over time.",
+        "score": 0.4437
+      },
+      {
+        "sentence": "We analyze a new set of samples to investigate the worm's defence techniques, and provide detections at the end of the blog.",
+        "score": 0.381
+      },
+      {
+        "sentence": "By delving into the technical details and ongoing efforts to mitigate its threats, we aim to inform and educate readers about this emerging cybersecurity threat and the broader implications the malware holds for digital security in our interconnected world.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "Tracking the Timeline of P2PInfect Strains According to our data, the first strains of this threat date back to at least July 2023.",
+        "score": 0.4064
+      },
+      {
+        "sentence": "Malware authors have been gradually introducing support for more and more platforms mainly focusing on the x86-64 platform of CPUs.",
+        "score": 0.327
+      },
+      {
+        "sentence": "Redis is only officially supported in Linux, but P2PInfect creators are designing malware to spread to as many platforms as possible.",
+        "score": 0.3692
+      },
+      {
+        "sentence": "For this reason, the actors also ship Windows DLLs inside the ELF binaries to increase the number of devices they can infect.",
+        "score": 0.4119
+      },
+      {
+        "sentence": "They came across the first MIPS samples in the wild, determining that including Windows, DLLS is just one part of the strategy to broaden the potential range of targeted devices.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "To this discovery, we add a new set of samples that target another typical IoT architecture: ARM, something that hasnât been reported by other researchers so far.",
+        "score": 0.3752
+      },
+      {
+        "sentence": "The corresponding example SHA-256 hashes found by Nozomi Networks Labs are the following: - 4421298c97f245f4e7eafb4f3873b0a95fe22682766c5dfb9c22ccfef8b91ad1 - 8ca16968634b5c7bb0343fff806da827ad00866748fce022da9fb0addc50ee99 A version of this malware that utilizes SSH protocol for propagation was intercepted by our chain of globally distributed honeypots on November 6, 2023, something that hasnât been observed by the researchers when the threat was first analyzed back in July 2023.",
+        "score": 0.621
+      },
+      {
+        "sentence": "Our honeypots began recording the initial infection commands in October 2023, and this trend has continued to grow consistently until the current month of January 2024.",
+        "score": 0.3747
+      },
+      {
+        "sentence": "The majority of these malicious connections originate from locations in China, Hong Kong and Singapore.",
+        "score": 0.3762
+      },
+      {
+        "sentence": "On Windows, the compilation timestamps stored as part of the MZ-PE header structure of executables are commonly used to build timelines, even though they can be forged by attackers and on newer versions of Windows donât necessarily represent the timestamps but rather checksums.",
+        "score": 0.3245
+      },
+      {
+        "sentence": "However, the ELF format of executables commonly found on *nix systems doesnât even have such a field.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "In addition, here we actually do have Windows executables embedded into ELF files, the only thing that is left is to automatically extract all of them.",
+        "score": 0.381
+      },
+      {
+        "sentence": "Here is an example SHA-256 hash of the same DLL found inside x86-64, ARM and MIPS samples: - a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e We have also uploaded it to VirusTotal to share it with the community.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "If its compilation timestamps (Figure 2) were not forged by attackers, they may indicate that attackers finished developing Windows payloads months before the first widespread distribution in July.",
+        "score": 0.3145
+      },
+      {
+        "sentence": "Tracing the Transformation of Malware Executables High-level Functionality Written in Rust, the P2PInfect malware mainly consists of two executable modules: the smaller (~0.5Mb) auxiliary module commonly having a filename âbashâ and a larger, main payload.",
+        "score": 0.4546
+      },
+      {
+        "sentence": "The purpose of the former is to ensure the correct work of the main payload performing all the required validations, updates and revivals where necessary.",
+        "score": 0.385
+      },
+      {
+        "sentence": "The main payload is capable of performing various operations, including propagating and delivering other modules with filenames that speak for themselves like miner and winminer.",
+        "score": 0.4427
+      },
+      {
+        "sentence": "As its name suggests, the malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.",
+        "score": 0.6677
+      },
+      {
+        "sentence": "As we will see below, some parts of it are less static than others.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "Self-Defense Techniques Samples packed with higher versions of the UPX tool generally canât be unpacked by lower versions of it, complicating the analysis and detection if automated analysis systems are using outdated versions of UPX.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "In general, attackers will use the latest version available.",
+        "score": 0.3817
+      },
+      {
+        "sentence": "Interestingly, the latest variants of this malware tend to utilize a particular version of the UPX packer: 4.0.2.",
+        "score": 0.3461
+      },
+      {
+        "sentence": "This version is newer than 3.94 and 3.95 which are widely used by other attackers, but well below the most recent version available, which is 4.2.2.",
+        "score": 0.4194
+      },
+      {
+        "sentence": "The use of version 4.0.2. provides an idea of how the project was developing as this version became available to the public on January 30, 2023, while the next version 4.1.0 not used by attackers was released on August 8, 2023.",
+        "score": 0.4566
+      },
+      {
+        "sentence": "It could mean that the main part of the development was taking place starting from early in 2023, and after the toolset was set up, the attackers didnât bother updating it.",
+        "score": 0.3952
+      },
+      {
+        "sentence": "The authors' commitment to safeguarding the samples from dynamic analysis and remediation becomes clear when we examine the various security measures employed in P2PInfect.",
+        "score": 0.338
+      },
+      {
+        "sentence": "As mentioned earlier, the âbashâ binary is dropped into the system to ensure the continued âhealthâ of the P2PInfect sample in case a new version is released or its integrity is compromised (e.g., binary modification or the main process is not active).",
+        "score": 0.4165
+      },
+      {
+        "sentence": "This âbashâ binary is not downloaded from the botnet, itâs dropped from the sample.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "To establish effective communication with it, the primary sample listens on the loopback address via a TCP port.",
+        "score": 0.6198
+      },
+      {
+        "sentence": "This approach can lead to a consistent behavior pattern that analysts can readily identify, and there is also the potential risk that the selected port may already be in use.",
+        "score": 0.5035
+      },
+      {
+        "sentence": "To mitigate these concerns, the dropped executable is intentionally made non-functional until the malware modifies it during runtime.",
+        "score": 0.3462
+      },
+      {
+        "sentence": "This measure also prevents the extraction of a functional payload from the primary executable.",
+        "score": 0.3437
+      },
+      {
+        "sentence": "To find the memory to be modified inside the âtemplate bashâ executable to make it ready to be executed, P2PInfect looks for two markers âthisisportâ and âpassword12345678â to dynamically replace them with two random values.",
+        "score": 0.3218
+      },
+      {
+        "sentence": "When the offset of the marker is found, a random port between 60100 and 60150 is generated and then an underscore â_â is appended to allow the bash executable to know where the port string ends.",
+        "score": 0.4656
+      },
+      {
+        "sentence": "This TCP port range is the same as the range of ports used to communicate with other peers within the P2P network.",
+        "score": 0.6861
+      },
+      {
+        "sentence": "The password marker is replaced with 16 random characters that will be used to encrypt the communication between both executables.",
+        "score": 0.4695
+      },
+      {
+        "sentence": "This additional layer of protection provides an additional level of protection to conceal the transmitted content from curious eyes.",
+        "score": 0.4881
+      },
+      {
+        "sentence": "Finally, lots of main ELF payloads are distributed inside wrapper ELF files that just print a famous âHello, World!â message pretending this is its only functionality.",
+        "score": 0.4716
+      },
+      {
+        "sentence": "An example of it would be a sample d1ad42ab5289447cbd803e186d2115e1b2ea3bf3486dc92c7ef5153f572dfd65 containing the main P2PInfect payload 32365440cbe93909b1dfd4364bcdb0c31953f4d6be97a675eb3984126cc49295 inside (Figure 9).",
+        "score": 0.4379
+      },
+      {
+        "sentence": "Once the device is infected it's ready to spread to other devices.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "To infect new targets, P2PInfect executes a bruteforce attack against the device with the SSH server and, after a successful login, different commands are executed to download and run the malware (Figure 8).",
+        "score": 0.423
+      },
+      {
+        "sentence": "An example of such a sample is the following, illustrated in Figure 9: - 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de Conclusion The P2PInfect malware family continues to expand its reach across various architectures and platforms, representing a significant and evolving threat in the realm of cybersecurity.",
+        "score": 0.436
+      },
+      {
+        "sentence": "Its unique characteristics, such as its use of Rust and exploitation of Redis vulnerabilities, highlight the ongoing challenges presented by modern malware.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "While researchers and cybersecurity experts are making strides in understanding and combating this worm, P2PInfect serves as a stark reminder of the dynamic nature of cyber threats and the importance of staying ahead in the ever-evolving cybersecurity landscape.",
+        "score": 0.4129
+      }
+    ],
+    "T1190": [
+      {
+        "sentence": "Developed in Rust, a language known for its safety and efficiency, this cross-platform worm uses several different methods of propagation to infect devices powered by different architectures.",
+        "score": 0.4538
+      },
+      {
+        "sentence": "The malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.",
+        "score": 0.3057
+      },
+      {
+        "sentence": "Some strains attempt to abuse SSH while others exploit vulnerabilities in Redis, a popular in-memory database, to spread rapidly across networks. Â The most intriguing aspect of P2PInfect is its evolving nature; as researchers dig deeper to understand its goals, the worm continues to adapt, and expand to target new architectures.",
+        "score": 0.7484
+      },
+      {
+        "sentence": "Nozomi Networks Labs has identified a strain of P2Pinfect that targets a new IoT architecture - ARM. Â This blog provides a comprehensive overview of recent P2PInfect worm operations and behavior, along with how they have changed over time.",
+        "score": 0.4846
+      },
+      {
+        "sentence": "We analyze a new set of samples to investigate the worm's defence techniques, and provide detections at the end of the blog.",
+        "score": 0.4006
+      },
+      {
+        "sentence": "By delving into the technical details and ongoing efforts to mitigate its threats, we aim to inform and educate readers about this emerging cybersecurity threat and the broader implications the malware holds for digital security in our interconnected world.",
+        "score": 0.3902
+      },
+      {
+        "sentence": "Tracking the Timeline of P2PInfect Strains According to our data, the first strains of this threat date back to at least July 2023.",
+        "score": 0.4395
+      },
+      {
+        "sentence": "Malware authors have been gradually introducing support for more and more platforms mainly focusing on the x86-64 platform of CPUs.",
+        "score": 0.3243
+      },
+      {
+        "sentence": "Redis is only officially supported in Linux, but P2PInfect creators are designing malware to spread to as many platforms as possible.",
+        "score": 0.3892
+      },
+      {
+        "sentence": "For this reason, the actors also ship Windows DLLs inside the ELF binaries to increase the number of devices they can infect.",
+        "score": 0.3422
+      },
+      {
+        "sentence": "Recently, Cado Security Labs made a noteworthy discovery.",
+        "score": 0.4413
+      },
+      {
+        "sentence": "They came across the first MIPS samples in the wild, determining that including Windows, DLLS is just one part of the strategy to broaden the potential range of targeted devices.",
+        "score": 0.44
+      },
+      {
+        "sentence": "This revelation has expanded the scope to potentially affect a wider array of devices.",
+        "score": 0.5119
+      },
+      {
+        "sentence": "To this discovery, we add a new set of samples that target another typical IoT architecture: ARM, something that hasnât been reported by other researchers so far.",
+        "score": 0.4514
+      },
+      {
+        "sentence": "The corresponding example SHA-256 hashes found by Nozomi Networks Labs are the following: - 4421298c97f245f4e7eafb4f3873b0a95fe22682766c5dfb9c22ccfef8b91ad1 - 8ca16968634b5c7bb0343fff806da827ad00866748fce022da9fb0addc50ee99 A version of this malware that utilizes SSH protocol for propagation was intercepted by our chain of globally distributed honeypots on November 6, 2023, something that hasnât been observed by the researchers when the threat was first analyzed back in July 2023.",
+        "score": 0.4765
+      },
+      {
+        "sentence": "Our honeypots began recording the initial infection commands in October 2023, and this trend has continued to grow consistently until the current month of January 2024.",
+        "score": 0.305
+      },
+      {
+        "sentence": "The majority of these malicious connections originate from locations in China, Hong Kong and Singapore.",
+        "score": 0.3677
+      },
+      {
+        "sentence": "Still, some conclusions can be made based on the metadata left by the compiler as well as metadata from third-party systems like VirusTotal.",
+        "score": 0.3759
+      },
+      {
+        "sentence": "In addition, here we actually do have Windows executables embedded into ELF files, the only thing that is left is to automatically extract all of them.",
+        "score": 0.3114
+      },
+      {
+        "sentence": "Here is an example SHA-256 hash of the same DLL found inside x86-64, ARM and MIPS samples: - a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e We have also uploaded it to VirusTotal to share it with the community.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "If its compilation timestamps (Figure 2) were not forged by attackers, they may indicate that attackers finished developing Windows payloads months before the first widespread distribution in July.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "Turning our attention to the technical aspects of this identified threat, we've uncovered several self-defense techniques detailed in the following section.",
+        "score": 0.3832
+      },
+      {
+        "sentence": "Tracing the Transformation of Malware Executables High-level Functionality Written in Rust, the P2PInfect malware mainly consists of two executable modules: the smaller (~0.5Mb) auxiliary module commonly having a filename âbashâ and a larger, main payload.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "The purpose of the former is to ensure the correct work of the main payload performing all the required validations, updates and revivals where necessary.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "As its name suggests, the malware is capable of performing Peer-to-Peer (P2P) communications without relying on a single Command and Control server (C&C) to propagate attackersâ commands.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "As we will see below, some parts of it are less static than others.",
+        "score": 0.3034
+      },
+      {
+        "sentence": "In general, attackers will use the latest version available.",
+        "score": 0.4788
+      },
+      {
+        "sentence": "This version is newer than 3.94 and 3.95 which are widely used by other attackers, but well below the most recent version available, which is 4.2.2.",
+        "score": 0.5239
+      },
+      {
+        "sentence": "The use of version 4.0.2. provides an idea of how the project was developing as this version became available to the public on January 30, 2023, while the next version 4.1.0 not used by attackers was released on August 8, 2023.",
+        "score": 0.4616
+      },
+      {
+        "sentence": "It could mean that the main part of the development was taking place starting from early in 2023, and after the toolset was set up, the attackers didnât bother updating it.",
+        "score": 0.4035
+      },
+      {
+        "sentence": "The authors' commitment to safeguarding the samples from dynamic analysis and remediation becomes clear when we examine the various security measures employed in P2PInfect.",
+        "score": 0.3401
+      },
+      {
+        "sentence": "As mentioned earlier, the âbashâ binary is dropped into the system to ensure the continued âhealthâ of the P2PInfect sample in case a new version is released or its integrity is compromised (e.g., binary modification or the main process is not active).",
+        "score": 0.3261
+      },
+      {
+        "sentence": "This âbashâ binary is not downloaded from the botnet, itâs dropped from the sample.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "This approach can lead to a consistent behavior pattern that analysts can readily identify, and there is also the potential risk that the selected port may already be in use.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "When the offset of the marker is found, a random port between 60100 and 60150 is generated and then an underscore â_â is appended to allow the bash executable to know where the port string ends.",
+        "score": 0.375
+      },
+      {
+        "sentence": "This TCP port range is the same as the range of ports used to communicate with other peers within the P2P network.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "Finally, lots of main ELF payloads are distributed inside wrapper ELF files that just print a famous âHello, World!â message pretending this is its only functionality.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "An example of it would be a sample d1ad42ab5289447cbd803e186d2115e1b2ea3bf3486dc92c7ef5153f572dfd65 containing the main P2PInfect payload 32365440cbe93909b1dfd4364bcdb0c31953f4d6be97a675eb3984126cc49295 inside (Figure 9).",
+        "score": 0.3038
+      },
+      {
+        "sentence": "Once the device is infected it's ready to spread to other devices.",
+        "score": 0.3966
+      },
+      {
+        "sentence": "To infect new targets, P2PInfect executes a bruteforce attack against the device with the SSH server and, after a successful login, different commands are executed to download and run the malware (Figure 8).",
+        "score": 0.4614
+      },
+      {
+        "sentence": "An example of such a sample is the following, illustrated in Figure 9: - 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de Conclusion The P2PInfect malware family continues to expand its reach across various architectures and platforms, representing a significant and evolving threat in the realm of cybersecurity.",
+        "score": 0.3807
+      },
+      {
+        "sentence": "Its unique characteristics, such as its use of Rust and exploitation of Redis vulnerabilities, highlight the ongoing challenges presented by modern malware.",
+        "score": 0.6666
+      },
+      {
+        "sentence": "While researchers and cybersecurity experts are making strides in understanding and combating this worm, P2PInfect serves as a stark reminder of the dynamic nature of cyber threats and the importance of staying ahead in the ever-evolving cybersecurity landscape.",
+        "score": 0.4637
+      },
+      {
+        "sentence": "As we forge ahead, it is crucial for individuals and organizations alike to remain informed and proactive in their cybersecurity practices to mitigate the risks posed by such sophisticated threats.",
+        "score": 0.3607
+      }
+    ],
+    "T1107": [
+      {
+        "sentence": "By delving into the technical details and ongoing efforts to mitigate its threats, we aim to inform and educate readers about this emerging cybersecurity threat and the broader implications the malware holds for digital security in our interconnected world.",
+        "score": 0.3223
+      },
+      {
+        "sentence": "For this reason, the actors also ship Windows DLLs inside the ELF binaries to increase the number of devices they can infect.",
+        "score": 0.3355
+      },
+      {
+        "sentence": "However, the ELF format of executables commonly found on *nix systems doesnât even have such a field.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "Still, some conclusions can be made based on the metadata left by the compiler as well as metadata from third-party systems like VirusTotal.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "In addition, here we actually do have Windows executables embedded into ELF files, the only thing that is left is to automatically extract all of them.",
+        "score": 0.3984
+      },
+      {
+        "sentence": "Here is an example SHA-256 hash of the same DLL found inside x86-64, ARM and MIPS samples: - a29cb8da788a5ebaa7b8f6a6016d7233f81f9f478cf4a52e021a6d6060d09f7e We have also uploaded it to VirusTotal to share it with the community.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "Tracing the Transformation of Malware Executables High-level Functionality Written in Rust, the P2PInfect malware mainly consists of two executable modules: the smaller (~0.5Mb) auxiliary module commonly having a filename âbashâ and a larger, main payload.",
+        "score": 0.4007
+      },
+      {
+        "sentence": "The main payload is capable of performing various operations, including propagating and delivering other modules with filenames that speak for themselves like miner and winminer.",
+        "score": 0.3874
+      },
+      {
+        "sentence": "Self-Defense Techniques Samples packed with higher versions of the UPX tool generally canât be unpacked by lower versions of it, complicating the analysis and detection if automated analysis systems are using outdated versions of UPX.",
+        "score": 0.4262
+      },
+      {
+        "sentence": "Interestingly, the latest variants of this malware tend to utilize a particular version of the UPX packer: 4.0.2.",
+        "score": 0.3651
+      },
+      {
+        "sentence": "In addition to disabling core dumps through the 'setrlimit' syscall (Figure 3)Â and the process debugging protection noted by Cado Security, this family of malware employs additional security measures across various layers.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "As mentioned earlier, the âbashâ binary is dropped into the system to ensure the continued âhealthâ of the P2PInfect sample in case a new version is released or its integrity is compromised (e.g., binary modification or the main process is not active).",
+        "score": 0.4884
+      },
+      {
+        "sentence": "This âbashâ binary is not downloaded from the botnet, itâs dropped from the sample.",
+        "score": 0.4218
+      },
+      {
+        "sentence": "To mitigate these concerns, the dropped executable is intentionally made non-functional until the malware modifies it during runtime.",
+        "score": 0.5178
+      },
+      {
+        "sentence": "This measure also prevents the extraction of a functional payload from the primary executable.",
+        "score": 0.3429
+      },
+      {
+        "sentence": "To find the memory to be modified inside the âtemplate bashâ executable to make it ready to be executed, P2PInfect looks for two markers âthisisportâ and âpassword12345678â to dynamically replace them with two random values.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "The password marker is replaced with 16 random characters that will be used to encrypt the communication between both executables.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "Finally, lots of main ELF payloads are distributed inside wrapper ELF files that just print a famous âHello, World!â message pretending this is its only functionality.",
+        "score": 0.3554
+      },
+      {
+        "sentence": "An example of it would be a sample d1ad42ab5289447cbd803e186d2115e1b2ea3bf3486dc92c7ef5153f572dfd65 containing the main P2PInfect payload 32365440cbe93909b1dfd4364bcdb0c31953f4d6be97a675eb3984126cc49295 inside (Figure 9).",
+        "score": 0.3164
+      },
+      {
+        "sentence": "An example of such a sample is the following, illustrated in Figure 9: - 9ec9d3f720a752b9ab928e1c395c778d3da652442d0f0ae09552efc2f57ee6de Conclusion The P2PInfect malware family continues to expand its reach across various architectures and platforms, representing a significant and evolving threat in the realm of cybersecurity.",
+        "score": 0.3029
+      }
+    ]
+  }
+}

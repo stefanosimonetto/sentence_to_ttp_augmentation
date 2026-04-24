@@ -1,0 +1,166 @@
+{
+  "original_txt": "What is linux-gate.so.1?\nWhen you use the ldd utility on a reasonably recent Linux system you'll frequently see a reference to an ethereal entity known as linux-gate.so.1:\nldd /bin/sh linux-gate.so.1 => (0xffffe000) libdl.so.2 => /lib/libdl.so.2 (0xb7fb2000) libc.so.6 => /lib/libc.so.6 (0xb7e7c000) /lib/ld-linux.so.2 (0xb7fba000)\nWhat's so strange about that? It's just a dynamically loaded library, right?\nSort of, for sufficiently generous definitions of dynamically loaded library. The lack of file name in the output indicates that ldd was unable to locate a file by that name. Indeed, any attempt to find the corresponding file – whether manually or by software designed to automatically load and analyze such libraries – will be unsuccessful.\nFrom time to time this is a cause of befuddlement and frustration for users as they go searching for a non-existent system file. You can confidently tell users on this futile quest that there's not supposed to be a linux-gate.so.1 file present anywhere on the file system; it's a virtual DSO, a shared object exposed by the kernel at a fixed address in every process' memory:\ncat /proc/self/maps 08048000-0804c000 r-xp 00000000 08:03 7971106 /bin/cat 0804c000-0804d000 rwxp 00003000 08:03 7971106 /bin/cat 0804d000-0806e000 rwxp 0804d000 00:00 0 [heap] b7e88000-b7e89000 rwxp b7e88000 00:00 0 b7e89000-b7fb8000 r-xp 00000000 08:03 8856588 /lib/libc-2.3.5.so b7fb8000-b7fb9000 r-xp 0012e000 08:03 8856588 /lib/libc-2.3.5.so b7fb9000-b7fbc000 rwxp 0012f000 08:03 8856588 /lib/libc-2.3.5.so b7fbc000-b7fbe000 rwxp b7fbc000 00:00 0 b7fc2000-b7fd9000 r-xp 00000000 08:03 8856915 /lib/ld-2.3.5.so b7fd9000-b7fdb000 rwxp 00016000 08:03 8856915 /lib/ld-2.3.5.so bfac3000-bfad9000 rw-p bfac3000 00:00 0 [stack] ffffe000-fffff000 ---p 00000000 00:00 0 [vdso]\nHere cat prints its own memory map. The line marked [vdso] is the linux-gate.so.1 object in that process, a single memory page mapped at address ffffe000. A program can determine the location of the shared object in memory by examining an AT_SYSINFO\nentry in the ELF auxiliary vector. The auxiliary vector (auxv\n) is an array of pointers passed to new processes in the same way program arguments (argv\n) and environment variables (envp\n) are.\nIn theory the address could differ between processes, but as far as I know the Linux kernel always maps it at a fixed location. The sample output above come from an x86 box where processes live in plain old 32-bit address spaces divided into pages of 4096 bytes, making ffffe000 the penultimate page. The very last page is reserved to catch accesses through invalid pointers, e.g. dereferencing a decremented NULL\npointer or a MAP_FAILED\npointer returned from mmap\n.\nSince all processes share the same object at the same location, it's easy to extract a copy of it if we want to take a closer look at it. For example, we can simply ask dd to dump the page from its own memory (carefully choosing an output name different from linux-gate.so.1 to avoid creating a file that's not supposed to exist):\ndd if=/proc/self/mem of=linux-gate.dso bs=4096 skip=1048574 count=1 1+0 records in 1+0 records out\nWe skip 1048574 because there are 220 = 1048576 pages in total and we want to extract the next to last page. The result looks like any other shared ELF object file:\nfile -b linux-gate.dso ELF 32-bit LSB shared object, Intel 80386, version 1 (SYSV), stripped objdump -T linux-gate.dso linux-gate.dso: file format elf32-i386 DYNAMIC SYMBOL TABLE: ffffe400 l d .text 00000000 ffffe460 l d .eh_frame_hdr 00000000 ffffe484 l d .eh_frame 00000000 ffffe608 l d .useless 00000000 ffffe400 g DF .text 00000014 LINUX_2.5 __kernel_vsyscall 00000000 g DO *ABS* 00000000 LINUX_2.5 LINUX_2.5 ffffe440 g DF .text 00000007 LINUX_2.5 __kernel_rt_sigreturn ffffe420 g DF .text 00000008 LINUX_2.5 __kernel_sigreturn\nThese symbols are entry points for the rt_sigreturn\n/sigreturn\nfunctions and for making virtual system calls. On the x86 platform linux-gate.so.1 was initially called linux-vsyscall.so.1, but this was changed during development to get a common name accurately reflecting its purpose across platforms: to act as a gateway between user and kernel space. Not all platforms need virtual syscalls, but they must be fairly important for x86 to warrant this elaborate mechanism.\nTraditionally, x86 system calls have been done with interrupts. You may remember that the way to request operating system functions was via interrupt 33 (21h) back in the bad old MS-DOS days. Windows system calls are buried beneath layers of user-mode APIs, but at some point they too boil down to int 0x2e\n. Similarly, syscall implementations in Linux and other *nix kernels have been using int 0x80\n.\nIt turns out, though, that system calls invoked via interrupts are remarkably slow on the more recent members of the x86 processor family. An int 0x80\nsystem call can be as much as an order of magnitude slower on a 2 GHz Pentium 4 than on an 850 MHz Pentium III. The impact on performance resulting from this could easily be significant, at least for applications that do a lot of system calls.\nIntel recognized this problem early on and introduced a more efficient system call interface in the form of sysenter\nand sysexit\ninstructions. This fast system call feature first appeared in the Pentium Pro processor, but due to hardware bugs it's actually broken in most of the early CPUs. That's why you may see claims that sysenter\nwas introduced with Pentium II or even Pentium III.\nThe hardware problems also help explain why it took quite some time before operating systems started supporting fast system calls. If we ignore earlier experimental patches, Linux support for sysenter\nappeared in December 2002 during kernel 2.5 development. That's ten years after the instruction was defined! Microsoft started using sysenter\nonly slightly earlier, in Windows XP.\nYou can find out if your Linux machine is using the sysenter\ninstruction for system calls by disassembling __kernel_vsyscall\n:\nobjdump -d --start-address=0xffffe400 --stop-address=0xffffe414 linux-gate.dso linux-gate.dso: file format elf32-i386 Disassembly of section .text: ffffe400 <__kernel_vsyscall>: ffffe400: 51 push %ecx ffffe401: 52 push %edx ffffe402: 55 push %ebp ffffe403: 89 e5 mov %esp,%ebp ffffe405: 0f 34 sysenter ffffe407: 90 nop ffffe408: 90 nop ffffe409: 90 nop ffffe40a: 90 nop ffffe40b: 90 nop ffffe40c: 90 nop ffffe40d: 90 nop ffffe40e: eb f3 jmp ffffe403 <__kernel_vsyscall+0x3> ffffe410: 5d pop %ebp ffffe411: 5a pop %edx ffffe412: 59 pop %ecx ffffe413: c3 ret\nThe preferred way of invoking a system call is determined by the kernel at boot time, and evidently this box uses sysenter\n. On an older machine you may see int 0x80\nbeing used instead. In case you are struggling to make sense of that jump (like I was the first time I saw it) you might be interested to learn that it's there because Linus Torvalds is a disgusting pig and proud of it. (It's a trick to handle restarting of system calls with six parameters).\n14 August, 2005\nSimilar journal entries:\nFeedback\nby Hugo van den Brand\nI think this explanation is great.\nI'm kind of a newbie when it comes to libraries, but you really explained it very well.\nKeep up the good work, and you're more than worth standing on the first page of google. You ought to be on top of the list.\nby Aleksandr Koltsoff\nI always thought that AMD was the first to introduce sysenter and sysleave (similar names at least) in K6 CPUs (ages ago) and intel trailed by couple of years. Don't remember whether the opcodes are exactly the same, but the idea is.\nby Johan\nThe AMD syscall\n/sysret\ninstructions first appeared in the original K6, which came after the Pentium Pro. I'm not sure whether the fast system call instructions were part of the acquired NexGen Nx686 design or if those were added by AMD. Who came up with the idea first? Hard to say. Due to bugs and limitations neither feature were used in practice until much later.\nThe opcodes and semantics are different. AMD later adopted Intel's sysenter\n/sysexit\n, and to make things even more confusing Intel now supports syscall\n/sysret\n– in 64-bit mode only.\nby Hardik Dalwadi\nIT's great......I am always wondering that where is this shared librar....\nI have search.....Finaly my friend send me this page's link and, problem solved..........",
+  "sanitized_txt": "What is linux-gate.so.1?\nWhen you use the ldd utility on a reasonably recent Linux system you'll frequently see a reference to an ethereal entity known as linux-gate.so.1:\nldd /bin/sh linux-gate.so.1 => (0xffffe000) libdl.so.2 => /lib/libdl.so.2 (0xb7fb2000) libc.so.6 => /lib/libc.so.6 (0xb7e7c000) /lib/ld-linux.so.2 (0xb7fba000) What's so strange about that? It's just a dynamically loaded library, right?\nSort of, for sufficiently generous definitions of dynamically loaded library. The lack of file name in the output indicates that ldd was unable to locate a file by that name. Indeed, any attempt to find the corresponding file – whether manually or by software designed to automatically load and analyze such libraries – will be unsuccessful.\nFrom time to time this is a cause of befuddlement and frustration for users as they go searching for a non-existent system file. You can confidently tell users on this futile quest that there's not supposed to be a linux-gate.so.1 file present anywhere on the file system; it's a virtual DSO, a shared object exposed by the kernel at a fixed address in every process' memory:\ncat /proc/self/maps 08048000-0804c000 r-xp 00000000 08:03 7971106 /bin/cat 0804c000-0804d000 rwxp 00003000 08:03 7971106 /bin/cat 0804d000-0806e000 rwxp 0804d000 00:00 0 [heap] b7e88000-b7e89000 rwxp b7e88000 00:00 0 b7e89000-b7fb8000 r-xp 00000000 08:03 8856588 /lib/libc-2.3.5.so b7fb8000-b7fb9000 r-xp 0012e000 08:03 8856588 /lib/libc-2.3.5.so b7fb9000-b7fbc000 rwxp 0012f000 08:03 8856588 /lib/libc-2.3.5.so b7fbc000-b7fbe000 rwxp b7fbc000 00:00 0 b7fc2000-b7fd9000 r-xp 00000000 08:03 8856915 /lib/ld-2.3.5.so b7fd9000-b7fdb000 rwxp 00016000 08:03 8856915 /lib/ld-2.3.5.so bfac3000-bfad9000 rw-p bfac3000 00:00 0 [stack] ffffe000-fffff000 ---p 00000000 00:00 0 [vdso] Here cat prints its own memory map. The line marked [vdso] is the linux-gate.so.1 object in that process, a single memory page mapped at address ffffe000. A program can determine the location of the shared object in memory by examining an AT_SYSINFO entry in the ELF auxiliary vector. The auxiliary vector (auxv ) is an array of pointers passed to new processes in the same way program arguments (argv ) and environment variables (envp ) are.\nIn theory the address could differ between processes, but as far as I know the Linux kernel always maps it at a fixed location. The sample output above come from an x86 box where processes live in plain old 32-bit address spaces divided into pages of 4096 bytes, making ffffe000 the penultimate page. The very last page is reserved to catch accesses through invalid pointers, e.g. dereferencing a decremented NULL pointer or a MAP_FAILED pointer returned from mmap .\nSince all processes share the same object at the same location, it's easy to extract a copy of it if we want to take a closer look at it. For example, we can simply ask dd to dump the page from its own memory (carefully choosing an output name different from linux-gate.so.1 to avoid creating a file that's not supposed to exist):\ndd if=/proc/self/mem of=linux-gate.dso bs=4096 skip=1048574 count=1 1+0 records in 1+0 records out We skip 1048574 because there are 220 = 1048576 pages in total and we want to extract the next to last page. The result looks like any other shared ELF object file:\nfile -b linux-gate.dso ELF 32-bit LSB shared object, Intel 80386, version 1 (SYSV), stripped objdump -T linux-gate.dso linux-gate.dso: file format elf32-i386 DYNAMIC SYMBOL TABLE: ffffe400 l d .text 00000000 ffffe460 l d .eh_frame_hdr 00000000 ffffe484 l d .eh_frame 00000000 ffffe608 l d .useless 00000000 ffffe400 g DF .text 00000014 LINUX_2.5 __kernel_vsyscall 00000000 g DO *ABS* 00000000 LINUX_2.5 LINUX_2.5 ffffe440 g DF .text 00000007 LINUX_2.5 __kernel_rt_sigreturn ffffe420 g DF .text 00000008 LINUX_2.5 __kernel_sigreturn These symbols are entry points for the rt_sigreturn /sigreturn functions and for making virtual system calls. On the x86 platform linux-gate.so.1 was initially called linux-vsyscall.so.1, but this was changed during development to get a common name accurately reflecting its purpose across platforms: to act as a gateway between user and kernel space. Not all platforms need virtual syscalls, but they must be fairly important for x86 to warrant this elaborate mechanism.\nTraditionally, x86 system calls have been done with interrupts. You may remember that the way to request operating system functions was via interrupt 33 (21h) back in the bad old MS-DOS days. Windows system calls are buried beneath layers of user-mode APIs, but at some point they too boil down to int 0x2e . Similarly, syscall implementations in Linux and other *nix kernels have been using int 0x80 .\nIt turns out, though, that system calls invoked via interrupts are remarkably slow on the more recent members of the x86 processor family. An int 0x80 system call can be as much as an order of magnitude slower on a 2 GHz Pentium 4 than on an 850 MHz Pentium III. The impact on performance resulting from this could easily be significant, at least for applications that do a lot of system calls.\nIntel recognized this problem early on and introduced a more efficient system call interface in the form of sysenter and sysexit instructions. This fast system call feature first appeared in the Pentium Pro processor, but due to hardware bugs it's actually broken in most of the early CPUs. That's why you may see claims that sysenter was introduced with Pentium II or even Pentium III.\nThe hardware problems also help explain why it took quite some time before operating systems started supporting fast system calls. If we ignore earlier experimental patches, Linux support for sysenter appeared in December 2002 during kernel 2.5 development. That's ten years after the instruction was defined! Microsoft started using sysenter only slightly earlier, in Windows XP.\nYou can find out if your Linux machine is using the sysenter instruction for system calls by disassembling __kernel_vsyscall :\nobjdump -d --start-address=0xffffe400 --stop-address=0xffffe414 linux-gate.dso linux-gate.dso: file format elf32-i386 Disassembly of section .text: ffffe400 <__kernel_vsyscall>: ffffe400: 51 push %ecx ffffe401: 52 push %edx ffffe402: 55 push %ebp ffffe403: 89 e5 mov %esp,%ebp ffffe405: 0f 34 sysenter ffffe407: 90 nop ffffe408: 90 nop ffffe409: 90 nop ffffe40a: 90 nop ffffe40b: 90 nop ffffe40c: 90 nop ffffe40d: 90 nop ffffe40e: eb f3 jmp ffffe403 <__kernel_vsyscall+0x3> ffffe410: 5d pop %ebp ffffe411: 5a pop %edx ffffe412: 59 pop %ecx ffffe413: c3 ret The preferred way of invoking a system call is determined by the kernel at boot time, and evidently this box uses sysenter . On an older machine you may see int 0x80 being used instead. In case you are struggling to make sense of that jump (like I was the first time I saw it) you might be interested to learn that it's there because Linus Torvalds is a disgusting pig and proud of it. (It's a trick to handle restarting of system calls with six parameters).\n14 August, 2005 Similar journal entries:\nFeedback by Hugo van den Brand I think this explanation is great.\nI'm kind of a newbie when it comes to libraries, but you really explained it very well.\nKeep up the good work, and you're more than worth standing on the first page of google. You ought to be on top of the list.\nby Aleksandr Koltsoff I always thought that AMD was the first to introduce sysenter and sysleave (similar names at least) in K6 CPUs (ages ago) and intel trailed by couple of years. Don't remember whether the opcodes are exactly the same, but the idea is.\nby Johan The AMD syscall /sysret instructions first appeared in the original K6, which came after the Pentium Pro. I'm not sure whether the fast system call instructions were part of the acquired NexGen Nx686 design or if those were added by AMD. Who came up with the idea first? Hard to say. Due to bugs and limitations neither feature were used in practice until much later.\nThe opcodes and semantics are different. AMD later adopted Intel's sysenter /sysexit , and to make things even more confusing Intel now supports syscall /sysret – in 64-bit mode only.\nby Hardik Dalwadi IT's great......I am always wondering that where is this shared librar....\nI have search.....Finaly my friend send me this page's link and, problem solved..........",
+  "ID_list": [
+    "T1055.014"
+  ],
+  "Name_list": [
+    "Impact"
+  ],
+  "TTP_sentences": {
+    "T1055.014": [
+      {
+        "sentence": "It's just a dynamically loaded library, right?",
+        "score": 0.5694
+      },
+      {
+        "sentence": "Sort of, for sufficiently generous definitions of dynamically loaded library.",
+        "score": 0.5513
+      },
+      {
+        "sentence": "Indeed, any attempt to find the corresponding file – whether manually or by software designed to automatically load and analyze such libraries – will be unsuccessful.",
+        "score": 0.4558
+      },
+      {
+        "sentence": "The line marked [vdso] is the linux-gate.so.1 object in that process, a single memory page mapped at address ffffe000.",
+        "score": 0.631
+      },
+      {
+        "sentence": "A program can determine the location of the shared object in memory by examining an AT_SYSINFO entry in the ELF auxiliary vector.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "The auxiliary vector (auxv ) is an array of pointers passed to new processes in the same way program arguments (argv ) and environment variables (envp ) are.",
+        "score": 0.6117
+      },
+      {
+        "sentence": "In theory the address could differ between processes, but as far as I know the Linux kernel always maps it at a fixed location.",
+        "score": 0.5969
+      },
+      {
+        "sentence": "The sample output above come from an x86 box where processes live in plain old 32-bit address spaces divided into pages of 4096 bytes, making ffffe000 the penultimate page.",
+        "score": 0.63
+      },
+      {
+        "sentence": "The very last page is reserved to catch accesses through invalid pointers, e.g. dereferencing a decremented NULL pointer or a MAP_FAILED pointer returned from mmap .",
+        "score": 0.6234
+      },
+      {
+        "sentence": "Since all processes share the same object at the same location, it's easy to extract a copy of it if we want to take a closer look at it.",
+        "score": 0.5839
+      },
+      {
+        "sentence": "For example, we can simply ask dd to dump the page from its own memory (carefully choosing an output name different from linux-gate.so.1 to avoid creating a file that's not supposed to exist): dd if=/proc/self/mem of=linux-gate.dso bs=4096 skip=1048574 count=1 1+0 records in 1+0 records out We skip 1048574 because there are 220 = 1048576 pages in total and we want to extract the next to last page.",
+        "score": 0.5011
+      },
+      {
+        "sentence": "On the x86 platform linux-gate.so.1 was initially called linux-vsyscall.so.1, but this was changed during development to get a common name accurately reflecting its purpose across platforms: to act as a gateway between user and kernel space.",
+        "score": 0.492
+      },
+      {
+        "sentence": "Not all platforms need virtual syscalls, but they must be fairly important for x86 to warrant this elaborate mechanism.",
+        "score": 0.4869
+      },
+      {
+        "sentence": "Traditionally, x86 system calls have been done with interrupts.",
+        "score": 0.3788
+      },
+      {
+        "sentence": "You may remember that the way to request operating system functions was via interrupt 33 (21h) back in the bad old MS-DOS days.",
+        "score": 0.36
+      },
+      {
+        "sentence": "Windows system calls are buried beneath layers of user-mode APIs, but at some point they too boil down to int 0x2e .",
+        "score": 0.4953
+      },
+      {
+        "sentence": "Similarly, syscall implementations in Linux and other *nix kernels have been using int 0x80 .",
+        "score": 0.3955
+      },
+      {
+        "sentence": "It turns out, though, that system calls invoked via interrupts are remarkably slow on the more recent members of the x86 processor family.",
+        "score": 0.3969
+      },
+      {
+        "sentence": "An int 0x80 system call can be as much as an order of magnitude slower on a 2 GHz Pentium 4 than on an 850 MHz Pentium III.",
+        "score": 0.4243
+      },
+      {
+        "sentence": "The impact on performance resulting from this could easily be significant, at least for applications that do a lot of system calls.",
+        "score": 0.3935
+      },
+      {
+        "sentence": "Intel recognized this problem early on and introduced a more efficient system call interface in the form of sysenter and sysexit instructions.",
+        "score": 0.4441
+      },
+      {
+        "sentence": "This fast system call feature first appeared in the Pentium Pro processor, but due to hardware bugs it's actually broken in most of the early CPUs.",
+        "score": 0.4146
+      },
+      {
+        "sentence": "That's why you may see claims that sysenter was introduced with Pentium II or even Pentium III.",
+        "score": 0.3679
+      },
+      {
+        "sentence": "The hardware problems also help explain why it took quite some time before operating systems started supporting fast system calls.",
+        "score": 0.3859
+      },
+      {
+        "sentence": "If we ignore earlier experimental patches, Linux support for sysenter appeared in December 2002 during kernel 2.5 development.",
+        "score": 0.3125
+      },
+      {
+        "sentence": "That's ten years after the instruction was defined!",
+        "score": 0.3967
+      },
+      {
+        "sentence": "Microsoft started using sysenter only slightly earlier, in Windows XP.",
+        "score": 0.3198
+      },
+      {
+        "sentence": "On an older machine you may see int 0x80 being used instead.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "In case you are struggling to make sense of that jump (like I was the first time I saw it) you might be interested to learn that it's there because Linus Torvalds is a disgusting pig and proud of it. (It's a trick to handle restarting of system calls with six parameters).",
+        "score": 0.4645
+      },
+      {
+        "sentence": "14 August, 2005 Similar journal entries: Feedback by Hugo van den Brand I think this explanation is great.",
+        "score": 0.3519
+      },
+      {
+        "sentence": "I'm kind of a newbie when it comes to libraries, but you really explained it very well.",
+        "score": 0.4362
+      },
+      {
+        "sentence": "You ought to be on top of the list. by Aleksandr Koltsoff I always thought that AMD was the first to introduce sysenter and sysleave (similar names at least) in K6 CPUs (ages ago) and intel trailed by couple of years.",
+        "score": 0.4071
+      },
+      {
+        "sentence": "Don't remember whether the opcodes are exactly the same, but the idea is. by Johan The AMD syscall /sysret instructions first appeared in the original K6, which came after the Pentium Pro.",
+        "score": 0.4293
+      },
+      {
+        "sentence": "I'm not sure whether the fast system call instructions were part of the acquired NexGen Nx686 design or if those were added by AMD.",
+        "score": 0.4502
+      },
+      {
+        "sentence": "Due to bugs and limitations neither feature were used in practice until much later.",
+        "score": 0.3037
+      },
+      {
+        "sentence": "The opcodes and semantics are different.",
+        "score": 0.414
+      },
+      {
+        "sentence": "AMD later adopted Intel's sysenter /sysexit , and to make things even more confusing Intel now supports syscall /sysret – in 64-bit mode only. by Hardik Dalwadi IT's great......I am always wondering that where is this shared librar....",
+        "score": 0.4804
+      },
+      {
+        "sentence": "I have search.....Finaly my friend send me this page's link and, problem solved..........",
+        "score": 0.3091
+      }
+    ]
+  }
+}

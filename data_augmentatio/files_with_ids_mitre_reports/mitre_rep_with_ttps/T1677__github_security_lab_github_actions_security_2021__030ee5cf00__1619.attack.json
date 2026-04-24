@@ -1,0 +1,316 @@
+{
+  "original_txt": "This post is the first in a series of posts about GitHub Actions security. Part 2, Part 3, Part 4\nIn this article, we’ll discuss some common security malpractices for GitHub Actions and workflows, and how to best avoid them. Our examples are based on real-world GitHub workflow implementation vulnerabilities the GitHub Security Lab has reported to maintainers.\nPreventing pwn requests\nGitHub workflows can be triggered through a wide variety of repository events. This includes events related to incoming pull requests (PR). There exists a potentially dangerous misuse of the pull_request_target\nworkflow trigger that may lead to malicious PR authors (i.e. attackers) being able to obtain repository write permissions or stealing repository secrets.\nTL;DR: Combining pull_request_target\nworkflow trigger with an explicit checkout of an untrusted PR is a dangerous practice that may lead to repository compromise.\nAny automated processing of PRs from an external fork is potentially dangerous and such PRs should be treated like untrusted input. It is common CI/CD practice to ensure that when a new PR is submitted that it does not break the build for your project, that no functionality regressions are introduced, and that tests are passing. But when operating on untrusted PRs, such automated behavior can leave your repository exposed to abuse if you’re not careful.\nSince, by definition, a PR supplies code to any build or test logic in place for your project, attackers can achieve arbitrary code execution in a workflow runner operating on a malicious PR in a variety of ways. They may submit malicious changes to the existing build scripts like make\nor powershell\nfiles or redefine the build script in the package.json\nfile. They can simply write their payload as a new test that will be run with others. They can achieve code execution even before the actual build happens. Npm packages for example may have custom preinstall\nand postinstall\nscripts, so running npm install\nwould already trigger any malicious code if the attackers added a new package reference. Any modern build orchestration is complex enough to have multiple code injection points.\nThis is why you should never checkout and build PRs from untrusted sources on a local machine without carefully examining the code for the PR.\nDue to the dangers inherent to automatic processing of PRs from forks, GitHub’s standard pull_request\nworkflow trigger by default prevents write permissions and secrets access to the target repository. However, in some scenarios such access is needed to properly process the PR. To this end the pull_request_target\nworkflow trigger was introduced.\nLike how the introduction of Cross-Origin Resource Sharing (CORS) in the browser security model allowed a web site developer to relax the default Same Origin Policy (SOP), the introduction of pull_request_target\ntrigger allowed a workflow writer to relax some restrictions to a target repository and must be used carefully. The main differences between the two triggers are:\n- Workflows triggered via\npull_request_target\nhave write permission to the target repository. They also have access to target repository secrets. The same is true for workflows triggered onpull_request\nfrom a branch in the same repository, but not from external forks. The reasoning behind the latter is that it is safe to share the repository secrets if the user creating the PR has write permission to the target repository already. pull_request_target\nruns in the context of the target repository of the PR, rather than in the merge commit. This means the standard checkout action uses the target repository to prevent accidental usage of the user supplied code.\nThese safeguards enable granting the pull_request_target\nadditional permissions. The reason to introduce the pull_request_target\ntrigger was to enable workflows to label PRs (e.g. needs review\n) or to comment on the PR. The intent is to use the trigger for PRs that do not require dangerous processing, say building or running the content of the PR.\nTogether with the pull_request_target\n, a new trigger workflow_run\nwas introduced to enable scenarios that require building the untrusted code and also need write permissions to update the PR with e.g. code coverage results or other test results. To do this in a secure manner, the untrusted code must be handled via the pull_request\ntrigger so that it is isolated in an unprivileged environment. The workflow processing the PR should then store any results like code coverage or failed/passed tests in artifacts and exit. The following workflow then starts on workflow_run\nwhere it is granted write permission to the target repository and access to repository secrets, so that it can download the artifacts and make any necessary modifications to the repository or interact with third party services that require repository secrets (e.g. API tokens).\nBelow is an example of the intended usage in which the results of an unprivileged pull_request\nworkflow are combined with a privileged workflow to leave a comment in response to a received PR:\nReceivePR.yml\nname: Receive PR\n# read-only repo token\n# no access to secrets\non:\npull_request:\njobs:\nbuild:\nruns-on: ubuntu-latest\nsteps:\n- uses: actions/checkout@v2\n# imitation of a build process\n- name: Build\nrun: /bin/bash ./build.sh\n- name: Save PR number\nrun: |\nmkdir -p ./pr\necho ${{ github.event.number }} > ./pr/NR\n- uses: actions/upload-artifact@v2\nwith:\nname: pr\npath: pr/\nCommentPR.yml\nname: Comment on the pull request\n# read-write repo token\n# access to secrets\non:\nworkflow_run:\nworkflows: [\"Receive PR\"]\ntypes:\n- completed\njobs:\nupload:\nruns-on: ubuntu-latest\nif: >\ngithub.event.workflow_run.event == 'pull_request' &&\ngithub.event.workflow_run.conclusion == 'success'\nsteps:\n- name: 'Download artifact'\nuses: actions/github-script@v3.1.0\nwith:\nscript: |\nvar artifacts = await github.actions.listWorkflowRunArtifacts({\nowner: context.repo.owner,\nrepo: context.repo.repo,\nrun_id: ${{github.event.workflow_run.id }},\n});\nvar matchArtifact = artifacts.data.artifacts.filter((artifact) => {\nreturn artifact.name == \"pr\"\n})[0];\nvar download = await github.actions.downloadArtifact({\nowner: context.repo.owner,\nrepo: context.repo.repo,\nartifact_id: matchArtifact.id,\narchive_format: 'zip',\n});\nvar fs = require('fs');\nfs.writeFileSync('${{github.workspace}}/pr.zip', Buffer.from(download.data));\n- run: unzip pr.zip\n- name: 'Comment on PR'\nuses: actions/github-script@v3\nwith:\ngithub-token: ${{ secrets.GITHUB_TOKEN }}\nscript: |\nvar fs = require('fs');\nvar issue_number = Number(fs.readFileSync('./NR'));\nawait github.issues.createComment({\nowner: context.repo.owner,\nrepo: context.repo.repo,\nissue_number: issue_number,\nbody: 'Everything is OK. Thank you for the PR!'\n});\nThis example saves the PR number as a workflow artifact, but can be easily extended to pass code coverage messages or similar PR artifacts in the same way.\nNote that:\n- The example above comments on the PR with the help of\ngithub-script\ninstead of a more direct PR driven action. This is because not all actions can be used fromworkflow_run\nif they expect to find all their needed information in the context object. Theworkflow_run\ncontext is different from thepull_request\ncontext and it doesn’t contain, for example, the PR number. Such actions need to be updated to accept optional explicit input parameters to provide what is missing in theworkflow_run\ncontext. - Incoming data from artifacts is potentially untrusted. When used in a safe manner, like reading PR numbers or reading a code coverage text to comment on the PR, it is safe to use such untrusted data in the privileged workflow context. However if the artifacts were, for example, binaries built from an untrusted PR, it would be a security vulnerability to run them in the privileged\nworkflow_run\nworkflow context. Artifacts resulting from untrusted PR data are themselves untrusted and should be treated as such when handled in privileged contexts.\nAs you can see, the usage of two workflows and passing around workflow artifacts introduces some overhead. If your workflow scenario simply requires commenting on the PR, but does not require a check out of the modified code, using pull_request_target\nis a logical shortcut.\nUnfortunately some repository workflows take this a step further and use pull_request_target\nwith an explicit PR checkout, for example:\n# INSECURE. Provided as an example only.\non:\npull_request_target\njobs:\nbuild:\nname: Build and test\nruns-on: ubuntu-latest\nsteps:\n- uses: actions/checkout@v2\nwith:\nref: ${{ github.event.pull_request.head.sha }}\n- uses: actions/setup-node@v1\n- run: |\nnpm install\nnpm build\n- uses: completely/fakeaction@v2\nwith:\narg1: ${{ secrets.supersecret }}\n- uses: fakerepo/comment-on-pr@v1\nwith:\nmessage: |\nThank you!\nThe potentially untrusted code is being run during npm install\nor npm build\nas the build scripts and referenced packages are controlled by the author of the PR.\nHaving said that, mixing pull_request_target\nwith an explicit PR checkout is not always vulnerable. The workflow may, for example:\n- Reformat and commit the code\n- Checkout both base and head repositories and generate a diff\n- Run grep on the checked out source.\nGenerally speaking, when the PR contents are treated as passive data, i.e. not in a position of influence over the build/testing process, it is safe. But the repository owners must be extra careful not to trigger any script that may operate on PR controlled contents like in the case of npm install\n.\nTo remediate the issue, repository owners could:\n- Avoid using\npull_request_target\nif the workflow doesn’t need write repository permissions and doesn’t use any repository secrets. They can simply use thepull_request\ntrigger instead. - Assign repository privileges only where needed explicitly through\npull_request\nandworkflow_run\nas in our previous example. -\nAdd a condition to the\npull_request_target\nto run only if a certain label is assigned the PR, likesafe to test\nthat indicates the PR has been vetted by someone with write privileges to the target repository. Note that this kind of label based verification is still prone to a race condition in which the attacker may push new changes after the workflow was approved (labeled), but has not started yet. As such this approach should only be used as a temporary solution, until a proper fix from the options above is applied. Since external users do not have the permission to assign labels, this effectively requires repository owners to manually review changes first and is also prone to human error.# Only as a temporary fix. on: pull_request_target: types: [labeled] jobs: build: name: Build and test runs-on: ubuntu-latest if: contains(github.event.pull_request.labels.*.name, 'safe to test')\nNote that there is an important “gotcha” to any remediation put in place for a vulnerable workflow. All PRs that were opened before a fix was made to the vulnerable workflow will use the version of the workflow as it existed at the time the PR was opened. That means that if there is a pending PR, any updates to the PR may still abuse the vulnerable workflow. It is advisable to either close or rebase such PRs if untrusted commits may be added to them after a vulnerable workflow is fixed.\nYou may ask yourself: if the pull_request_target\nworkflow only checks out and builds the PR, i.e. runs untrusted code but doesn’t reference any secrets, is it still vulnerable?\nYes it is, because a workflow triggered on pull_request_target\nstill has the read/write repository token in memory that is potentially available to any running program. If the workflow uses actions/checkout\nand does not pass the optional parameter persist-credentials\nas false, it makes it even worse. The default for the parameter is true\n. It means that in any subsequent steps any running code can simply read the stored repository token from the disk. If you don’t need a repository write access or secrets, just stick to the pull_request\ntrigger.\nWe have also noticed a pattern that has a vulnerable intent of use, however due to misunderstanding of pull_request_target\nends up being a broken, but not vulnerable, workflow. In these cases, repositories switched to using the pull_request_target\ntrigger, but use the default values for the actions/checkout\naction, for example:\n# The workflow is broken. DO NOT use it in production.\non: [push, pull_request_target]\njobs:\nbuild:\nruns-on: ubuntu-latest\nsteps:\n- name: Checkout\nuses: actions/checkout@v2\n- name: Build and test\nrun: /bin/bash ./build.sh && /bin/bash ./runtests.sh\n- name: Report\nif: failure() && github.event.action != 'push'\nwith: fancy/commenter@v1\nmessage: |\nSome checks have failed.\nThis doesn’t do what the authors most likely intended. In case of a PR, it builds the latest changeset from the target repository. The workflow is broken in the sense that it does not actually build the PR, but luckily is not vulnerable, since there is no explicit checkout of the actual PR contents or unsafe handling of those contents.\nConclusion\nIn this post we’ve examined some of the common issues when processing untrusted PR input to your GitHub workflows. It is important to understand the various privilege levels that pull_request\n, pull_request_target\n, and workflow_run\nafford the code processing the incoming PR. Be careful when using pull_request_target\nand only use it when you actually need the privileged context of the target repo available in your workflow, especially when combined with explicit handling of the contents of an untrusted PR.\nThis post is the first in a series of posts about GitHub Actions security. Read the next post",
+  "sanitized_txt": "This post is the first in a series of posts about GitHub Actions security. Part 2, Part 3, Part 4 In this article, we’ll discuss some common security malpractices for GitHub Actions and workflows, and how to best avoid them. Our examples are based on real-world GitHub workflow implementation vulnerabilities the GitHub Security Lab has reported to maintainers.\nPreventing pwn requests GitHub workflows can be triggered through a wide variety of repository events. This includes events related to incoming pull requests (PR). There exists a potentially dangerous misuse of the pull_request_target workflow trigger that may lead to malicious PR authors (i.e. attackers) being able to obtain repository write permissions or stealing repository secrets.\nTL;DR: Combining pull_request_target workflow trigger with an explicit checkout of an untrusted PR is a dangerous practice that may lead to repository compromise.\nAny automated processing of PRs from an external fork is potentially dangerous and such PRs should be treated like untrusted input. It is common CI/CD practice to ensure that when a new PR is submitted that it does not break the build for your project, that no functionality regressions are introduced, and that tests are passing. But when operating on untrusted PRs, such automated behavior can leave your repository exposed to abuse if you’re not careful.\nSince, by definition, a PR supplies code to any build or test logic in place for your project, attackers can achieve arbitrary code execution in a workflow runner operating on a malicious PR in a variety of ways. They may submit malicious changes to the existing build scripts like make or powershell files or redefine the build script in the package.json file. They can simply write their payload as a new test that will be run with others. They can achieve code execution even before the actual build happens. Npm packages for example may have custom preinstall and postinstall scripts, so running npm install would already trigger any malicious code if the attackers added a new package reference. Any modern build orchestration is complex enough to have multiple code injection points.\nThis is why you should never checkout and build PRs from untrusted sources on a local machine without carefully examining the code for the PR.\nDue to the dangers inherent to automatic processing of PRs from forks, GitHub’s standard pull_request workflow trigger by default prevents write permissions and secrets access to the target repository. However, in some scenarios such access is needed to properly process the PR. To this end the pull_request_target workflow trigger was introduced.\nLike how the introduction of Cross-Origin Resource Sharing (CORS) in the browser security model allowed a web site developer to relax the default Same Origin Policy (SOP), the introduction of pull_request_target trigger allowed a workflow writer to relax some restrictions to a target repository and must be used carefully. The main differences between the two triggers are:\n- Workflows triggered via pull_request_target have write permission to the target repository. They also have access to target repository secrets. The same is true for workflows triggered onpull_request from a branch in the same repository, but not from external forks. The reasoning behind the latter is that it is safe to share the repository secrets if the user creating the PR has write permission to the target repository already. pull_request_target runs in the context of the target repository of the PR, rather than in the merge commit. This means the standard checkout action uses the target repository to prevent accidental usage of the user supplied code.\nThese safeguards enable granting the pull_request_target additional permissions. The reason to introduce the pull_request_target trigger was to enable workflows to label PRs (e.g. needs review ) or to comment on the PR. The intent is to use the trigger for PRs that do not require dangerous processing, say building or running the content of the PR.\nTogether with the pull_request_target , a new trigger workflow_run was introduced to enable scenarios that require building the untrusted code and also need write permissions to update the PR with e.g. code coverage results or other test results. To do this in a secure manner, the untrusted code must be handled via the pull_request trigger so that it is isolated in an unprivileged environment. The workflow processing the PR should then store any results like code coverage or failed/passed tests in artifacts and exit. The following workflow then starts on workflow_run where it is granted write permission to the target repository and access to repository secrets, so that it can download the artifacts and make any necessary modifications to the repository or interact with third party services that require repository secrets (e.g. API tokens).\nBelow is an example of the intended usage in which the results of an unprivileged pull_request workflow are combined with a privileged workflow to leave a comment in response to a received PR:\nReceivePR.yml name: Receive PR # read-only repo token # no access to secrets on:\npull_request:\njobs:\nbuild:\nruns-on: ubuntu-latest steps:\n- uses: actions/checkout@v2 # imitation of a build process - name: Build run: /bin/bash ./build.sh - name: Save PR number run: | mkdir -p ./pr echo ${{ github.event.number }} > ./pr/NR - uses: actions/upload-artifact@v2 with:\nname: pr path: pr/ CommentPR.yml name: Comment on the pull request # read-write repo token # access to secrets on:\nworkflow_run:\nworkflows: [\"Receive PR\"] types:\n- completed jobs:\nupload:\nruns-on: ubuntu-latest if: > github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' steps:\n- name: 'Download artifact' uses: actions/github-script@v3.1.0 with:\nscript: | var artifacts = await github.actions.listWorkflowRunArtifacts({ owner: context.repo.owner, repo: context.repo.repo, run_id: ${{github.event.workflow_run.id }}, });\nvar matchArtifact = artifacts.data.artifacts.filter((artifact) => { return artifact.name == \"pr\" })[0];\nvar download = await github.actions.downloadArtifact({ owner: context.repo.owner, repo: context.repo.repo, artifact_id: matchArtifact.id, archive_format: 'zip', });\nvar fs = require('fs');\nfs.writeFileSync('${{github.workspace}}/pr.zip', Buffer.from(download.data));\n- run: unzip pr.zip - name: 'Comment on PR' uses: actions/github-script@v3 with:\ngithub-token: ${{ secrets.GITHUB_TOKEN }} script: | var fs = require('fs');\nvar issue_number = Number(fs.readFileSync('./NR'));\nawait github.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue_number, body: 'Everything is OK. Thank you for the PR!' });\nThis example saves the PR number as a workflow artifact, but can be easily extended to pass code coverage messages or similar PR artifacts in the same way.\nNote that:\n- The example above comments on the PR with the help of github-script instead of a more direct PR driven action. This is because not all actions can be used fromworkflow_run if they expect to find all their needed information in the context object. Theworkflow_run context is different from thepull_request context and it doesn’t contain, for example, the PR number. Such actions need to be updated to accept optional explicit input parameters to provide what is missing in theworkflow_run context. - Incoming data from artifacts is potentially untrusted. When used in a safe manner, like reading PR numbers or reading a code coverage text to comment on the PR, it is safe to use such untrusted data in the privileged workflow context. However if the artifacts were, for example, binaries built from an untrusted PR, it would be a security vulnerability to run them in the privileged workflow_run workflow context. Artifacts resulting from untrusted PR data are themselves untrusted and should be treated as such when handled in privileged contexts.\nAs you can see, the usage of two workflows and passing around workflow artifacts introduces some overhead. If your workflow scenario simply requires commenting on the PR, but does not require a check out of the modified code, using pull_request_target is a logical shortcut.\nUnfortunately some repository workflows take this a step further and use pull_request_target with an explicit PR checkout, for example:\n# INSECURE. Provided as an example only.\non:\npull_request_target jobs:\nbuild:\nname: Build and test runs-on: ubuntu-latest steps:\n- uses: actions/checkout@v2 with:\nref: ${{ github.event.pull_request.head.sha }} - uses: actions/setup-node@v1 - run: | npm install npm build - uses: completely/fakeaction@v2 with:\narg1: ${{ secrets.supersecret }} - uses: fakerepo/comment-on-pr@v1 with:\nmessage: | Thank you!\nThe potentially untrusted code is being run during npm install or npm build as the build scripts and referenced packages are controlled by the author of the PR.\nHaving said that, mixing pull_request_target with an explicit PR checkout is not always vulnerable. The workflow may, for example:\n- Reformat and commit the code - Checkout both base and head repositories and generate a diff - Run grep on the checked out source.\nGenerally speaking, when the PR contents are treated as passive data, i.e. not in a position of influence over the build/testing process, it is safe. But the repository owners must be extra careful not to trigger any script that may operate on PR controlled contents like in the case of npm install .\nTo remediate the issue, repository owners could:\n- Avoid using pull_request_target if the workflow doesn’t need write repository permissions and doesn’t use any repository secrets. They can simply use thepull_request trigger instead. - Assign repository privileges only where needed explicitly through pull_request andworkflow_run as in our previous example. - Add a condition to the pull_request_target to run only if a certain label is assigned the PR, likesafe to test that indicates the PR has been vetted by someone with write privileges to the target repository. Note that this kind of label based verification is still prone to a race condition in which the attacker may push new changes after the workflow was approved (labeled), but has not started yet. As such this approach should only be used as a temporary solution, until a proper fix from the options above is applied. Since external users do not have the permission to assign labels, this effectively requires repository owners to manually review changes first and is also prone to human error.# Only as a temporary fix. on: pull_request_target: types: [labeled] jobs: build: name: Build and test runs-on: ubuntu-latest if: contains(github.event.pull_request.labels.*.name, 'safe to test') Note that there is an important “gotcha” to any remediation put in place for a vulnerable workflow. All PRs that were opened before a fix was made to the vulnerable workflow will use the version of the workflow as it existed at the time the PR was opened. That means that if there is a pending PR, any updates to the PR may still abuse the vulnerable workflow. It is advisable to either close or rebase such PRs if untrusted commits may be added to them after a vulnerable workflow is fixed.\nYou may ask yourself: if the pull_request_target workflow only checks out and builds the PR, i.e. runs untrusted code but doesn’t reference any secrets, is it still vulnerable?\nYes it is, because a workflow triggered on pull_request_target still has the read/write repository token in memory that is potentially available to any running program. If the workflow uses actions/checkout and does not pass the optional parameter persist-credentials as false, it makes it even worse. The default for the parameter is true . It means that in any subsequent steps any running code can simply read the stored repository token from the disk. If you don’t need a repository write access or secrets, just stick to the pull_request trigger.\nWe have also noticed a pattern that has a vulnerable intent of use, however due to misunderstanding of pull_request_target ends up being a broken, but not vulnerable, workflow. In these cases, repositories switched to using the pull_request_target trigger, but use the default values for the actions/checkout action, for example:\n# The workflow is broken. DO NOT use it in production.\non: [push, pull_request_target] jobs:\nbuild:\nruns-on: ubuntu-latest steps:\n- name: Checkout uses: actions/checkout@v2 - name: Build and test run: /bin/bash ./build.sh && /bin/bash ./runtests.sh - name: Report if: failure() && github.event.action != 'push' with: fancy/commenter@v1 message: | Some checks have failed.\nThis doesn’t do what the authors most likely intended. In case of a PR, it builds the latest changeset from the target repository. The workflow is broken in the sense that it does not actually build the PR, but luckily is not vulnerable, since there is no explicit checkout of the actual PR contents or unsafe handling of those contents.\nConclusion In this post we’ve examined some of the common issues when processing untrusted PR input to your GitHub workflows. It is important to understand the various privilege levels that pull_request , pull_request_target , and workflow_run afford the code processing the incoming PR. Be careful when using pull_request_target and only use it when you actually need the privileged context of the target repo available in your workflow, especially when combined with explicit handling of the contents of an untrusted PR.\nThis post is the first in a series of posts about GitHub Actions security. Read the next post",
+  "ID_list": [
+    "T1677"
+  ],
+  "Name_list": [
+    "Execution",
+    "PowerShell",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1677": [
+      {
+        "sentence": "This post is the first in a series of posts about GitHub Actions security.",
+        "score": 0.5161
+      },
+      {
+        "sentence": "Part 2, Part 3, Part 4 In this article, we’ll discuss some common security malpractices for GitHub Actions and workflows, and how to best avoid them.",
+        "score": 0.5911
+      },
+      {
+        "sentence": "Our examples are based on real-world GitHub workflow implementation vulnerabilities the GitHub Security Lab has reported to maintainers.",
+        "score": 0.5778
+      },
+      {
+        "sentence": "Preventing pwn requests GitHub workflows can be triggered through a wide variety of repository events.",
+        "score": 0.4125
+      },
+      {
+        "sentence": "This includes events related to incoming pull requests (PR).",
+        "score": 0.3016
+      },
+      {
+        "sentence": "There exists a potentially dangerous misuse of the pull_request_target workflow trigger that may lead to malicious PR authors (i.e. attackers) being able to obtain repository write permissions or stealing repository secrets.",
+        "score": 0.5765
+      },
+      {
+        "sentence": "TL;DR: Combining pull_request_target workflow trigger with an explicit checkout of an untrusted PR is a dangerous practice that may lead to repository compromise.",
+        "score": 0.6377
+      },
+      {
+        "sentence": "Any automated processing of PRs from an external fork is potentially dangerous and such PRs should be treated like untrusted input.",
+        "score": 0.4767
+      },
+      {
+        "sentence": "It is common CI/CD practice to ensure that when a new PR is submitted that it does not break the build for your project, that no functionality regressions are introduced, and that tests are passing.",
+        "score": 0.5773
+      },
+      {
+        "sentence": "But when operating on untrusted PRs, such automated behavior can leave your repository exposed to abuse if you’re not careful.",
+        "score": 0.5498
+      },
+      {
+        "sentence": "Since, by definition, a PR supplies code to any build or test logic in place for your project, attackers can achieve arbitrary code execution in a workflow runner operating on a malicious PR in a variety of ways.",
+        "score": 0.597
+      },
+      {
+        "sentence": "They may submit malicious changes to the existing build scripts like make or powershell files or redefine the build script in the package.json file.",
+        "score": 0.5714
+      },
+      {
+        "sentence": "They can simply write their payload as a new test that will be run with others.",
+        "score": 0.4756
+      },
+      {
+        "sentence": "They can achieve code execution even before the actual build happens.",
+        "score": 0.4646
+      },
+      {
+        "sentence": "Npm packages for example may have custom preinstall and postinstall scripts, so running npm install would already trigger any malicious code if the attackers added a new package reference.",
+        "score": 0.5419
+      },
+      {
+        "sentence": "Any modern build orchestration is complex enough to have multiple code injection points.",
+        "score": 0.6758
+      },
+      {
+        "sentence": "This is why you should never checkout and build PRs from untrusted sources on a local machine without carefully examining the code for the PR.",
+        "score": 0.5799
+      },
+      {
+        "sentence": "Due to the dangers inherent to automatic processing of PRs from forks, GitHub’s standard pull_request workflow trigger by default prevents write permissions and secrets access to the target repository.",
+        "score": 0.6063
+      },
+      {
+        "sentence": "However, in some scenarios such access is needed to properly process the PR.",
+        "score": 0.3437
+      },
+      {
+        "sentence": "To this end the pull_request_target workflow trigger was introduced.",
+        "score": 0.4764
+      },
+      {
+        "sentence": "Like how the introduction of Cross-Origin Resource Sharing (CORS) in the browser security model allowed a web site developer to relax the default Same Origin Policy (SOP), the introduction of pull_request_target trigger allowed a workflow writer to relax some restrictions to a target repository and must be used carefully.",
+        "score": 0.4875
+      },
+      {
+        "sentence": "The main differences between the two triggers are: - Workflows triggered via pull_request_target have write permission to the target repository.",
+        "score": 0.5202
+      },
+      {
+        "sentence": "They also have access to target repository secrets.",
+        "score": 0.4248
+      },
+      {
+        "sentence": "The same is true for workflows triggered onpull_request from a branch in the same repository, but not from external forks.",
+        "score": 0.5328
+      },
+      {
+        "sentence": "The reasoning behind the latter is that it is safe to share the repository secrets if the user creating the PR has write permission to the target repository already. pull_request_target runs in the context of the target repository of the PR, rather than in the merge commit.",
+        "score": 0.5927
+      },
+      {
+        "sentence": "This means the standard checkout action uses the target repository to prevent accidental usage of the user supplied code.",
+        "score": 0.5378
+      },
+      {
+        "sentence": "These safeguards enable granting the pull_request_target additional permissions.",
+        "score": 0.3332
+      },
+      {
+        "sentence": "The reason to introduce the pull_request_target trigger was to enable workflows to label PRs (e.g. needs review ) or to comment on the PR.",
+        "score": 0.45
+      },
+      {
+        "sentence": "The intent is to use the trigger for PRs that do not require dangerous processing, say building or running the content of the PR.",
+        "score": 0.4993
+      },
+      {
+        "sentence": "Together with the pull_request_target , a new trigger workflow_run was introduced to enable scenarios that require building the untrusted code and also need write permissions to update the PR with e.g. code coverage results or other test results.",
+        "score": 0.5995
+      },
+      {
+        "sentence": "To do this in a secure manner, the untrusted code must be handled via the pull_request trigger so that it is isolated in an unprivileged environment.",
+        "score": 0.3975
+      },
+      {
+        "sentence": "The workflow processing the PR should then store any results like code coverage or failed/passed tests in artifacts and exit.",
+        "score": 0.4475
+      },
+      {
+        "sentence": "The following workflow then starts on workflow_run where it is granted write permission to the target repository and access to repository secrets, so that it can download the artifacts and make any necessary modifications to the repository or interact with third party services that require repository secrets (e.g.",
+        "score": 0.6323
+      },
+      {
+        "sentence": "Thank you for the PR!' }); This example saves the PR number as a workflow artifact, but can be easily extended to pass code coverage messages or similar PR artifacts in the same way.",
+        "score": 0.383
+      },
+      {
+        "sentence": "Note that: - The example above comments on the PR with the help of github-script instead of a more direct PR driven action.",
+        "score": 0.4093
+      },
+      {
+        "sentence": "This is because not all actions can be used fromworkflow_run if they expect to find all their needed information in the context object.",
+        "score": 0.4282
+      },
+      {
+        "sentence": "Theworkflow_run context is different from thepull_request context and it doesn’t contain, for example, the PR number.",
+        "score": 0.4181
+      },
+      {
+        "sentence": "Such actions need to be updated to accept optional explicit input parameters to provide what is missing in theworkflow_run context. - Incoming data from artifacts is potentially untrusted.",
+        "score": 0.5255
+      },
+      {
+        "sentence": "When used in a safe manner, like reading PR numbers or reading a code coverage text to comment on the PR, it is safe to use such untrusted data in the privileged workflow context.",
+        "score": 0.4694
+      },
+      {
+        "sentence": "However if the artifacts were, for example, binaries built from an untrusted PR, it would be a security vulnerability to run them in the privileged workflow_run workflow context.",
+        "score": 0.5606
+      },
+      {
+        "sentence": "Artifacts resulting from untrusted PR data are themselves untrusted and should be treated as such when handled in privileged contexts.",
+        "score": 0.3672
+      },
+      {
+        "sentence": "As you can see, the usage of two workflows and passing around workflow artifacts introduces some overhead.",
+        "score": 0.4968
+      },
+      {
+        "sentence": "If your workflow scenario simply requires commenting on the PR, but does not require a check out of the modified code, using pull_request_target is a logical shortcut.",
+        "score": 0.577
+      },
+      {
+        "sentence": "Unfortunately some repository workflows take this a step further and use pull_request_target with an explicit PR checkout, for example: # INSECURE.",
+        "score": 0.5372
+      },
+      {
+        "sentence": "Provided as an example only. on: pull_request_target jobs: build: name: Build and test runs-on: ubuntu-latest steps: - uses: actions/checkout@v2 with: ref: ${{ github.event.pull_request.head.sha }} - uses: actions/setup-node@v1 - run: | npm install npm build - uses: completely/fakeaction@v2 with: arg1: ${{ secrets.supersecret }} - uses: fakerepo/comment-on-pr@v1 with: message: | Thank you!",
+        "score": 0.5447
+      },
+      {
+        "sentence": "The potentially untrusted code is being run during npm install or npm build as the build scripts and referenced packages are controlled by the author of the PR.",
+        "score": 0.554
+      },
+      {
+        "sentence": "Having said that, mixing pull_request_target with an explicit PR checkout is not always vulnerable.",
+        "score": 0.424
+      },
+      {
+        "sentence": "The workflow may, for example: - Reformat and commit the code - Checkout both base and head repositories and generate a diff - Run grep on the checked out source.",
+        "score": 0.584
+      },
+      {
+        "sentence": "Generally speaking, when the PR contents are treated as passive data, i.e. not in a position of influence over the build/testing process, it is safe.",
+        "score": 0.5309
+      },
+      {
+        "sentence": "But the repository owners must be extra careful not to trigger any script that may operate on PR controlled contents like in the case of npm install .",
+        "score": 0.578
+      },
+      {
+        "sentence": "To remediate the issue, repository owners could: - Avoid using pull_request_target if the workflow doesn’t need write repository permissions and doesn’t use any repository secrets.",
+        "score": 0.5938
+      },
+      {
+        "sentence": "They can simply use thepull_request trigger instead. - Assign repository privileges only where needed explicitly through pull_request andworkflow_run as in our previous example. - Add a condition to the pull_request_target to run only if a certain label is assigned the PR, likesafe to test that indicates the PR has been vetted by someone with write privileges to the target repository.",
+        "score": 0.5178
+      },
+      {
+        "sentence": "Note that this kind of label based verification is still prone to a race condition in which the attacker may push new changes after the workflow was approved (labeled), but has not started yet.",
+        "score": 0.5556
+      },
+      {
+        "sentence": "As such this approach should only be used as a temporary solution, until a proper fix from the options above is applied.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "Since external users do not have the permission to assign labels, this effectively requires repository owners to manually review changes first and is also prone to human error.# Only as a temporary fix. on: pull_request_target: types: [labeled] jobs: build: name: Build and test runs-on: ubuntu-latest if: contains(github.event.pull_request.labels.*.name, 'safe to test') Note that there is an important “gotcha” to any remediation put in place for a vulnerable workflow.",
+        "score": 0.6
+      },
+      {
+        "sentence": "All PRs that were opened before a fix was made to the vulnerable workflow will use the version of the workflow as it existed at the time the PR was opened.",
+        "score": 0.4905
+      },
+      {
+        "sentence": "That means that if there is a pending PR, any updates to the PR may still abuse the vulnerable workflow.",
+        "score": 0.5358
+      },
+      {
+        "sentence": "It is advisable to either close or rebase such PRs if untrusted commits may be added to them after a vulnerable workflow is fixed.",
+        "score": 0.5978
+      },
+      {
+        "sentence": "You may ask yourself: if the pull_request_target workflow only checks out and builds the PR, i.e. runs untrusted code but doesn’t reference any secrets, is it still vulnerable?",
+        "score": 0.5194
+      },
+      {
+        "sentence": "Yes it is, because a workflow triggered on pull_request_target still has the read/write repository token in memory that is potentially available to any running program.",
+        "score": 0.4167
+      },
+      {
+        "sentence": "If the workflow uses actions/checkout and does not pass the optional parameter persist-credentials as false, it makes it even worse.",
+        "score": 0.4855
+      },
+      {
+        "sentence": "The default for the parameter is true .",
+        "score": 0.329
+      },
+      {
+        "sentence": "It means that in any subsequent steps any running code can simply read the stored repository token from the disk.",
+        "score": 0.4474
+      },
+      {
+        "sentence": "If you don’t need a repository write access or secrets, just stick to the pull_request trigger.",
+        "score": 0.5185
+      },
+      {
+        "sentence": "We have also noticed a pattern that has a vulnerable intent of use, however due to misunderstanding of pull_request_target ends up being a broken, but not vulnerable, workflow.",
+        "score": 0.5797
+      },
+      {
+        "sentence": "In these cases, repositories switched to using the pull_request_target trigger, but use the default values for the actions/checkout action, for example: # The workflow is broken.",
+        "score": 0.5482
+      },
+      {
+        "sentence": "DO NOT use it in production. on: [push, pull_request_target] jobs: build: runs-on: ubuntu-latest steps: - name: Checkout uses: actions/checkout@v2 - name: Build and test run: /bin/bash ./build.sh && /bin/bash ./runtests.sh - name: Report if: failure() && github.event.action != 'push' with: fancy/commenter@v1 message: | Some checks have failed.",
+        "score": 0.5394
+      },
+      {
+        "sentence": "This doesn’t do what the authors most likely intended.",
+        "score": 0.3996
+      },
+      {
+        "sentence": "In case of a PR, it builds the latest changeset from the target repository.",
+        "score": 0.5962
+      },
+      {
+        "sentence": "The workflow is broken in the sense that it does not actually build the PR, but luckily is not vulnerable, since there is no explicit checkout of the actual PR contents or unsafe handling of those contents.",
+        "score": 0.5812
+      },
+      {
+        "sentence": "Conclusion In this post we’ve examined some of the common issues when processing untrusted PR input to your GitHub workflows.",
+        "score": 0.6084
+      },
+      {
+        "sentence": "It is important to understand the various privilege levels that pull_request , pull_request_target , and workflow_run afford the code processing the incoming PR.",
+        "score": 0.4469
+      },
+      {
+        "sentence": "Be careful when using pull_request_target and only use it when you actually need the privileged context of the target repo available in your workflow, especially when combined with explicit handling of the contents of an untrusted PR.",
+        "score": 0.5014
+      },
+      {
+        "sentence": "This post is the first in a series of posts about GitHub Actions security.",
+        "score": 0.5161
+      },
+      {
+        "sentence": "Read the next post",
+        "score": 0.382
+      }
+    ]
+  }
+}

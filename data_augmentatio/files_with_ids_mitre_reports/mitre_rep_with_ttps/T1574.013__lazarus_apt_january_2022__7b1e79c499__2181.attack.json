@@ -1,0 +1,299 @@
+{
+  "original_txt": "North Korea’s Lazarus APT leverages Windows Update client, GitHub in latest campaign\nThreat Intelligence Team\nThreat Intelligence Team\nThis blog was authored by Ankur Saini and Hossein Jazi\nLazarus Group is one of the most sophisticated North Korean APTs that has been active since 2009. The group is responsible for many high profile attacks in the past and has gained worldwide attention. The Malwarebytes Threat Intelligence team is actively monitoring its activities and was able to spot a new campaign on Jan 18th 2022.\nIn this campaign, Lazarus conducted spear phishing attacks weaponized with malicious documents that use their known job opportunities theme. We identified two decoy documents masquerading as American global security and aerospace giant Lockheed Martin.\nIn this blog post, we provide technical analysis of this latest attack including a clever use of Windows Update to execute the malicious payload and GitHub as a command and control server. We have reported the rogue GitHub account for harmful content.\nAnalysis\nThe two macro-embedded documents seem to be luring the targets about new job opportunities at Lockheed Martin:\n- Lockheed_Martin_JobOpportunities.docx\n- Salary_Lockheed_Martin_job_opportunities_confidential.doc\nThe compilation time for both of these documents is 2020-04-24, but we have enough indicators that confirm that they have been used in a campaign around late December 2021 and early 2022. Some of the indicators that shows this attack operated recently are the domains used by the threat actor.\nBoth of the documents use the same attack theme and have some common things like embedded macros but the full attack chain seems to be totally different. The analysis provided in the blog is mainly based on the “Lockheed_Martin_JobOpportunities.docx” document but we also provide brief analysis for the second document (Salary_Lockheed_Martin_job_opportunities_confidential.doc) at the end of this blog.\nAttack Process\nThe below image shows the full attack process which we will discuss in detail in this article. The attack starts by executing the malicious macros that are embedded in the Word document. The malware performs a series of injections and achieves startup persistence in the target system. In the next section we will provide technical details about various stages of this attack and its payload capabilities.\nMacros: Control flow hijacking through KernelCallbackTable\nThe above code uses a very unusual and lesser known technique to hijack the control flow and execute malicious code. The malware retrieves the address of the “WMIsAvailableOffline” function from “wmvcore.dll”, then it changes the memory protection permissions for code in “WMIsAvailableOffline” and proceeds to overwrite the code in memory with the malicious base64 decoded shell-code.\nAnother interesting thing happening in the above code is the control flow hijacking through the KernelCallbackTable member of the PEB. A call to NtQueryInformationProcess is made with ProcessBasicInformation class as the parameter which helps the malware to retrieve the address of PEB and thus retrieving the KernelCallbackTable pointer.\nKernelCallbackTable is initialized to an array of callback functions when user32.dll is loaded into memory, which are used whenever a graphical call (GDI) is made by the process. To hijack the control flow, malware replaces the USER32!_fnDWORD callback in the table with the malicious WMIsAvailableOffline function. Once the flow is hijacked and malicious code is executed the rest of the code takes care of restoring the KernelCallbackTable to its original state.\nShellcode Analysis\nThe shellcode loaded by the macro contains an encrypted DLL which is decrypted at runtime and then manually mapped into memory by the shellcode. After mapping the DLL, the shellcode jumps to the entry point of that DLL. The shellcode uses some kind of custom hashing method to resolve the APIs. We used hollows_hunter to dump the DLL and reconstruct the IAT once it is fully mapped into memory.\nThe hashing function accepts two parameters: the hash of the DLL and the hash of the function we are looking for in that DLL. A very simple algorithm is used for hashing APIs. The following code block shows this algorithm:\ndef string_hashing(name): hash = 0 for i in range(0, len(name)): hash = 2 * (hash + (ord(name[i]) | 0x60)) return hash\nThe shellcode and all the subsequent inter-process Code/DLL injections in the attack chain use the same injection method as described below.\nCode Injection\nThe injection function is responsible for resolving all the required API calls. It then opens a handle to the target process by using the OpenProcess API. It uses the SizeOfImage field in the NT header of the DLL to be injected into allocated space into the target process along with a separate space for the init_dll function. The purpose of the init_dll function is to initialize the injected DLL and then pass the control flow to the entry point of the DLL. One thing to note here is a simple CreateRemoteThread method is used to start a thread inside the target process unlike the KernelCallbackTable technique used in our macro.\nMalware Components\n- stage1_winword.dll – This is the DLL which is mapped inside the Word process. This DLL is responsible for restoring the original state of KernelCallbackTable and then injecting stage2_explorer.dll into the explorer.exe process.\n- stage2_explorer.dll – The winword.exe process injects this DLL into the explorer.exe process. With brief analysis we find out that the .data section contains two additional DLLs. We refer to them as drops_lnk.dll and stage3_runtimebroker.dll. By analyzing stage2_explorer.dll a bit further we can easily understand the purpose of this DLL.\nThe above code snippet shows the main routine of stage2_explorer.dll. As you can see it checks for the existence of “C:Wíndowssystem32wuaueng.dll” and then if it doesn’t exist it takes its path to drop additional files. It executes the drops_lnk.dll in the current process and then tries to create the RuntimeBroker process and if successful in creating RuntimeBroker, it injects stage3_runtimebroker.dll into the newly created process. If for some reason process creation fails, it just executes stage3_runtimebroker.dll in the current explorer.exe process.\n- drops_lnk.dll – This DLL is loaded and executed inside the explorer.exe process, it mainly drops the lnk file (WindowsUpdateConf.lnk) into the startup folder and then it checks for the existence of wuaueng.dll in the malicious directory and manually loads and executes it from the disk if it exists. The lnk file (WindowsUpdateConf.lnk) executes “C:Windowssystem32wuauclt.exe” /UpdateDeploymentProvider C:Wíndowssystem32wuaueng.dll /RunHandlerComServer. This is an interesting technique used by Lazarus to run its malicious DLL using the Windows Update Client to bypass security detection mechanisms. With this method, the threat actor can execute its malicious code through the Microsoft Windows Update client by passing the following arguments: /UpdateDeploymentProvider, Path to malicious dll and /RunHandlerComServer argument after the dll.\n- stage3_runtimebroker.dll – This DLL is responsible for creating the malicious directory (“C:Wíndowssystem32”) and then drops the wuaueng.dll in that directory, furthermore it sets the attributes of the directory to make it hidden.\n- wuaueng.dll – This is one of the most important DLLs in the attack chain. This malicious DLL is signed with a certificate which seems to belong to “SAMOYAJ LIMITED”, Till 20 January 2022, the DLL had (0/65) AV detections and presently only 5/65 detect it as malicious. This DLL has embedded inside another DLL which contains the core module (core_module.dll) of this malware responsible for communicating with the Command and Control (C2) server. This DLL can be loaded into memory in two ways:\n– If drops_lnk.dll loads this DLL into explorer.exe then it loads the core_module.dll and then executes it\n– If it is being executed from wuauclt.exe, then it retrieves the PID of explorer.exe and injects the core_module.dll into that process.\nThe Core module and GitHub as a C2\nRarely do we see malware using GitHub as C2 and this is the first time we’ve observed Lazarus leveraging it. Using Github as a C2 has its own drawbacks but it is a clever choice for targeted and short term attacks as it makes it harder for security products to differentiate between legitimate and malicious connections. While analyzing the core module we were able to get the required details to access the C2 but unfortunately it was already cleaned and we were not able to get much except one of the additional modules loaded by the core_module.dll remotely (thanks to @jaydinbas who shared the module with us).\nThere seems to be no type of string encoding used so we can clearly see the strings which makes the analysis easy. get_module_from_repo uses the hardcoded username, repo_name, directory, token to make a http request to GitHub and retrieves the files present in the “images” directory of the repository.\nThe HTTP request retrieves contents of the files present in the repository with an interesting validation which checks that the retrieved file is a PNG. The file that was earlier retrieved was named “readme.png”; this PNG file has one of the malicious modules embedded in it. The strings in the module reveal that the module’s original name is “GetBaseInfo.dll”. Once the malware retrieves the module it uses the map_module function to map the DLL and then looks for an exported function named “GetNumberOfMethods” in the malicious module. It then executes GetNumberOfMethods and saves the result obtained by the module. This result is committed to the remote repo under the metafiles directory with a filename denoting the time at which the module was executed. This file committed to the repo contains the result of the commands executed by the module on the target system. To commit the file the malware makes a PUT HTTP request to Github.\nAdditional Modules (GetBaseInfo.dll)\nThis was the only module which we were able to get our hands on. Only a single module does limit us in finding all the capabilities this malware has. Also its a bit difficult to hunt for these modules as they never really touch the disk which makes them harder to detect by AVs. The only way to get the modules would be to access the C2 and download the modules while they are live. Coming back to this module, it has very limited capabilities. It retrieves the Username, ComputerName and a list of all the running processes on the system and then returns the result so it can be committed to the C2.\nGitHub Account\nThe account with the username “DanielManwarningRep” is used to operate the malware. The account was created on January 17th, 2022 and other than this we were not able to find any information related to the account.\nSecond Malicious Document used in the campaign\nMalicious Document – Salary_Lockheed_Martin_job_opportunities_confidential.doc (0160375e19e606d06f672be6e43f70fa70093d2a30031affd2929a5c446d07c1)\nThe initial attack vector used in this document is similar to the first document but the malware dropped by the macro is totally different. Sadly, the C2 for this malware was down by the time we started analyzing it.\nThis document uses KernelCallbackTable as well to hijack the control flow just like our first module, the injection technique used by the shellcode also resembles the first document. The major difference in this document is that it tries to retrieve a remote HTML page and then executes it using mshta.exe. The remote HTML page is located at https[:]//markettrendingcenter[.]com/member.htm and throws a 404 Not Found which makes it difficult for us to analyze this document any further.\nAttribution\nThere are multiple indicators that suggest that this campaign has been operated by the Lazarus threat actor. In this section we provide some of the indicators that confirm the actor behind this attack is Lazarus:\n- Using job opportunities as template is the known method used by Lazarus to target its victims. The documents created by this actor are well designed and contain a large icon for a known company such as LockHeed Martin, BAE Systems, Boeing and Northrop Grumman in the template.\n- In this campaign the actor has targeted people that are looking for job opportunities at Lockheed Martin. Targeting the defense industry and specifically Lockheed Martin is a known target for this actor.\n- The document’s metadata used in this campaign links them to several other documents used by this actor in the past.\n- Using Frame1_Layout for macro execution and using lesser known API calls for shellcode execution is known to be used by Lazarus.\n- We also were able to find infrastructure overlap between this campaign and past campaigns of Lazarus (Figure 19).\nConclusion\nLazarus APT is one of the advanced APT groups that is known to target the defense industry. The group keeps updating its toolset to evade security mechanisms. In this blog post we provided a detailed analysis about the new campaign operated by this actor. Even though they have used their old job theme method, they employed several new techniques to bypass detections:\n- Use of KernelCallbackTable to hijack the control flow and shellcode execution\n- Use of the Windows Update client for malicious code execution\n- Use of GitHub for C2 communication\nIOCs:\nMaldocs:\n0d01b24f7666f9bccf0f16ea97e41e0bc26f4c49cdfb7a4dabcc0a494b44ec9b Lockheed_Martin_JobOpportunities.docx\n0160375e19e606d06f672be6e43f70fa70093d2a30031affd2929a5c446d07c1\nSalary_Lockheed_Martin_job_opportunities_confidential.doc\nDomains:\nmarkettrendingcenter.com\nlm-career.com\nPayloads:\n| Name | Sha256 |\n| readme.png | 4216f63870e2cdfe499d09fce9caa301f9546f60a69c4032cb5fb6d5ceb9af32 |\n| wuaueng.dll | 829eceee720b0a3e505efbd3262c387b92abdf46183d51a50489e2b157dac3b1 |\n| stage1_winword.dll | f14b1a91ed1ecd365088ba6de5846788f86689c6c2f2182855d5e0954d62af3b |\n| stage2_explorer.dll | 660e60cc1fd3e155017848a1f6befc4a335825a6ae04f3416b9b148ff156d143 |\n| drops_lnk.dll | 11b5944715da95e4a57ea54968439d955114088222fd2032d4e0282d12a58abb |\n| stage3_runtimebroker.dll | 9d18defe7390c59a1473f79a2407d072a3f365de9834b8d8be25f7e35a76d818 |\n| core_module.dll | c677a79b853d3858f8c8b86ccd8c76ebbd1508cc9550f1da2d30be491625b744 |\n| GetBaseInfo.dll | 5098ec21c88e14d9039d232106560b3c87487b51b40d6fef28254c37e4865182 |",
+  "sanitized_txt": "North Korea’s Lazarus APT leverages Windows Update client, GitHub in latest campaign Threat Intelligence Team Threat Intelligence Team This blog was authored by Ankur Saini and Hossein Jazi Lazarus Group is one of the most sophisticated North Korean APTs that has been active since 2009. The group is responsible for many high profile attacks in the past and has gained worldwide attention. The Malwarebytes Threat Intelligence team is actively monitoring its activities and was able to spot a new campaign on Jan 18th 2022.\nIn this campaign, Lazarus conducted spear phishing attacks weaponized with malicious documents that use their known job opportunities theme. We identified two decoy documents masquerading as American global security and aerospace giant Lockheed Martin.\nIn this blog post, we provide technical analysis of this latest attack including a clever use of Windows Update to execute the malicious payload and GitHub as a command and control server. We have reported the rogue GitHub account for harmful content.\nAnalysis The two macro-embedded documents seem to be luring the targets about new job opportunities at Lockheed Martin:\n- Lockheed_Martin_JobOpportunities.docx - Salary_Lockheed_Martin_job_opportunities_confidential.doc The compilation time for both of these documents is 2020-04-24, but we have enough indicators that confirm that they have been used in a campaign around late December 2021 and early 2022. Some of the indicators that shows this attack operated recently are the domains used by the threat actor.\nBoth of the documents use the same attack theme and have some common things like embedded macros but the full attack chain seems to be totally different. The analysis provided in the blog is mainly based on the “Lockheed_Martin_JobOpportunities.docx” document but we also provide brief analysis for the second document (Salary_Lockheed_Martin_job_opportunities_confidential.doc) at the end of this blog.\nAttack Process The below image shows the full attack process which we will discuss in detail in this article. The attack starts by executing the malicious macros that are embedded in the Word document. The malware performs a series of injections and achieves startup persistence in the target system. In the next section we will provide technical details about various stages of this attack and its payload capabilities.\nMacros: Control flow hijacking through KernelCallbackTable The above code uses a very unusual and lesser known technique to hijack the control flow and execute malicious code. The malware retrieves the address of the “WMIsAvailableOffline” function from “wmvcore.dll”, then it changes the memory protection permissions for code in “WMIsAvailableOffline” and proceeds to overwrite the code in memory with the malicious base64 decoded shell-code.\nAnother interesting thing happening in the above code is the control flow hijacking through the KernelCallbackTable member of the PEB. A call to NtQueryInformationProcess is made with ProcessBasicInformation class as the parameter which helps the malware to retrieve the address of PEB and thus retrieving the KernelCallbackTable pointer.\nKernelCallbackTable is initialized to an array of callback functions when user32.dll is loaded into memory, which are used whenever a graphical call (GDI) is made by the process. To hijack the control flow, malware replaces the USER32!_fnDWORD callback in the table with the malicious WMIsAvailableOffline function. Once the flow is hijacked and malicious code is executed the rest of the code takes care of restoring the KernelCallbackTable to its original state.\nShellcode Analysis The shellcode loaded by the macro contains an encrypted DLL which is decrypted at runtime and then manually mapped into memory by the shellcode. After mapping the DLL, the shellcode jumps to the entry point of that DLL. The shellcode uses some kind of custom hashing method to resolve the APIs. We used hollows_hunter to dump the DLL and reconstruct the IAT once it is fully mapped into memory.\nThe hashing function accepts two parameters: the hash of the DLL and the hash of the function we are looking for in that DLL. A very simple algorithm is used for hashing APIs. The following code block shows this algorithm:\ndef string_hashing(name): hash = 0 for i in range(0, len(name)): hash = 2 * (hash + (ord(name[i]) | 0x60)) return hash The shellcode and all the subsequent inter-process Code/DLL injections in the attack chain use the same injection method as described below.\nCode Injection The injection function is responsible for resolving all the required API calls. It then opens a handle to the target process by using the OpenProcess API. It uses the SizeOfImage field in the NT header of the DLL to be injected into allocated space into the target process along with a separate space for the init_dll function. The purpose of the init_dll function is to initialize the injected DLL and then pass the control flow to the entry point of the DLL. One thing to note here is a simple CreateRemoteThread method is used to start a thread inside the target process unlike the KernelCallbackTable technique used in our macro.\nMalware Components - stage1_winword.dll – This is the DLL which is mapped inside the Word process. This DLL is responsible for restoring the original state of KernelCallbackTable and then injecting stage2_explorer.dll into the explorer.exe process.\n- stage2_explorer.dll – The winword.exe process injects this DLL into the explorer.exe process. With brief analysis we find out that the .data section contains two additional DLLs. We refer to them as drops_lnk.dll and stage3_runtimebroker.dll. By analyzing stage2_explorer.dll a bit further we can easily understand the purpose of this DLL.\nThe above code snippet shows the main routine of stage2_explorer.dll. As you can see it checks for the existence of “C:Wíndowssystem32wuaueng.dll” and then if it doesn’t exist it takes its path to drop additional files. It executes the drops_lnk.dll in the current process and then tries to create the RuntimeBroker process and if successful in creating RuntimeBroker, it injects stage3_runtimebroker.dll into the newly created process. If for some reason process creation fails, it just executes stage3_runtimebroker.dll in the current explorer.exe process.\n- drops_lnk.dll – This DLL is loaded and executed inside the explorer.exe process, it mainly drops the lnk file (WindowsUpdateConf.lnk) into the startup folder and then it checks for the existence of wuaueng.dll in the malicious directory and manually loads and executes it from the disk if it exists. The lnk file (WindowsUpdateConf.lnk) executes “C:Windowssystem32wuauclt.exe” /UpdateDeploymentProvider C:Wíndowssystem32wuaueng.dll /RunHandlerComServer. This is an interesting technique used by Lazarus to run its malicious DLL using the Windows Update Client to bypass security detection mechanisms. With this method, the threat actor can execute its malicious code through the Microsoft Windows Update client by passing the following arguments: /UpdateDeploymentProvider, Path to malicious dll and /RunHandlerComServer argument after the dll.\n- stage3_runtimebroker.dll – This DLL is responsible for creating the malicious directory (“C:Wíndowssystem32”) and then drops the wuaueng.dll in that directory, furthermore it sets the attributes of the directory to make it hidden.\n- wuaueng.dll – This is one of the most important DLLs in the attack chain. This malicious DLL is signed with a certificate which seems to belong to “SAMOYAJ LIMITED”, Till 20 January 2022, the DLL had (0/65) AV detections and presently only 5/65 detect it as malicious. This DLL has embedded inside another DLL which contains the core module (core_module.dll) of this malware responsible for communicating with the Command and Control (C2) server. This DLL can be loaded into memory in two ways:\n– If drops_lnk.dll loads this DLL into explorer.exe then it loads the core_module.dll and then executes it – If it is being executed from wuauclt.exe, then it retrieves the PID of explorer.exe and injects the core_module.dll into that process.\nThe Core module and GitHub as a C2 Rarely do we see malware using GitHub as C2 and this is the first time we’ve observed Lazarus leveraging it. Using Github as a C2 has its own drawbacks but it is a clever choice for targeted and short term attacks as it makes it harder for security products to differentiate between legitimate and malicious connections. While analyzing the core module we were able to get the required details to access the C2 but unfortunately it was already cleaned and we were not able to get much except one of the additional modules loaded by the core_module.dll remotely (thanks to @jaydinbas who shared the module with us).\nThere seems to be no type of string encoding used so we can clearly see the strings which makes the analysis easy. get_module_from_repo uses the hardcoded username, repo_name, directory, token to make a http request to GitHub and retrieves the files present in the “images” directory of the repository.\nThe HTTP request retrieves contents of the files present in the repository with an interesting validation which checks that the retrieved file is a PNG. The file that was earlier retrieved was named “readme.png”; this PNG file has one of the malicious modules embedded in it. The strings in the module reveal that the module’s original name is “GetBaseInfo.dll”. Once the malware retrieves the module it uses the map_module function to map the DLL and then looks for an exported function named “GetNumberOfMethods” in the malicious module. It then executes GetNumberOfMethods and saves the result obtained by the module. This result is committed to the remote repo under the metafiles directory with a filename denoting the time at which the module was executed. This file committed to the repo contains the result of the commands executed by the module on the target system. To commit the file the malware makes a PUT HTTP request to Github.\nAdditional Modules (GetBaseInfo.dll) This was the only module which we were able to get our hands on. Only a single module does limit us in finding all the capabilities this malware has. Also its a bit difficult to hunt for these modules as they never really touch the disk which makes them harder to detect by AVs. The only way to get the modules would be to access the C2 and download the modules while they are live. Coming back to this module, it has very limited capabilities. It retrieves the Username, ComputerName and a list of all the running processes on the system and then returns the result so it can be committed to the C2.\nGitHub Account The account with the username “DanielManwarningRep” is used to operate the malware. The account was created on January 17th, 2022 and other than this we were not able to find any information related to the account.\nSecond Malicious Document used in the campaign Malicious Document – Salary_Lockheed_Martin_job_opportunities_confidential.doc (0160375e19e606d06f672be6e43f70fa70093d2a30031affd2929a5c446d07c1) The initial attack vector used in this document is similar to the first document but the malware dropped by the macro is totally different. Sadly, the C2 for this malware was down by the time we started analyzing it.\nThis document uses KernelCallbackTable as well to hijack the control flow just like our first module, the injection technique used by the shellcode also resembles the first document. The major difference in this document is that it tries to retrieve a remote HTML page and then executes it using mshta.exe. The remote HTML page is located at https[:]//markettrendingcenter[.]com/member.htm and throws a 404 Not Found which makes it difficult for us to analyze this document any further.\nAttribution There are multiple indicators that suggest that this campaign has been operated by the Lazarus threat actor. In this section we provide some of the indicators that confirm the actor behind this attack is Lazarus:\n- Using job opportunities as template is the known method used by Lazarus to target its victims. The documents created by this actor are well designed and contain a large icon for a known company such as LockHeed Martin, BAE Systems, Boeing and Northrop Grumman in the template.\n- In this campaign the actor has targeted people that are looking for job opportunities at Lockheed Martin. Targeting the defense industry and specifically Lockheed Martin is a known target for this actor.\n- The document’s metadata used in this campaign links them to several other documents used by this actor in the past.\n- Using Frame1_Layout for macro execution and using lesser known API calls for shellcode execution is known to be used by Lazarus.\n- We also were able to find infrastructure overlap between this campaign and past campaigns of Lazarus (Figure 19).\nConclusion Lazarus APT is one of the advanced APT groups that is known to target the defense industry. The group keeps updating its toolset to evade security mechanisms. In this blog post we provided a detailed analysis about the new campaign operated by this actor. Even though they have used their old job theme method, they employed several new techniques to bypass detections:\n- Use of KernelCallbackTable to hijack the control flow and shellcode execution - Use of the Windows Update client for malicious code execution - Use of GitHub for C2 communication IOCs:\nMaldocs:\n0d01b24f7666f9bccf0f16ea97e41e0bc26f4c49cdfb7a4dabcc0a494b44ec9b Lockheed_Martin_JobOpportunities.docx 0160375e19e606d06f672be6e43f70fa70093d2a30031affd2929a5c446d07c1 Salary_Lockheed_Martin_job_opportunities_confidential.doc Domains:\nmarkettrendingcenter.com lm-career.com Payloads:\n| Name | Sha256 | | readme.png | 4216f63870e2cdfe499d09fce9caa301f9546f60a69c4032cb5fb6d5ceb9af32 | | wuaueng.dll | 829eceee720b0a3e505efbd3262c387b92abdf46183d51a50489e2b157dac3b1 | | stage1_winword.dll | f14b1a91ed1ecd365088ba6de5846788f86689c6c2f2182855d5e0954d62af3b | | stage2_explorer.dll | 660e60cc1fd3e155017848a1f6befc4a335825a6ae04f3416b9b148ff156d143 | | drops_lnk.dll | 11b5944715da95e4a57ea54968439d955114088222fd2032d4e0282d12a58abb | | stage3_runtimebroker.dll | 9d18defe7390c59a1473f79a2407d072a3f365de9834b8d8be25f7e35a76d818 | | core_module.dll | c677a79b853d3858f8c8b86ccd8c76ebbd1508cc9550f1da2d30be491625b744 | | GetBaseInfo.dll | 5098ec21c88e14d9039d232106560b3c87487b51b40d6fef28254c37e4865182 |",
+  "ID_list": [
+    "T1574.013"
+  ],
+  "Name_list": [
+    "Command and Control",
+    "Execution",
+    "Masquerading",
+    "Mshta",
+    "Persistence",
+    "Phishing"
+  ],
+  "TTP_sentences": {
+    "T1574.013": [
+      {
+        "sentence": "North Korea’s Lazarus APT leverages Windows Update client, GitHub in latest campaign Threat Intelligence Team Threat Intelligence Team This blog was authored by Ankur Saini and Hossein Jazi Lazarus Group is one of the most sophisticated North Korean APTs that has been active since 2009.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "The Malwarebytes Threat Intelligence team is actively monitoring its activities and was able to spot a new campaign on Jan 18th 2022.",
+        "score": 0.4098
+      },
+      {
+        "sentence": "We identified two decoy documents masquerading as American global security and aerospace giant Lockheed Martin.",
+        "score": 0.3143
+      },
+      {
+        "sentence": "In this blog post, we provide technical analysis of this latest attack including a clever use of Windows Update to execute the malicious payload and GitHub as a command and control server.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "Analysis The two macro-embedded documents seem to be luring the targets about new job opportunities at Lockheed Martin: - Lockheed_Martin_JobOpportunities.docx - Salary_Lockheed_Martin_job_opportunities_confidential.doc The compilation time for both of these documents is 2020-04-24, but we have enough indicators that confirm that they have been used in a campaign around late December 2021 and early 2022.",
+        "score": 0.3984
+      },
+      {
+        "sentence": "Some of the indicators that shows this attack operated recently are the domains used by the threat actor.",
+        "score": 0.3102
+      },
+      {
+        "sentence": "Both of the documents use the same attack theme and have some common things like embedded macros but the full attack chain seems to be totally different.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "The analysis provided in the blog is mainly based on the “Lockheed_Martin_JobOpportunities.docx” document but we also provide brief analysis for the second document (Salary_Lockheed_Martin_job_opportunities_confidential.doc) at the end of this blog.",
+        "score": 0.3796
+      },
+      {
+        "sentence": "Attack Process The below image shows the full attack process which we will discuss in detail in this article.",
+        "score": 0.4444
+      },
+      {
+        "sentence": "The attack starts by executing the malicious macros that are embedded in the Word document.",
+        "score": 0.3158
+      },
+      {
+        "sentence": "The malware performs a series of injections and achieves startup persistence in the target system.",
+        "score": 0.4812
+      },
+      {
+        "sentence": "In the next section we will provide technical details about various stages of this attack and its payload capabilities.",
+        "score": 0.4906
+      },
+      {
+        "sentence": "Macros: Control flow hijacking through KernelCallbackTable The above code uses a very unusual and lesser known technique to hijack the control flow and execute malicious code.",
+        "score": 0.7399
+      },
+      {
+        "sentence": "The malware retrieves the address of the “WMIsAvailableOffline” function from “wmvcore.dll”, then it changes the memory protection permissions for code in “WMIsAvailableOffline” and proceeds to overwrite the code in memory with the malicious base64 decoded shell-code.",
+        "score": 0.6601
+      },
+      {
+        "sentence": "Another interesting thing happening in the above code is the control flow hijacking through the KernelCallbackTable member of the PEB.",
+        "score": 0.7637
+      },
+      {
+        "sentence": "A call to NtQueryInformationProcess is made with ProcessBasicInformation class as the parameter which helps the malware to retrieve the address of PEB and thus retrieving the KernelCallbackTable pointer.",
+        "score": 0.7486
+      },
+      {
+        "sentence": "KernelCallbackTable is initialized to an array of callback functions when user32.dll is loaded into memory, which are used whenever a graphical call (GDI) is made by the process.",
+        "score": 0.7545
+      },
+      {
+        "sentence": "To hijack the control flow, malware replaces the USER32!_fnDWORD callback in the table with the malicious WMIsAvailableOffline function.",
+        "score": 0.6392
+      },
+      {
+        "sentence": "Once the flow is hijacked and malicious code is executed the rest of the code takes care of restoring the KernelCallbackTable to its original state.",
+        "score": 0.7263
+      },
+      {
+        "sentence": "Shellcode Analysis The shellcode loaded by the macro contains an encrypted DLL which is decrypted at runtime and then manually mapped into memory by the shellcode.",
+        "score": 0.6931
+      },
+      {
+        "sentence": "After mapping the DLL, the shellcode jumps to the entry point of that DLL.",
+        "score": 0.6951
+      },
+      {
+        "sentence": "The shellcode uses some kind of custom hashing method to resolve the APIs.",
+        "score": 0.5611
+      },
+      {
+        "sentence": "We used hollows_hunter to dump the DLL and reconstruct the IAT once it is fully mapped into memory.",
+        "score": 0.6765
+      },
+      {
+        "sentence": "The hashing function accepts two parameters: the hash of the DLL and the hash of the function we are looking for in that DLL.",
+        "score": 0.53
+      },
+      {
+        "sentence": "A very simple algorithm is used for hashing APIs.",
+        "score": 0.4437
+      },
+      {
+        "sentence": "The following code block shows this algorithm: def string_hashing(name): hash = 0 for i in range(0, len(name)): hash = 2 * (hash + (ord(name[i]) | 0x60)) return hash The shellcode and all the subsequent inter-process Code/DLL injections in the attack chain use the same injection method as described below.",
+        "score": 0.6835
+      },
+      {
+        "sentence": "Code Injection The injection function is responsible for resolving all the required API calls.",
+        "score": 0.672
+      },
+      {
+        "sentence": "It then opens a handle to the target process by using the OpenProcess API.",
+        "score": 0.5816
+      },
+      {
+        "sentence": "It uses the SizeOfImage field in the NT header of the DLL to be injected into allocated space into the target process along with a separate space for the init_dll function.",
+        "score": 0.6717
+      },
+      {
+        "sentence": "The purpose of the init_dll function is to initialize the injected DLL and then pass the control flow to the entry point of the DLL.",
+        "score": 0.6467
+      },
+      {
+        "sentence": "One thing to note here is a simple CreateRemoteThread method is used to start a thread inside the target process unlike the KernelCallbackTable technique used in our macro.",
+        "score": 0.7409
+      },
+      {
+        "sentence": "Malware Components - stage1_winword.dll – This is the DLL which is mapped inside the Word process.",
+        "score": 0.6786
+      },
+      {
+        "sentence": "This DLL is responsible for restoring the original state of KernelCallbackTable and then injecting stage2_explorer.dll into the explorer.exe process. - stage2_explorer.dll – The winword.exe process injects this DLL into the explorer.exe process.",
+        "score": 0.7704
+      },
+      {
+        "sentence": "With brief analysis we find out that the .data section contains two additional DLLs.",
+        "score": 0.5971
+      },
+      {
+        "sentence": "We refer to them as drops_lnk.dll and stage3_runtimebroker.dll.",
+        "score": 0.4298
+      },
+      {
+        "sentence": "By analyzing stage2_explorer.dll a bit further we can easily understand the purpose of this DLL.",
+        "score": 0.5842
+      },
+      {
+        "sentence": "The above code snippet shows the main routine of stage2_explorer.dll.",
+        "score": 0.6202
+      },
+      {
+        "sentence": "As you can see it checks for the existence of “C:Wíndowssystem32wuaueng.dll” and then if it doesn’t exist it takes its path to drop additional files.",
+        "score": 0.4196
+      },
+      {
+        "sentence": "It executes the drops_lnk.dll in the current process and then tries to create the RuntimeBroker process and if successful in creating RuntimeBroker, it injects stage3_runtimebroker.dll into the newly created process.",
+        "score": 0.6602
+      },
+      {
+        "sentence": "If for some reason process creation fails, it just executes stage3_runtimebroker.dll in the current explorer.exe process. - drops_lnk.dll – This DLL is loaded and executed inside the explorer.exe process, it mainly drops the lnk file (WindowsUpdateConf.lnk) into the startup folder and then it checks for the existence of wuaueng.dll in the malicious directory and manually loads and executes it from the disk if it exists.",
+        "score": 0.5616
+      },
+      {
+        "sentence": "The lnk file (WindowsUpdateConf.lnk) executes “C:Windowssystem32wuauclt.exe” /UpdateDeploymentProvider C:Wíndowssystem32wuaueng.dll /RunHandlerComServer.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "This is an interesting technique used by Lazarus to run its malicious DLL using the Windows Update Client to bypass security detection mechanisms.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "This malicious DLL is signed with a certificate which seems to belong to “SAMOYAJ LIMITED”, Till 20 January 2022, the DLL had (0/65) AV detections and presently only 5/65 detect it as malicious.",
+        "score": 0.4434
+      },
+      {
+        "sentence": "This DLL has embedded inside another DLL which contains the core module (core_module.dll) of this malware responsible for communicating with the Command and Control (C2) server.",
+        "score": 0.4948
+      },
+      {
+        "sentence": "This DLL can be loaded into memory in two ways: – If drops_lnk.dll loads this DLL into explorer.exe then it loads the core_module.dll and then executes it – If it is being executed from wuauclt.exe, then it retrieves the PID of explorer.exe and injects the core_module.dll into that process.",
+        "score": 0.7048
+      },
+      {
+        "sentence": "While analyzing the core module we were able to get the required details to access the C2 but unfortunately it was already cleaned and we were not able to get much except one of the additional modules loaded by the core_module.dll remotely (thanks to @jaydinbas who shared the module with us).",
+        "score": 0.4742
+      },
+      {
+        "sentence": "There seems to be no type of string encoding used so we can clearly see the strings which makes the analysis easy. get_module_from_repo uses the hardcoded username, repo_name, directory, token to make a http request to GitHub and retrieves the files present in the “images” directory of the repository.",
+        "score": 0.3369
+      },
+      {
+        "sentence": "The HTTP request retrieves contents of the files present in the repository with an interesting validation which checks that the retrieved file is a PNG.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "The file that was earlier retrieved was named “readme.png”; this PNG file has one of the malicious modules embedded in it.",
+        "score": 0.4424
+      },
+      {
+        "sentence": "The strings in the module reveal that the module’s original name is “GetBaseInfo.dll”.",
+        "score": 0.5808
+      },
+      {
+        "sentence": "Once the malware retrieves the module it uses the map_module function to map the DLL and then looks for an exported function named “GetNumberOfMethods” in the malicious module.",
+        "score": 0.6964
+      },
+      {
+        "sentence": "It then executes GetNumberOfMethods and saves the result obtained by the module.",
+        "score": 0.4987
+      },
+      {
+        "sentence": "Additional Modules (GetBaseInfo.dll) This was the only module which we were able to get our hands on.",
+        "score": 0.5939
+      },
+      {
+        "sentence": "Only a single module does limit us in finding all the capabilities this malware has.",
+        "score": 0.4507
+      },
+      {
+        "sentence": "Also its a bit difficult to hunt for these modules as they never really touch the disk which makes them harder to detect by AVs.",
+        "score": 0.4052
+      },
+      {
+        "sentence": "The only way to get the modules would be to access the C2 and download the modules while they are live.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "Coming back to this module, it has very limited capabilities.",
+        "score": 0.4242
+      },
+      {
+        "sentence": "GitHub Account The account with the username “DanielManwarningRep” is used to operate the malware.",
+        "score": 0.3101
+      },
+      {
+        "sentence": "The account was created on January 17th, 2022 and other than this we were not able to find any information related to the account.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "Second Malicious Document used in the campaign Malicious Document – Salary_Lockheed_Martin_job_opportunities_confidential.doc (0160375e19e606d06f672be6e43f70fa70093d2a30031affd2929a5c446d07c1) The initial attack vector used in this document is similar to the first document but the malware dropped by the macro is totally different.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "Sadly, the C2 for this malware was down by the time we started analyzing it.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "This document uses KernelCallbackTable as well to hijack the control flow just like our first module, the injection technique used by the shellcode also resembles the first document.",
+        "score": 0.7871
+      },
+      {
+        "sentence": "The major difference in this document is that it tries to retrieve a remote HTML page and then executes it using mshta.exe.",
+        "score": 0.4236
+      },
+      {
+        "sentence": "The remote HTML page is located at https[:]//markettrendingcenter[.]com/member.htm and throws a 404 Not Found which makes it difficult for us to analyze this document any further.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "In this section we provide some of the indicators that confirm the actor behind this attack is Lazarus: - Using job opportunities as template is the known method used by Lazarus to target its victims.",
+        "score": 0.4055
+      },
+      {
+        "sentence": "The documents created by this actor are well designed and contain a large icon for a known company such as LockHeed Martin, BAE Systems, Boeing and Northrop Grumman in the template. - In this campaign the actor has targeted people that are looking for job opportunities at Lockheed Martin.",
+        "score": 0.3597
+      },
+      {
+        "sentence": "Targeting the defense industry and specifically Lockheed Martin is a known target for this actor. - The document’s metadata used in this campaign links them to several other documents used by this actor in the past. - Using Frame1_Layout for macro execution and using lesser known API calls for shellcode execution is known to be used by Lazarus. - We also were able to find infrastructure overlap between this campaign and past campaigns of Lazarus (Figure 19).",
+        "score": 0.6091
+      },
+      {
+        "sentence": "Conclusion Lazarus APT is one of the advanced APT groups that is known to target the defense industry.",
+        "score": 0.3501
+      },
+      {
+        "sentence": "The group keeps updating its toolset to evade security mechanisms.",
+        "score": 0.3723
+      },
+      {
+        "sentence": "In this blog post we provided a detailed analysis about the new campaign operated by this actor.",
+        "score": 0.3539
+      }
+    ]
+  }
+}

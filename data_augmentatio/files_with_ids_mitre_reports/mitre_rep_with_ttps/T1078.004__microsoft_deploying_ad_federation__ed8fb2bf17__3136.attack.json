@@ -1,0 +1,632 @@
+{
+  "original_txt": "Note\nAccess to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nActive Directory Federation Services (AD FS) provides simplified, secured identity federation and web single sign-on (SSO) capabilities. Users federated with Microsoft Entra ID or Microsoft 365 can authenticate using on-premises credentials to access all cloud resources. As a result, your deployment must have a highly available AD FS infrastructure to ensure access to resources both on-premises and in the cloud.\nDeploying AD FS in Azure can help achieve high availability without too much effort. There are several advantages of deploying AD FS in Azure:\n- The power of Azure availability sets gives you a highly available infrastructure.\n- Deployments are easy to scale. If you need more performance, you can easily migrate to more powerful machines using a simplified deployment process in Azure.\n- Azure geo redundancy ensures your infrastructure is highly available across the globe.\n- The Azure portal makes your infrastructure easier to manage with highly simplified management options.\nDesign principles\nThe following diagram shows the recommended basic topology for deploying AD FS infrastructure in Azure.\nWe recommend your network topology follows these general principles:\n- Deploy AD FS on separate servers to avoid affecting the performance of your domain controllers.\n- You must deploy web application proxy (WAP) servers so that users can reach the AD FS when they aren't on the company network.\n- You should set up the web application proxy servers in the demilitarized zone (DMZ) and only allow TCP/443 access between the DMZ and internal subnet.\n- To ensure high availability of AD FS and web application proxy servers, we recommend using an internal load balancer for AD FS servers and Azure Load Balancer for web application proxy servers.\n- To provide redundancy to your AD FS deployment, we recommend that you group two or more virtual machines (VMs) in an availability set for similar workloads. This configuration ensures that during either a planned or unplanned maintenance event, at least one VM is available.\n- You should deploy web application proxy servers in a separate DMZ network. You can divide one virtual network into two subnets and then deploy the web application proxy servers in an isolated subnet. You can configure the network security group settings for each subnet and allow only required communication between the two subnets.\nDeploy the network\nWhen creating a network, you can either create two subnets in the same virtual network or create two different virtual networks. We recommend using the single-network approach, as creating two separate virtual networks also requires creating two separate virtual network gateways for communication purposes.\nCreate a virtual network\nTo create a virtual network:\nSign in to the Azure portal with your Azure account.\nIn the portal, search for and select Virtual networks.\nOn the Virtual networks page, select + Create.\nIn Create virtual network, go to the Basics tab and configure the following settings:\nConfigure the following settings under Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select the name of an existing resource group or select Create new to make a new one.\nConfigure the following settings for Instance details:\nFor Virtual network name, enter a name for your virtual network.\nFor Region, select the region you want to create your virtual network in.\nSelect Next.\nIn the Security tab, enable any security service you want to use, then select Next.\nOn the IP addresses tab, select the name of the subnet you want to edit. For this example, we're editing the default subnet that the service automatically creates.\nOn the Edit subnet page, rename the subnet to INT.\nEnter the IP address and Subnet size information for your subnet to define an IP address space.\nFor Network security group, select Create new.\nFor this example, enter the name NSG_INT and select OK, then select Save. You now have your first subnet.\nTo create your second subnet, select + Add a subnet.\nOn the Add a subnet page, enter DMZ for the second subnet name, then enter information about your subnet into the empty fields to define an IP address space.\nFor Network security group, select Create new.\nEnter the name NSG_DMZ, select OK, then select Add.\nSelect Review + create, then select Create.\nYou now have a virtual network that includes two subnets, each with an associated network security group.\nSecure the virtual network\nA Network security group (NSG) contains a list of Access Control List (ACL) rules that allow or deny network traffic to your VM instances in a virtual network. You can associate NSGs with either subnets or individual VM instances within that subnet. When an NSG is associated with a subnet, the ACL rules apply to all the VM instances in that subnet.\nThe NSGs associated with your subnets automatically include some default inbound and outbound rules. You can't delete default security rules, but you can override them with rules that have a higher priority. And, you can add more inbound and outbound rules according to the level of security you want.\nNow, add a couple of rules to each of our two security groups. For the first example, let's add an inbound security rule to the NSG_INT security group.\nOn your virtual network's Subnets page, select NSG_INT.\nOn the left, select Inbound security rules, then select + Add.\nIn Add inbound security rule, configure the rule with the following information:\nFor Source, enter 10.0.1.0/24.\nFor the Source port ranges, either leave it blank if you don't want to allow traffic or select an asterisk (*) to allow traffic on any port.\nFor Destination, enter 10.0.0.0/24.\nFor Service, select HTTPS. The service automatically fills the information fields for Destination port ranges and Protocol depending on which service you choose.\nFor Action, select Allow.\nFor Priority, enter 1010.\nFor Name, enter AllowHTTPSFromDMZ.\nFor Description, enter Allow the HTTPS communication from DMZ.\nAfter you're finished, select Add.\nThe new inbound security rule is now added to the top of the list of rules for NSG_INT.\nRepeat these steps with the values shown in the following table. In addition to the new rule you created, you must add the following extra rules in the priority order listed to help secure your internal and DMZ subnet.\nNSG Type of rule Source Destination Service Action Priority Name Description NSG_INT Outbound Any Service Tag/Internet Custom (80/Any) Deny 100 DenyInternetOutbound No access to internet. NSG_DMZ Inbound Any Any Custom (Asterisk (*)/Any) Allow 1010 AllowHTTPSFromInternet Allow HTTPS from internet to the DMZ. NSG_DMZ Outbound Any Service Tag/Internet Custom (80/Any) Deny 100 DenyInternetOutbound Anything except HTTPS to internet is blocked. After you finish entering the values for each new rule, select Add and proceed to the next until two new security rules are added for each NSG.\nAfter configuration, the NSG pages should look like the following screenshot:\nNote\nIf the virtual network requires client user certificate authentication, such as clientTLS authentication using X.509 user certificates, you must enable TCP port 49443 for inbound access.\nCreate connection to on-premises\nYou need a connection to on-premises to deploy the DC in Azure. You can connect your on-premises infrastructure to your Azure infrastructure using one of the following options:\n- Point-to-site\n- Virtual Network site-to-site\n- ExpressRoute\nWe recommend you use ExpressRoute if your organization doesn't require point-to-site or Virtual Network site-to-site connections. ExpressRoute lets you create private connections between Azure datacenters and infrastructure that's on your premises or in a colocation environment. ExpressRoute connections also don't connect to the public internet, which makes them more reliable, faster, and more secure. To learn more about ExpressRoute and the various connectivity options using ExpressRoute, read ExpressRoute technical overview.\nCreate availability sets\nFor each role (DC/AD FS and WAP), create availability sets that contain at least two machines each. This configuration helps achieve higher availability for each role. While creating the availability sets, you must decide which of the following domains you want to use:\nIn a fault domain, VMs share the same power source and physical network switch. We recommend a minimum of two fault domains. The default value is 2 and you can leave it as-is for this deployment.\nIn an update domain, machines restart together during an update. We recommend a minimum of two update domains. The default value is 5, and you can leave it as-is for this deployment.\nTo create availability sets:\nSearch for and select Availability sets in the Azure portal, then select + Create.\nIn Create availability set, go to the Basics tab and enter the following information:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Name, enter the name for your availability set. For this example, enter contosodcset.\nFor Region, select the region you want to use.\nFor Fault domains, leave it on the default value of 2.\nFor Update domains, leave it at the default value of 5.\nFor Use managed disks, select No (Classic) for this example.\nAfter you're done, select Review + create, then Create.\nRepeat the previous steps to create a second availability set with the name contososac2.\nDeploy virtual machines\nThe next step is to deploy VMs that host the different roles in your infrastructure. We recommend a minimum of two machines in each availability set. For this example, we create four VMs for the basic deployment.\nTo create VMs:\nSearch for and select Virtual machines in the Azure portal.\nOn the Virtual machines page, select + Create, then choose Azure virtual machine.\nIn Create a virtual machine, go to the Basics tab and enter the following information:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Virtual machine name, enter a name for your VM. For the first machine in this example, enter contosodc1.\nFor Region, select the region you want to use.\nFor Availability options, select Availability set.\nFor Availability set, select contosodcset\nFor Security type, select Standard.\nFor Subscription, select the name of your subscription.\nFor Image, select the image you want to use, then select Configure VM generation and select Gen 1.\nUnder Administrator account:\nFor Authentication type, select SSH public key.\nFor Username, enter a user name to use for the account.\nFor Key pair name, enter a key pair name to use for the account.\nFor anything not specified, you can leave the default values.\nWhen you're finished, select Next: Disks.\nIn the Networking tab, enter the following information:\nFor virtual network, select the name of the virtual network that contains the subnets you created in the previous section.\nFor Subnet, select your INT subnet.\nFor NIC network security group, select None.\nFor anything not specified, you can leave the defaults.\nAfter you've made all your choices, select Review + create, then select Create.\nRepeat these steps using the information in this table to create the three remaining VMs:\n| Virtual machine name | Subnet | Availability options | Availability set | Storage account |\n|---|---|---|---|---|\n| contosodc2 | INT | Availability set | contosodcset | contososac2 |\n| contosowap1 | DMZ | Availability set | contosowapset | contososac1 |\n| contosowap2 | DMZ | Availability set | contosowapset | contososac2 |\nThe settings don't specify NSG because Azure lets you use NSG at the subnet level. You can control machine network traffic by using the individual NSG associated with either the subnet or the network interface card (NIC) object. For more information, see What is a network security group (NSG).\nIf you're managing the DNS, we recommend you use a static IP address. You can use Azure DNS and refer to the new machines by their Azure FQDNs in the DNS records for your domain. For more information, see Change a private IP address to static.\nYour Virtual machines page should show all four VMs after the deployment completes.\nConfigure the DC and AD FS servers\nTo authenticate any incoming request, AD FS needs to contact the DC. To save the costly trip from Azure to on-premises DC for authentication, we recommend you deploy a replica of the DC in Azure. In order to attain high availability, it's better to create an availability set of at least two DCs.\n| Domain controller | Role | Storage account |\n|---|---|---|\n| contosodc1 | Replica | contososac1 |\n| contosodc2 | Replica | contososac2 |\nWe recommend you do the following things:\nPromote the two servers as replica DCs with DNS\nConfigure the AD FS servers by installing the AD FS role using the server manager.\nCreate and deploy the internal load balancer (ILB)\nTo create and deploy an ILB:\nSearch for and select Load Balancers in the Azure portal and choose + Create.\nIn Create load balancer, enter or select this information in the Basics tab:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Name, enter the name of your load balancer.\nFor Region, select the region you want to use.\nFor Type, select Internal.\nLeave SKU and Tier as their defaults and then select Next: Frontend IP Configuration\nSelect + Add a frontend IP configuration, then enter or select this information in the Add frontend IP configuration page.\nFor Name, enter a frontend IP configuration name.\nFor Virtual network, select the virtual network where you want to deploy your AD FS.\nFor Subnet, select INT, which was the internal subnet you created in the previous section.\nFor Assignment, select Static.\nFor IP address, enter your IP address.\nLeave Availability zone as the default and then select Add.\nSelect Next: Backend pools, then select + Add a backend pool.\nOn the Add backend pool page, enter a name for the backend pool into the Name field. In the IP configurations area, select + Add.\nOn the Add backend pool page, select a VM to align with the backend pool, select Add, then select Save.\nSelect Next: Inbound Rules.\nOn the Inbound rules tab, select Add a load balancing rule, then enter the following information in the Add load balancing rule page:\nFor Name, enter a name for the rule.\nFor Frontend IP address, select the address you created earlier.\nFor Backend pool, select the backend pool you created earlier.\nFor Protocol, select TCP.\nFor Port, enter 443.\nFor Backend port, select Create new, then enter the following values to create a health probe:\nFor Name, enter the name of the health probe.\nFor Protocol, enter HTTP.\nFor Port, enter 80.\nFor Path, enter /adfs/probe.\nFor Interval, leave it at the default value of 5.\nWhen you're finished, select Save.\nWhen you're done, select Save to save the inbound rule.\nSelect Save to save the inbound rule.\nSelect Review + create, then select Create.\nAfter you select Create and the ILB deploys, you can see it in the list of load balancers, as shown in the following screenshot.\nUpdate the DNS server with ILB\nUsing your internal DNS server, create an A record for the ILB. This setting ensures that all data transmitted to fs.contoso.com ends up at the ILB using the appropriate route. The A record should be for the federation service with the IP address pointing to the IP address of the ILB. For example, if the ILB IP address is 10.3.0.8 and the federation service installed is fs.contoso.com, create an A record for fs.contoso.com pointing to 10.3.0.8.\nWarning\nIf you're using the Windows Internal Database (WID) for your AD FS database, set this value to temporarily point to your primary AD FS server. If you don't make this temporary setting change, the web application proxy fails enrollment. After you successfully enroll all web application proxy servers, change this DNS entry to point to the load balancer.\nNote\nIf your deployment is also using IPv6, create a corresponding AAAA record.\nConfigure the web application proxy servers to reach AD FS servers\nTo ensure that web application proxy servers are able to reach the AD FS servers behind the ILB, create a record in the %systemroot%\\system32\\drivers\\etc\\hosts file for the ILB. The distinguished name (DN) should be the federation service name, such as fs.contoso.com. And the IP entry should be the ILB's IP address, which in this example is 10.3.0.8.\nWarning\nIf you're using the Windows Internal Database (WID) for your AD FS database, set this value to temporarily point to your primary AD FS server. If you don't, the web application proxy fails enrollment. After you successfully enroll all web application proxy servers, change this DNS entry to point to the load balancer.\nInstall the web application proxy role\nAfter you ensure that web application proxy servers are able to reach the AD FS servers behind ILB, you can next install the web application proxy servers. Web application proxy servers don't need to be joined to the domain. Install the web application proxy roles on the two web application proxy servers by selecting the Remote Access role. The server manager guides you to complete the WAP installation.\nFor more information on how to deploy WAP, see Install and Configure the web application proxy Server.\nCreate and deploy the internet-facing (public) load balancer\nTo create and deploy the internet-facing load balancer:\nIn the Azure portal, select Load balancers and then choose Create.\nIn Create load balancer, go to the Basics tab and configure the following settings:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Name, enter the name of your load balancer.\nFor Region, select the region you want to use.\nFor Type, select Public.\nLeave SKU and Tier as their defaults and then select Next : Frontend IP Configuration\nSelect + Add a frontend IP configuration, then enter or select this information in the Add frontend IP configuration page.\nFor Name, enter a frontend IP configuration name.\nFor IP type, select IP address.\nFor Public IP Address, either select the public IP address you want to use from the drop-down list or select Create to make a new one, then select Add.\nSelect Next: Backend pools, then select + Add a backend pool.\nOn the Add backend pool page, enter a name for the backend pool into the Name field. In the IP configurations area, select + Add.\nOn the Add backend pool page, select a VM to align with the backend pool, select Add, then select Save.\nSelect Next: Inbound Rules, then select Add a load balancing rule. In the Add load balancing rule page, configure the following settings:\nFor Name, enter a name for the rule.\nFor Frontend IP address, select the address you created earlier.\nFor Backend pool, select the backend pool you created earlier.\nFor Protocol, select TCP.\nFor Port, enter 443.\nFor Backend port, enter 443.\nFor Health probe, enter the following values:\nFor Name, enter the name of the health probe.\nFor Protocol, enter HTTP.\nFor Port, enter 80.\nFor Path, enter /adfs/probe.\nFor Interval, leave it at the default value of 5.\nWhen you're finished, select Save.\nWhen you're done, select Save to save the inbound rule.\nSelect Review + create, then select Create.\nAfter you select Create and the public ILB deploys, it should contain a list of load balancers.\nAssign a DNS label to the public IP\nTo configure the DNS label for the public IP:\nIn the Azure portal, search for Public IP addresses, then select the IP address you want to edit.\nUnder Settings, select Configuration.\nUnder Provide a DNS label (optional), add an entry in the text field (like fs.contoso.com) that resolves to the DNS label of the external load balancer (like contosofs.westus.cloudapp.azure.com).\nSelect Save to complete assigning a DNS label.\nTest the AD FS sign-in\nThe easiest way to test AD FS is by using the IdpInitiatedSignOn.aspx page. To do that, you must enable the IdpInitiatedSignOn on the AD FS properties.\nTo check if you have the IdpInitiatedSignOn property enabled:\nIn PowerShell, run the following cmdlet on the AD FS server to set it to enabled.\nSet-AdfsProperties -EnableIdPInitiatedSignOnPage $true\nFrom any external machine, access\nhttps:\\//adfs-server.contoso.com/adfs/ls/IdpInitiatedSignon.aspx\n.You should see the following AD FS page:\nTry to sign in. If you sign in successfully, you should see a message appear, as shown in the following screenshot.\nTemplate for deploying AD FS in Azure\nThe template deploys a six-machine setup, with two machines each for Domain Controllers, AD FS, and WAP.\nAD FS in Azure Deployment Template\nYou can use an existing virtual network or create a new virtual network while deploying this template. The following table lists the parameters you can use to customize the deployment.\n| Parameter | Description |\n|---|---|\n| Location | The region you want to deploy the resources into. |\n| StorageAccountType | The type of the Storage Account you want to create. |\n| VirtualNetworkUsage | Indicates whether to create a new virtual network or use an existing one. |\n| VirtualNetworkName | The name of the virtual network. Mandatory on both existing or new virtual network usage. |\n| VirtualNetworkResourceGroupName | Specifies the name of the resource group where the existing virtual network is located. When you use an existing virtual network, this option is a mandatory parameter so the deployment can find the ID of the existing virtual network. |\n| VirtualNetworkAddressRange | The address range of the new virtual network. Mandatory if creating a new virtual network. |\n| InternalSubnetName | The name of the internal subnet. Mandatory for both new and existing virtual network usage options. |\n| InternalSubnetAddressRange | The address range of the internal subnet, which contains the Domain Controllers and AD FS servers. Mandatory if creating a new virtual network. |\n| DMZSubnetAddressRange | The address range of the DMZ subnet, which contains the Windows application proxy servers. Mandatory if creating a new virtual network. |\n| DMZSubnetName | The name of the internal subnet, which is mandatory on both new and existing virtual network usage options. |\n| ADDC01NICIPAddress | The internal IP address of the first Domain Controller. This IP address is statically assigned to the DC and must be a valid IP address within the Internal subnet. |\n| ADDC02NICIPAddress | The internal IP address of the second Domain Controller. This IP address is statically assigned to the DC and must be a valid IP address within the Internal subnet. |\n| ADFS01NICIPAddress | The internal IP address of the first AD FS server. This IP address is statically assigned to the AD FS server and must be a valid IP address within the Internal subnet. |\n| ADFS02NICIPAddress | The internal IP address of the second AD FS server. This IP address is statically assigned to the AD FS server and must be a valid IP address within the Internal subnet. |\n| WAP01NICIPAddress | The internal IP address of the first WAP server. This IP address is statically assigned to the WAP server and must be a valid IP address within the DMZ subnet. |\n| WAP02NICIPAddress | The internal IP address of the second WAP server. This IP address is statically assigned to the WAP server and must be a valid IP address within the DMZ subnet. |\n| ADFSLoadBalancerPrivateIPAddress | The internal IP address of the AD FS load balancer. This IP address is statically assigned to the load balancer and must be a valid IP address within the Internal subnet. |\n| ADDCVMNamePrefix | VM name prefix for Domain Controllers. |\n| ADFSVMNamePrefix | VM name prefix for AD FS servers. |\n| WAPVMNamePrefix | VM name prefix for WAP servers. |\n| ADDCVMSize | The VM size of the Domain Controllers. |\n| ADFSVMSize | The VM size of the AD FS servers. |\n| WAPVMSize | The VM size of the WAP servers. |\n| AdminUserName | The name of the local Administrator of the VMs. |\n| AdminPassword | The password for the local Administrator account of the VMs. |\nRelated links\n- Availability sets\n- Azure Load Balancer\n- Internal Load Balancer\n- Internet-facing load balancer\n- Storage Accounts\n- Azure Virtual Networks\n- AD FS and web application proxy Links",
+  "sanitized_txt": "Note Access to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nActive Directory Federation Services (AD FS) provides simplified, secured identity federation and web single sign-on (SSO) capabilities. Users federated with Microsoft Entra ID or Microsoft 365 can authenticate using on-premises credentials to access all cloud resources. As a result, your deployment must have a highly available AD FS infrastructure to ensure access to resources both on-premises and in the cloud.\nDeploying AD FS in Azure can help achieve high availability without too much effort. There are several advantages of deploying AD FS in Azure:\n- The power of Azure availability sets gives you a highly available infrastructure.\n- Deployments are easy to scale. If you need more performance, you can easily migrate to more powerful machines using a simplified deployment process in Azure.\n- Azure geo redundancy ensures your infrastructure is highly available across the globe.\n- The Azure portal makes your infrastructure easier to manage with highly simplified management options.\nDesign principles The following diagram shows the recommended basic topology for deploying AD FS infrastructure in Azure.\nWe recommend your network topology follows these general principles:\n- Deploy AD FS on separate servers to avoid affecting the performance of your domain controllers.\n- You must deploy web application proxy (WAP) servers so that users can reach the AD FS when they aren't on the company network.\n- You should set up the web application proxy servers in the demilitarized zone (DMZ) and only allow TCP/443 access between the DMZ and internal subnet.\n- To ensure high availability of AD FS and web application proxy servers, we recommend using an internal load balancer for AD FS servers and Azure Load Balancer for web application proxy servers.\n- To provide redundancy to your AD FS deployment, we recommend that you group two or more virtual machines (VMs) in an availability set for similar workloads. This configuration ensures that during either a planned or unplanned maintenance event, at least one VM is available.\n- You should deploy web application proxy servers in a separate DMZ network. You can divide one virtual network into two subnets and then deploy the web application proxy servers in an isolated subnet. You can configure the network security group settings for each subnet and allow only required communication between the two subnets.\nDeploy the network When creating a network, you can either create two subnets in the same virtual network or create two different virtual networks. We recommend using the single-network approach, as creating two separate virtual networks also requires creating two separate virtual network gateways for communication purposes.\nCreate a virtual network To create a virtual network:\nSign in to the Azure portal with your Azure account.\nIn the portal, search for and select Virtual networks.\nOn the Virtual networks page, select + Create.\nIn Create virtual network, go to the Basics tab and configure the following settings:\nConfigure the following settings under Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select the name of an existing resource group or select Create new to make a new one.\nConfigure the following settings for Instance details:\nFor Virtual network name, enter a name for your virtual network.\nFor Region, select the region you want to create your virtual network in.\nSelect Next.\nIn the Security tab, enable any security service you want to use, then select Next.\nOn the IP addresses tab, select the name of the subnet you want to edit. For this example, we're editing the default subnet that the service automatically creates.\nOn the Edit subnet page, rename the subnet to INT.\nEnter the IP address and Subnet size information for your subnet to define an IP address space.\nFor Network security group, select Create new.\nFor this example, enter the name NSG_INT and select OK, then select Save. You now have your first subnet.\nTo create your second subnet, select + Add a subnet.\nOn the Add a subnet page, enter DMZ for the second subnet name, then enter information about your subnet into the empty fields to define an IP address space.\nFor Network security group, select Create new.\nEnter the name NSG_DMZ, select OK, then select Add.\nSelect Review + create, then select Create.\nYou now have a virtual network that includes two subnets, each with an associated network security group.\nSecure the virtual network A Network security group (NSG) contains a list of Access Control List (ACL) rules that allow or deny network traffic to your VM instances in a virtual network. You can associate NSGs with either subnets or individual VM instances within that subnet. When an NSG is associated with a subnet, the ACL rules apply to all the VM instances in that subnet.\nThe NSGs associated with your subnets automatically include some default inbound and outbound rules. You can't delete default security rules, but you can override them with rules that have a higher priority. And, you can add more inbound and outbound rules according to the level of security you want.\nNow, add a couple of rules to each of our two security groups. For the first example, let's add an inbound security rule to the NSG_INT security group.\nOn your virtual network's Subnets page, select NSG_INT.\nOn the left, select Inbound security rules, then select + Add.\nIn Add inbound security rule, configure the rule with the following information:\nFor Source, enter 10.0.1.0/24.\nFor the Source port ranges, either leave it blank if you don't want to allow traffic or select an asterisk (*) to allow traffic on any port.\nFor Destination, enter 10.0.0.0/24.\nFor Service, select HTTPS. The service automatically fills the information fields for Destination port ranges and Protocol depending on which service you choose.\nFor Action, select Allow.\nFor Priority, enter 1010.\nFor Name, enter AllowHTTPSFromDMZ.\nFor Description, enter Allow the HTTPS communication from DMZ.\nAfter you're finished, select Add.\nThe new inbound security rule is now added to the top of the list of rules for NSG_INT.\nRepeat these steps with the values shown in the following table. In addition to the new rule you created, you must add the following extra rules in the priority order listed to help secure your internal and DMZ subnet.\nNSG Type of rule Source Destination Service Action Priority Name Description NSG_INT Outbound Any Service Tag/Internet Custom (80/Any) Deny 100 DenyInternetOutbound No access to internet. NSG_DMZ Inbound Any Any Custom (Asterisk (*)/Any) Allow 1010 AllowHTTPSFromInternet Allow HTTPS from internet to the DMZ. NSG_DMZ Outbound Any Service Tag/Internet Custom (80/Any) Deny 100 DenyInternetOutbound Anything except HTTPS to internet is blocked. After you finish entering the values for each new rule, select Add and proceed to the next until two new security rules are added for each NSG.\nAfter configuration, the NSG pages should look like the following screenshot:\nNote If the virtual network requires client user certificate authentication, such as clientTLS authentication using X.509 user certificates, you must enable TCP port 49443 for inbound access.\nCreate connection to on-premises You need a connection to on-premises to deploy the DC in Azure. You can connect your on-premises infrastructure to your Azure infrastructure using one of the following options:\n- Point-to-site - Virtual Network site-to-site - ExpressRoute We recommend you use ExpressRoute if your organization doesn't require point-to-site or Virtual Network site-to-site connections. ExpressRoute lets you create private connections between Azure datacenters and infrastructure that's on your premises or in a colocation environment. ExpressRoute connections also don't connect to the public internet, which makes them more reliable, faster, and more secure. To learn more about ExpressRoute and the various connectivity options using ExpressRoute, read ExpressRoute technical overview.\nCreate availability sets For each role (DC/AD FS and WAP), create availability sets that contain at least two machines each. This configuration helps achieve higher availability for each role. While creating the availability sets, you must decide which of the following domains you want to use:\nIn a fault domain, VMs share the same power source and physical network switch. We recommend a minimum of two fault domains. The default value is 2 and you can leave it as-is for this deployment.\nIn an update domain, machines restart together during an update. We recommend a minimum of two update domains. The default value is 5, and you can leave it as-is for this deployment.\nTo create availability sets:\nSearch for and select Availability sets in the Azure portal, then select + Create.\nIn Create availability set, go to the Basics tab and enter the following information:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Name, enter the name for your availability set. For this example, enter contosodcset.\nFor Region, select the region you want to use.\nFor Fault domains, leave it on the default value of 2.\nFor Update domains, leave it at the default value of 5.\nFor Use managed disks, select No (Classic) for this example.\nAfter you're done, select Review + create, then Create.\nRepeat the previous steps to create a second availability set with the name contososac2.\nDeploy virtual machines The next step is to deploy VMs that host the different roles in your infrastructure. We recommend a minimum of two machines in each availability set. For this example, we create four VMs for the basic deployment.\nTo create VMs:\nSearch for and select Virtual machines in the Azure portal.\nOn the Virtual machines page, select + Create, then choose Azure virtual machine.\nIn Create a virtual machine, go to the Basics tab and enter the following information:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Virtual machine name, enter a name for your VM. For the first machine in this example, enter contosodc1.\nFor Region, select the region you want to use.\nFor Availability options, select Availability set.\nFor Availability set, select contosodcset For Security type, select Standard.\nFor Subscription, select the name of your subscription.\nFor Image, select the image you want to use, then select Configure VM generation and select Gen 1.\nUnder Administrator account:\nFor Authentication type, select SSH public key.\nFor Username, enter a user name to use for the account.\nFor Key pair name, enter a key pair name to use for the account.\nFor anything not specified, you can leave the default values.\nWhen you're finished, select Next: Disks.\nIn the Networking tab, enter the following information:\nFor virtual network, select the name of the virtual network that contains the subnets you created in the previous section.\nFor Subnet, select your INT subnet.\nFor NIC network security group, select None.\nFor anything not specified, you can leave the defaults.\nAfter you've made all your choices, select Review + create, then select Create.\nRepeat these steps using the information in this table to create the three remaining VMs:\n| Virtual machine name | Subnet | Availability options | Availability set | Storage account | |---|---|---|---|---| | contosodc2 | INT | Availability set | contosodcset | contososac2 | | contosowap1 | DMZ | Availability set | contosowapset | contososac1 | | contosowap2 | DMZ | Availability set | contosowapset | contososac2 | The settings don't specify NSG because Azure lets you use NSG at the subnet level. You can control machine network traffic by using the individual NSG associated with either the subnet or the network interface card (NIC) object. For more information, see What is a network security group (NSG).\nIf you're managing the DNS, we recommend you use a static IP address. You can use Azure DNS and refer to the new machines by their Azure FQDNs in the DNS records for your domain. For more information, see Change a private IP address to static.\nYour Virtual machines page should show all four VMs after the deployment completes.\nConfigure the DC and AD FS servers To authenticate any incoming request, AD FS needs to contact the DC. To save the costly trip from Azure to on-premises DC for authentication, we recommend you deploy a replica of the DC in Azure. In order to attain high availability, it's better to create an availability set of at least two DCs.\n| Domain controller | Role | Storage account | |---|---|---| | contosodc1 | Replica | contososac1 | | contosodc2 | Replica | contososac2 | We recommend you do the following things:\nPromote the two servers as replica DCs with DNS Configure the AD FS servers by installing the AD FS role using the server manager.\nCreate and deploy the internal load balancer (ILB) To create and deploy an ILB:\nSearch for and select Load Balancers in the Azure portal and choose + Create.\nIn Create load balancer, enter or select this information in the Basics tab:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Name, enter the name of your load balancer.\nFor Region, select the region you want to use.\nFor Type, select Internal.\nLeave SKU and Tier as their defaults and then select Next: Frontend IP Configuration Select + Add a frontend IP configuration, then enter or select this information in the Add frontend IP configuration page.\nFor Name, enter a frontend IP configuration name.\nFor Virtual network, select the virtual network where you want to deploy your AD FS.\nFor Subnet, select INT, which was the internal subnet you created in the previous section.\nFor Assignment, select Static.\nFor IP address, enter your IP address.\nLeave Availability zone as the default and then select Add.\nSelect Next: Backend pools, then select + Add a backend pool.\nOn the Add backend pool page, enter a name for the backend pool into the Name field. In the IP configurations area, select + Add.\nOn the Add backend pool page, select a VM to align with the backend pool, select Add, then select Save.\nSelect Next: Inbound Rules.\nOn the Inbound rules tab, select Add a load balancing rule, then enter the following information in the Add load balancing rule page:\nFor Name, enter a name for the rule.\nFor Frontend IP address, select the address you created earlier.\nFor Backend pool, select the backend pool you created earlier.\nFor Protocol, select TCP.\nFor Port, enter 443.\nFor Backend port, select Create new, then enter the following values to create a health probe:\nFor Name, enter the name of the health probe.\nFor Protocol, enter HTTP.\nFor Port, enter 80.\nFor Path, enter /adfs/probe.\nFor Interval, leave it at the default value of 5.\nWhen you're finished, select Save.\nWhen you're done, select Save to save the inbound rule.\nSelect Save to save the inbound rule.\nSelect Review + create, then select Create.\nAfter you select Create and the ILB deploys, you can see it in the list of load balancers, as shown in the following screenshot.\nUpdate the DNS server with ILB Using your internal DNS server, create an A record for the ILB. This setting ensures that all data transmitted to fs.contoso.com ends up at the ILB using the appropriate route. The A record should be for the federation service with the IP address pointing to the IP address of the ILB. For example, if the ILB IP address is 10.3.0.8 and the federation service installed is fs.contoso.com, create an A record for fs.contoso.com pointing to 10.3.0.8.\nWarning If you're using the Windows Internal Database (WID) for your AD FS database, set this value to temporarily point to your primary AD FS server. If you don't make this temporary setting change, the web application proxy fails enrollment. After you successfully enroll all web application proxy servers, change this DNS entry to point to the load balancer.\nNote If your deployment is also using IPv6, create a corresponding AAAA record.\nConfigure the web application proxy servers to reach AD FS servers To ensure that web application proxy servers are able to reach the AD FS servers behind the ILB, create a record in the %systemroot%\\system32\\drivers\\etc\\hosts file for the ILB. The distinguished name (DN) should be the federation service name, such as fs.contoso.com. And the IP entry should be the ILB's IP address, which in this example is 10.3.0.8.\nWarning If you're using the Windows Internal Database (WID) for your AD FS database, set this value to temporarily point to your primary AD FS server. If you don't, the web application proxy fails enrollment. After you successfully enroll all web application proxy servers, change this DNS entry to point to the load balancer.\nInstall the web application proxy role After you ensure that web application proxy servers are able to reach the AD FS servers behind ILB, you can next install the web application proxy servers. Web application proxy servers don't need to be joined to the domain. Install the web application proxy roles on the two web application proxy servers by selecting the Remote Access role. The server manager guides you to complete the WAP installation.\nFor more information on how to deploy WAP, see Install and Configure the web application proxy Server.\nCreate and deploy the internet-facing (public) load balancer To create and deploy the internet-facing load balancer:\nIn the Azure portal, select Load balancers and then choose Create.\nIn Create load balancer, go to the Basics tab and configure the following settings:\nUnder Project details:\nFor Subscription, select the name of your subscription.\nFor Resource group, either select an existing resource group or Create new to make a new one.\nUnder Instance details:\nFor Name, enter the name of your load balancer.\nFor Region, select the region you want to use.\nFor Type, select Public.\nLeave SKU and Tier as their defaults and then select Next : Frontend IP Configuration Select + Add a frontend IP configuration, then enter or select this information in the Add frontend IP configuration page.\nFor Name, enter a frontend IP configuration name.\nFor IP type, select IP address.\nFor Public IP Address, either select the public IP address you want to use from the drop-down list or select Create to make a new one, then select Add.\nSelect Next: Backend pools, then select + Add a backend pool.\nOn the Add backend pool page, enter a name for the backend pool into the Name field. In the IP configurations area, select + Add.\nOn the Add backend pool page, select a VM to align with the backend pool, select Add, then select Save.\nSelect Next: Inbound Rules, then select Add a load balancing rule. In the Add load balancing rule page, configure the following settings:\nFor Name, enter a name for the rule.\nFor Frontend IP address, select the address you created earlier.\nFor Backend pool, select the backend pool you created earlier.\nFor Protocol, select TCP.\nFor Port, enter 443.\nFor Backend port, enter 443.\nFor Health probe, enter the following values:\nFor Name, enter the name of the health probe.\nFor Protocol, enter HTTP.\nFor Port, enter 80.\nFor Path, enter /adfs/probe.\nFor Interval, leave it at the default value of 5.\nWhen you're finished, select Save.\nWhen you're done, select Save to save the inbound rule.\nSelect Review + create, then select Create.\nAfter you select Create and the public ILB deploys, it should contain a list of load balancers.\nAssign a DNS label to the public IP To configure the DNS label for the public IP:\nIn the Azure portal, search for Public IP addresses, then select the IP address you want to edit.\nUnder Settings, select Configuration.\nUnder Provide a DNS label (optional), add an entry in the text field (like fs.contoso.com) that resolves to the DNS label of the external load balancer (like contosofs.westus.cloudapp.azure.com).\nSelect Save to complete assigning a DNS label.\nTest the AD FS sign-in The easiest way to test AD FS is by using the IdpInitiatedSignOn.aspx page. To do that, you must enable the IdpInitiatedSignOn on the AD FS properties.\nTo check if you have the IdpInitiatedSignOn property enabled:\nIn PowerShell, run the following cmdlet on the AD FS server to set it to enabled.\nSet-AdfsProperties -EnableIdPInitiatedSignOnPage $true From any external machine, access https:\\//adfs-server.contoso.com/adfs/ls/IdpInitiatedSignon.aspx .You should see the following AD FS page:\nTry to sign in. If you sign in successfully, you should see a message appear, as shown in the following screenshot.\nTemplate for deploying AD FS in Azure The template deploys a six-machine setup, with two machines each for Domain Controllers, AD FS, and WAP.\nAD FS in Azure Deployment Template You can use an existing virtual network or create a new virtual network while deploying this template. The following table lists the parameters you can use to customize the deployment.\n| Parameter | Description | |---|---| | Location | The region you want to deploy the resources into. | | StorageAccountType | The type of the Storage Account you want to create. | | VirtualNetworkUsage | Indicates whether to create a new virtual network or use an existing one. | | VirtualNetworkName | The name of the virtual network. Mandatory on both existing or new virtual network usage. | | VirtualNetworkResourceGroupName | Specifies the name of the resource group where the existing virtual network is located. When you use an existing virtual network, this option is a mandatory parameter so the deployment can find the ID of the existing virtual network. | | VirtualNetworkAddressRange | The address range of the new virtual network. Mandatory if creating a new virtual network. | | InternalSubnetName | The name of the internal subnet. Mandatory for both new and existing virtual network usage options. | | InternalSubnetAddressRange | The address range of the internal subnet, which contains the Domain Controllers and AD FS servers. Mandatory if creating a new virtual network. | | DMZSubnetAddressRange | The address range of the DMZ subnet, which contains the Windows application proxy servers. Mandatory if creating a new virtual network. | | DMZSubnetName | The name of the internal subnet, which is mandatory on both new and existing virtual network usage options. | | ADDC01NICIPAddress | The internal IP address of the first Domain Controller. This IP address is statically assigned to the DC and must be a valid IP address within the Internal subnet. | | ADDC02NICIPAddress | The internal IP address of the second Domain Controller. This IP address is statically assigned to the DC and must be a valid IP address within the Internal subnet. | | ADFS01NICIPAddress | The internal IP address of the first AD FS server. This IP address is statically assigned to the AD FS server and must be a valid IP address within the Internal subnet. | | ADFS02NICIPAddress | The internal IP address of the second AD FS server. This IP address is statically assigned to the AD FS server and must be a valid IP address within the Internal subnet. | | WAP01NICIPAddress | The internal IP address of the first WAP server. This IP address is statically assigned to the WAP server and must be a valid IP address within the DMZ subnet. | | WAP02NICIPAddress | The internal IP address of the second WAP server. This IP address is statically assigned to the WAP server and must be a valid IP address within the DMZ subnet. | | ADFSLoadBalancerPrivateIPAddress | The internal IP address of the AD FS load balancer. This IP address is statically assigned to the load balancer and must be a valid IP address within the Internal subnet. | | ADDCVMNamePrefix | VM name prefix for Domain Controllers. | | ADFSVMNamePrefix | VM name prefix for AD FS servers. | | WAPVMNamePrefix | VM name prefix for WAP servers. | | ADDCVMSize | The VM size of the Domain Controllers. | | ADFSVMSize | The VM size of the AD FS servers. | | WAPVMSize | The VM size of the WAP servers. | | AdminUserName | The name of the local Administrator of the VMs. | | AdminPassword | The password for the local Administrator account of the VMs. | Related links - Availability sets - Azure Load Balancer - Internal Load Balancer - Internet-facing load balancer - Storage Accounts - Azure Virtual Networks - AD FS and web application proxy Links",
+  "ID_list": [
+    "T1078.004"
+  ],
+  "Name_list": [
+    "PowerShell",
+    "Proxy",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1078.004": [
+      {
+        "sentence": "Note Access to this page requires authorization.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "You can try signing in or changing directories.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "Access to this page requires authorization.",
+        "score": 0.4037
+      },
+      {
+        "sentence": "Active Directory Federation Services (AD FS) provides simplified, secured identity federation and web single sign-on (SSO) capabilities.",
+        "score": 0.6377
+      },
+      {
+        "sentence": "Users federated with Microsoft Entra ID or Microsoft 365 can authenticate using on-premises credentials to access all cloud resources.",
+        "score": 0.8225
+      },
+      {
+        "sentence": "As a result, your deployment must have a highly available AD FS infrastructure to ensure access to resources both on-premises and in the cloud.",
+        "score": 0.6333
+      },
+      {
+        "sentence": "Deploying AD FS in Azure can help achieve high availability without too much effort.",
+        "score": 0.5613
+      },
+      {
+        "sentence": "There are several advantages of deploying AD FS in Azure: - The power of Azure availability sets gives you a highly available infrastructure. - Deployments are easy to scale.",
+        "score": 0.5832
+      },
+      {
+        "sentence": "If you need more performance, you can easily migrate to more powerful machines using a simplified deployment process in Azure. - Azure geo redundancy ensures your infrastructure is highly available across the globe. - The Azure portal makes your infrastructure easier to manage with highly simplified management options.",
+        "score": 0.5834
+      },
+      {
+        "sentence": "Design principles The following diagram shows the recommended basic topology for deploying AD FS infrastructure in Azure.",
+        "score": 0.4332
+      },
+      {
+        "sentence": "This configuration ensures that during either a planned or unplanned maintenance event, at least one VM is available. - You should deploy web application proxy servers in a separate DMZ network.",
+        "score": 0.4848
+      },
+      {
+        "sentence": "You can divide one virtual network into two subnets and then deploy the web application proxy servers in an isolated subnet.",
+        "score": 0.4198
+      },
+      {
+        "sentence": "Deploy the network When creating a network, you can either create two subnets in the same virtual network or create two different virtual networks.",
+        "score": 0.3925
+      },
+      {
+        "sentence": "We recommend using the single-network approach, as creating two separate virtual networks also requires creating two separate virtual network gateways for communication purposes.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "Create a virtual network To create a virtual network: Sign in to the Azure portal with your Azure account.",
+        "score": 0.5913
+      },
+      {
+        "sentence": "In the portal, search for and select Virtual networks.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "On the Virtual networks page, select + Create.",
+        "score": 0.3786
+      },
+      {
+        "sentence": "In Create virtual network, go to the Basics tab and configure the following settings: Configure the following settings under Project details: For Subscription, select the name of your subscription.",
+        "score": 0.4079
+      },
+      {
+        "sentence": "For Resource group, either select the name of an existing resource group or select Create new to make a new one.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "Configure the following settings for Instance details: For Virtual network name, enter a name for your virtual network.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "For Region, select the region you want to create your virtual network in.",
+        "score": 0.3274
+      },
+      {
+        "sentence": "In the Security tab, enable any security service you want to use, then select Next.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "For this example, we're editing the default subnet that the service automatically creates.",
+        "score": 0.3704
+      },
+      {
+        "sentence": "For Network security group, select Create new.",
+        "score": 0.3817
+      },
+      {
+        "sentence": "You now have your first subnet.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "To create your second subnet, select + Add a subnet.",
+        "score": 0.352
+      },
+      {
+        "sentence": "On the Add a subnet page, enter DMZ for the second subnet name, then enter information about your subnet into the empty fields to define an IP address space.",
+        "score": 0.3083
+      },
+      {
+        "sentence": "For Network security group, select Create new.",
+        "score": 0.3817
+      },
+      {
+        "sentence": "Select Review + create, then select Create.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "You can associate NSGs with either subnets or individual VM instances within that subnet.",
+        "score": 0.3709
+      },
+      {
+        "sentence": "When an NSG is associated with a subnet, the ACL rules apply to all the VM instances in that subnet.",
+        "score": 0.3154
+      },
+      {
+        "sentence": "And, you can add more inbound and outbound rules according to the level of security you want.",
+        "score": 0.3222
+      },
+      {
+        "sentence": "On the left, select Inbound security rules, then select + Add.",
+        "score": 0.3095
+      },
+      {
+        "sentence": "In Add inbound security rule, configure the rule with the following information: For Source, enter 10.0.1.0/24.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "The service automatically fills the information fields for Destination port ranges and Protocol depending on which service you choose.",
+        "score": 0.353
+      },
+      {
+        "sentence": "In addition to the new rule you created, you must add the following extra rules in the priority order listed to help secure your internal and DMZ subnet.",
+        "score": 0.3395
+      },
+      {
+        "sentence": "NSG Type of rule Source Destination Service Action Priority Name Description NSG_INT Outbound Any Service Tag/Internet Custom (80/Any) Deny 100 DenyInternetOutbound No access to internet.",
+        "score": 0.3057
+      },
+      {
+        "sentence": "After you finish entering the values for each new rule, select Add and proceed to the next until two new security rules are added for each NSG.",
+        "score": 0.3532
+      },
+      {
+        "sentence": "After configuration, the NSG pages should look like the following screenshot: Note If the virtual network requires client user certificate authentication, such as clientTLS authentication using X.509 user certificates, you must enable TCP port 49443 for inbound access.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Create connection to on-premises You need a connection to on-premises to deploy the DC in Azure.",
+        "score": 0.509
+      },
+      {
+        "sentence": "You can connect your on-premises infrastructure to your Azure infrastructure using one of the following options: - Point-to-site - Virtual Network site-to-site - ExpressRoute We recommend you use ExpressRoute if your organization doesn't require point-to-site or Virtual Network site-to-site connections.",
+        "score": 0.531
+      },
+      {
+        "sentence": "ExpressRoute lets you create private connections between Azure datacenters and infrastructure that's on your premises or in a colocation environment.",
+        "score": 0.4822
+      },
+      {
+        "sentence": "ExpressRoute connections also don't connect to the public internet, which makes them more reliable, faster, and more secure.",
+        "score": 0.3889
+      },
+      {
+        "sentence": "To learn more about ExpressRoute and the various connectivity options using ExpressRoute, read ExpressRoute technical overview.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "Create availability sets For each role (DC/AD FS and WAP), create availability sets that contain at least two machines each.",
+        "score": 0.5518
+      },
+      {
+        "sentence": "This configuration helps achieve higher availability for each role.",
+        "score": 0.5857
+      },
+      {
+        "sentence": "While creating the availability sets, you must decide which of the following domains you want to use: In a fault domain, VMs share the same power source and physical network switch.",
+        "score": 0.4598
+      },
+      {
+        "sentence": "The default value is 2 and you can leave it as-is for this deployment.",
+        "score": 0.3548
+      },
+      {
+        "sentence": "In an update domain, machines restart together during an update.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "The default value is 5, and you can leave it as-is for this deployment.",
+        "score": 0.3532
+      },
+      {
+        "sentence": "To create availability sets: Search for and select Availability sets in the Azure portal, then select + Create.",
+        "score": 0.5574
+      },
+      {
+        "sentence": "In Create availability set, go to the Basics tab and enter the following information: Under Project details: For Subscription, select the name of your subscription.",
+        "score": 0.4936
+      },
+      {
+        "sentence": "For Resource group, either select an existing resource group or Create new to make a new one.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "Under Instance details: For Name, enter the name for your availability set.",
+        "score": 0.4641
+      },
+      {
+        "sentence": "For Fault domains, leave it on the default value of 2.",
+        "score": 0.3108
+      },
+      {
+        "sentence": "For Update domains, leave it at the default value of 5.",
+        "score": 0.343
+      },
+      {
+        "sentence": "For Use managed disks, select No (Classic) for this example.",
+        "score": 0.3143
+      },
+      {
+        "sentence": "Repeat the previous steps to create a second availability set with the name contososac2.",
+        "score": 0.5178
+      },
+      {
+        "sentence": "Deploy virtual machines The next step is to deploy VMs that host the different roles in your infrastructure.",
+        "score": 0.5887
+      },
+      {
+        "sentence": "We recommend a minimum of two machines in each availability set.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "For this example, we create four VMs for the basic deployment.",
+        "score": 0.4602
+      },
+      {
+        "sentence": "To create VMs: Search for and select Virtual machines in the Azure portal.",
+        "score": 0.4991
+      },
+      {
+        "sentence": "On the Virtual machines page, select + Create, then choose Azure virtual machine.",
+        "score": 0.4575
+      },
+      {
+        "sentence": "In Create a virtual machine, go to the Basics tab and enter the following information: Under Project details: For Subscription, select the name of your subscription.",
+        "score": 0.4784
+      },
+      {
+        "sentence": "For Resource group, either select an existing resource group or Create new to make a new one.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "Under Instance details: For Virtual machine name, enter a name for your VM.",
+        "score": 0.4072
+      },
+      {
+        "sentence": "For the first machine in this example, enter contosodc1.",
+        "score": 0.3664
+      },
+      {
+        "sentence": "For Availability options, select Availability set.",
+        "score": 0.377
+      },
+      {
+        "sentence": "For Availability set, select contosodcset For Security type, select Standard.",
+        "score": 0.3952
+      },
+      {
+        "sentence": "For Subscription, select the name of your subscription.",
+        "score": 0.482
+      },
+      {
+        "sentence": "Under Administrator account: For Authentication type, select SSH public key.",
+        "score": 0.4004
+      },
+      {
+        "sentence": "For Username, enter a user name to use for the account.",
+        "score": 0.4357
+      },
+      {
+        "sentence": "For Key pair name, enter a key pair name to use for the account.",
+        "score": 0.3815
+      },
+      {
+        "sentence": "In the Networking tab, enter the following information: For virtual network, select the name of the virtual network that contains the subnets you created in the previous section.",
+        "score": 0.3372
+      },
+      {
+        "sentence": "Repeat these steps using the information in this table to create the three remaining VMs: | Virtual machine name | Subnet | Availability options | Availability set | Storage account | |---|---|---|---|---| | contosodc2 | INT | Availability set | contosodcset | contososac2 | | contosowap1 | DMZ | Availability set | contosowapset | contososac1 | | contosowap2 | DMZ | Availability set | contosowapset | contososac2 | The settings don't specify NSG because Azure lets you use NSG at the subnet level.",
+        "score": 0.476
+      },
+      {
+        "sentence": "If you're managing the DNS, we recommend you use a static IP address.",
+        "score": 0.3077
+      },
+      {
+        "sentence": "You can use Azure DNS and refer to the new machines by their Azure FQDNs in the DNS records for your domain.",
+        "score": 0.3969
+      },
+      {
+        "sentence": "Your Virtual machines page should show all four VMs after the deployment completes.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "Configure the DC and AD FS servers To authenticate any incoming request, AD FS needs to contact the DC.",
+        "score": 0.4202
+      },
+      {
+        "sentence": "To save the costly trip from Azure to on-premises DC for authentication, we recommend you deploy a replica of the DC in Azure.",
+        "score": 0.6129
+      },
+      {
+        "sentence": "In order to attain high availability, it's better to create an availability set of at least two DCs. | Domain controller | Role | Storage account | |---|---|---| | contosodc1 | Replica | contososac1 | | contosodc2 | Replica | contososac2 | We recommend you do the following things: Promote the two servers as replica DCs with DNS Configure the AD FS servers by installing the AD FS role using the server manager.",
+        "score": 0.4674
+      },
+      {
+        "sentence": "Create and deploy the internal load balancer (ILB) To create and deploy an ILB: Search for and select Load Balancers in the Azure portal and choose + Create.",
+        "score": 0.5726
+      },
+      {
+        "sentence": "In Create load balancer, enter or select this information in the Basics tab: Under Project details: For Subscription, select the name of your subscription.",
+        "score": 0.513
+      },
+      {
+        "sentence": "For Resource group, either select an existing resource group or Create new to make a new one.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "Under Instance details: For Name, enter the name of your load balancer.",
+        "score": 0.4431
+      },
+      {
+        "sentence": "For Type, select Internal.",
+        "score": 0.3833
+      },
+      {
+        "sentence": "Leave SKU and Tier as their defaults and then select Next: Frontend IP Configuration Select + Add a frontend IP configuration, then enter or select this information in the Add frontend IP configuration page.",
+        "score": 0.4041
+      },
+      {
+        "sentence": "For Virtual network, select the virtual network where you want to deploy your AD FS.",
+        "score": 0.3662
+      },
+      {
+        "sentence": "For Subnet, select INT, which was the internal subnet you created in the previous section.",
+        "score": 0.3384
+      },
+      {
+        "sentence": "For Assignment, select Static.",
+        "score": 0.3227
+      },
+      {
+        "sentence": "Leave Availability zone as the default and then select Add.",
+        "score": 0.4256
+      },
+      {
+        "sentence": "Select Next: Backend pools, then select + Add a backend pool.",
+        "score": 0.4323
+      },
+      {
+        "sentence": "On the Add backend pool page, enter a name for the backend pool into the Name field.",
+        "score": 0.4117
+      },
+      {
+        "sentence": "In the IP configurations area, select + Add.",
+        "score": 0.3271
+      },
+      {
+        "sentence": "On the Add backend pool page, select a VM to align with the backend pool, select Add, then select Save.",
+        "score": 0.3497
+      },
+      {
+        "sentence": "On the Inbound rules tab, select Add a load balancing rule, then enter the following information in the Add load balancing rule page: For Name, enter a name for the rule.",
+        "score": 0.4122
+      },
+      {
+        "sentence": "For Frontend IP address, select the address you created earlier.",
+        "score": 0.3546
+      },
+      {
+        "sentence": "For Backend pool, select the backend pool you created earlier.",
+        "score": 0.418
+      },
+      {
+        "sentence": "For Backend port, select Create new, then enter the following values to create a health probe: For Name, enter the name of the health probe.",
+        "score": 0.3161
+      },
+      {
+        "sentence": "Select Review + create, then select Create.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "After you select Create and the ILB deploys, you can see it in the list of load balancers, as shown in the following screenshot.",
+        "score": 0.3931
+      },
+      {
+        "sentence": "The A record should be for the federation service with the IP address pointing to the IP address of the ILB.",
+        "score": 0.4279
+      },
+      {
+        "sentence": "For example, if the ILB IP address is 10.3.0.8 and the federation service installed is fs.contoso.com, create an A record for fs.contoso.com pointing to 10.3.0.8.",
+        "score": 0.4667
+      },
+      {
+        "sentence": "Warning If you're using the Windows Internal Database (WID) for your AD FS database, set this value to temporarily point to your primary AD FS server.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "If you don't make this temporary setting change, the web application proxy fails enrollment.",
+        "score": 0.3166
+      },
+      {
+        "sentence": "After you successfully enroll all web application proxy servers, change this DNS entry to point to the load balancer.",
+        "score": 0.3392
+      },
+      {
+        "sentence": "Note If your deployment is also using IPv6, create a corresponding AAAA record.",
+        "score": 0.3578
+      },
+      {
+        "sentence": "Configure the web application proxy servers to reach AD FS servers To ensure that web application proxy servers are able to reach the AD FS servers behind the ILB, create a record in the %systemroot%\\system32\\drivers\\etc\\hosts file for the ILB.",
+        "score": 0.3999
+      },
+      {
+        "sentence": "The distinguished name (DN) should be the federation service name, such as fs.contoso.com.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "Warning If you're using the Windows Internal Database (WID) for your AD FS database, set this value to temporarily point to your primary AD FS server.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "If you don't, the web application proxy fails enrollment.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "After you successfully enroll all web application proxy servers, change this DNS entry to point to the load balancer.",
+        "score": 0.3392
+      },
+      {
+        "sentence": "Install the web application proxy role After you ensure that web application proxy servers are able to reach the AD FS servers behind ILB, you can next install the web application proxy servers.",
+        "score": 0.454
+      },
+      {
+        "sentence": "Web application proxy servers don't need to be joined to the domain.",
+        "score": 0.3465
+      },
+      {
+        "sentence": "Install the web application proxy roles on the two web application proxy servers by selecting the Remote Access role.",
+        "score": 0.4426
+      },
+      {
+        "sentence": "The server manager guides you to complete the WAP installation.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "For more information on how to deploy WAP, see Install and Configure the web application proxy Server.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "Create and deploy the internet-facing (public) load balancer To create and deploy the internet-facing load balancer: In the Azure portal, select Load balancers and then choose Create.",
+        "score": 0.5313
+      },
+      {
+        "sentence": "In Create load balancer, go to the Basics tab and configure the following settings: Under Project details: For Subscription, select the name of your subscription.",
+        "score": 0.482
+      },
+      {
+        "sentence": "For Resource group, either select an existing resource group or Create new to make a new one.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "Under Instance details: For Name, enter the name of your load balancer.",
+        "score": 0.4431
+      },
+      {
+        "sentence": "For Type, select Public.",
+        "score": 0.3251
+      },
+      {
+        "sentence": "Leave SKU and Tier as their defaults and then select Next : Frontend IP Configuration Select + Add a frontend IP configuration, then enter or select this information in the Add frontend IP configuration page.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "For Public IP Address, either select the public IP address you want to use from the drop-down list or select Create to make a new one, then select Add.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "Select Next: Backend pools, then select + Add a backend pool.",
+        "score": 0.4323
+      },
+      {
+        "sentence": "On the Add backend pool page, enter a name for the backend pool into the Name field.",
+        "score": 0.4117
+      },
+      {
+        "sentence": "In the IP configurations area, select + Add.",
+        "score": 0.3271
+      },
+      {
+        "sentence": "On the Add backend pool page, select a VM to align with the backend pool, select Add, then select Save.",
+        "score": 0.3497
+      },
+      {
+        "sentence": "Select Next: Inbound Rules, then select Add a load balancing rule.",
+        "score": 0.3859
+      },
+      {
+        "sentence": "In the Add load balancing rule page, configure the following settings: For Name, enter a name for the rule.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "For Frontend IP address, select the address you created earlier.",
+        "score": 0.3546
+      },
+      {
+        "sentence": "For Backend pool, select the backend pool you created earlier.",
+        "score": 0.418
+      },
+      {
+        "sentence": "For Health probe, enter the following values: For Name, enter the name of the health probe.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "Select Review + create, then select Create.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "After you select Create and the public ILB deploys, it should contain a list of load balancers.",
+        "score": 0.3874
+      },
+      {
+        "sentence": "Test the AD FS sign-in The easiest way to test AD FS is by using the IdpInitiatedSignOn.aspx page.",
+        "score": 0.5851
+      },
+      {
+        "sentence": "To do that, you must enable the IdpInitiatedSignOn on the AD FS properties.",
+        "score": 0.3103
+      },
+      {
+        "sentence": "Set-AdfsProperties -EnableIdPInitiatedSignOnPage $true From any external machine, access https:\\//adfs-server.contoso.com/adfs/ls/IdpInitiatedSignon.aspx .You should see the following AD FS page: Try to sign in.",
+        "score": 0.5278
+      },
+      {
+        "sentence": "If you sign in successfully, you should see a message appear, as shown in the following screenshot.",
+        "score": 0.4534
+      },
+      {
+        "sentence": "Template for deploying AD FS in Azure The template deploys a six-machine setup, with two machines each for Domain Controllers, AD FS, and WAP.",
+        "score": 0.535
+      },
+      {
+        "sentence": "AD FS in Azure Deployment Template You can use an existing virtual network or create a new virtual network while deploying this template.",
+        "score": 0.4274
+      },
+      {
+        "sentence": "The following table lists the parameters you can use to customize the deployment. | Parameter | Description | |---|---| | Location | The region you want to deploy the resources into. | | StorageAccountType | The type of the Storage Account you want to create. | | VirtualNetworkUsage | Indicates whether to create a new virtual network or use an existing one. | | VirtualNetworkName | The name of the virtual network.",
+        "score": 0.4601
+      },
+      {
+        "sentence": "Mandatory on both existing or new virtual network usage. | | VirtualNetworkResourceGroupName | Specifies the name of the resource group where the existing virtual network is located.",
+        "score": 0.4173
+      },
+      {
+        "sentence": "When you use an existing virtual network, this option is a mandatory parameter so the deployment can find the ID of the existing virtual network. | | VirtualNetworkAddressRange | The address range of the new virtual network.",
+        "score": 0.3577
+      },
+      {
+        "sentence": "Mandatory if creating a new virtual network. | | InternalSubnetName | The name of the internal subnet.",
+        "score": 0.4084
+      },
+      {
+        "sentence": "Mandatory for both new and existing virtual network usage options. | | InternalSubnetAddressRange | The address range of the internal subnet, which contains the Domain Controllers and AD FS servers.",
+        "score": 0.4107
+      },
+      {
+        "sentence": "Mandatory if creating a new virtual network. | | DMZSubnetAddressRange | The address range of the DMZ subnet, which contains the Windows application proxy servers.",
+        "score": 0.3851
+      },
+      {
+        "sentence": "Mandatory if creating a new virtual network. | | DMZSubnetName | The name of the internal subnet, which is mandatory on both new and existing virtual network usage options. | | ADDC01NICIPAddress | The internal IP address of the first Domain Controller.",
+        "score": 0.4041
+      },
+      {
+        "sentence": "This IP address is statically assigned to the DC and must be a valid IP address within the Internal subnet. | | ADDC02NICIPAddress | The internal IP address of the second Domain Controller.",
+        "score": 0.3681
+      },
+      {
+        "sentence": "This IP address is statically assigned to the DC and must be a valid IP address within the Internal subnet. | | ADFS01NICIPAddress | The internal IP address of the first AD FS server.",
+        "score": 0.3842
+      },
+      {
+        "sentence": "This IP address is statically assigned to the AD FS server and must be a valid IP address within the Internal subnet. | | ADFS02NICIPAddress | The internal IP address of the second AD FS server.",
+        "score": 0.4352
+      },
+      {
+        "sentence": "This IP address is statically assigned to the AD FS server and must be a valid IP address within the Internal subnet. | | WAP01NICIPAddress | The internal IP address of the first WAP server.",
+        "score": 0.3804
+      },
+      {
+        "sentence": "This IP address is statically assigned to the WAP server and must be a valid IP address within the DMZ subnet. | | WAP02NICIPAddress | The internal IP address of the second WAP server.",
+        "score": 0.3867
+      },
+      {
+        "sentence": "This IP address is statically assigned to the WAP server and must be a valid IP address within the DMZ subnet. | | ADFSLoadBalancerPrivateIPAddress | The internal IP address of the AD FS load balancer.",
+        "score": 0.421
+      }
+    ]
+  }
+}

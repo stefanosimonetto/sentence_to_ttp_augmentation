@@ -1,0 +1,246 @@
+{
+  "original_txt": "MSSQL, meet Maggie\nContinuing our monitoring of signed binaries, DCSO CyTec recently found a novel backdoor malware targeting Microsoft SQL servers.\nThe malware comes in form of an “Extended Stored Procedure” DLL, a special type of extension used by Microsoft SQL servers. Once loaded into a server by an attacker, it is controlled solely using SQL queries and offers a variety of functionality to run commands, interact with files and function as a network bridge head into the environment of the infected server.\nIn addition, the backdoor has capabilities to bruteforce logins to other MSSQL servers while adding a special hardcoded backdoor user in the case of successfully bruteforcing admin logins. Based on this finding, we identified over 250 servers affected worldwide, with a clear focus on the Asia-Pacific region.\nBased on artifacts found in the malware, DCSO CyTec calls this novel threat “Maggie”.\nIn our follow-up post “Tracking down Maggie” we also provide practical tips on how to detect Maggie in your environment.\nBlog authored by Johann Aydinbas and Axel Wauer\nDiscovery\nWhile looking for new threats, a file caught our attention. Detected as APT_ShadowForce_Malware_ON_Nov17_1\nby THOR and with a matching AV detection by AhnLab-V3 as Trojan/Win.ShadowForce.R472810\nwe decided to take a closer look.\nThe DLL file is signed by DEEPSoft Co., Ltd.\non 2022–04–12. According to its export directory, the file calls itself sqlmaggieAntiVirus_64.dll\nand only offers a single export called maggie\n.\nExtended Stored Procedures\nCloser inspection revealed this DLL to be an Extended Stored Procedure\n.\nExtended Stored Procedures are a way to offer extended functionality to SQL queries for use in an MSSQL server, similar to the infamous xp_cmdshell stored procedure, which allows SQL queries to run shell commands.\nESPs are common DLL files using a simplistic API. When executed, ESPs are passed a handle to the client connection which allows them to fetch user-supplied arguments (via srv_paramdata) and return unstructured data to the caller (via srv_sendmsg).\nMaggie utilizes this message-passing interface to implement a fully functional backdoor controlled only using SQL queries.\nIn order to install Maggie, an attacker has to be able to place an ESP file in a directory accessible by the MSSQL server, and has to have valid credentials to load the Maggie ESP into the server. It is unclear how an actual attack with Maggie is performed in the real-world.\nAfter manually loading Maggie with\nsp_addextendedproc maggie, '<path to DLL>';\nan authenticated user could start to issue commands to the backdoor via SQL queries, e.g. to call the whoami\nshell command:\n$ exec maggie 'Exec whoami';\nMSSQL Procedure 04/08/2022\nExecute Command: Exec whoami\nExecuting whoami Successfully\nnt service\\mssqlserver\nCommands\nOnce installed, Maggie offers a variety of commands to query for system information, interact with files and folders, execute programs as well as various network-related functionality like enabling TermService, running a Socks5 proxy server or setting up port forwarding to make Maggie act as a bridge head into the server’s network environment.\nThe full list of commands we have identified:\nCommands can take multiple arguments, separated by spaces. For some commands, Maggie even includes usage instructions:\nMaggie as a network bridge head\nMaggie contains functionality for simple TCP redirection, allowing it to function as a network bridge head from the Internet to any IP address reachable by the infected MSSQL server.\nWhen enabled, Maggie redirects any incoming connection (on any port the MSSQL server is listening on) to a previously set IP and port, if the source IP address matches a user-specified IP mask. The implementation enables port reuse, making the redirection transparent to authorized users, while any other connecting IP is able to use the server without any interference or knowledge of Maggie.\nFor this to work, StartHook\ninstructs Maggie to install network API hooks for the following functions:\n- accept\n- AcceptEx\n- WSAAccept\n- setsockopt\n- CreateIoCompletionPort\nallowing Maggie to intercept connections before reaching the underlying services.\nThe redirection setup can be controlled using the SetClientData\ncommand with\nSetClientData <allowed IP mask> <destination IP> <destination port>\nin order to enable redirection for the given IP mask (can end with ‘*’ wildcard) to the specified IP and port.\nOnce finished, an attacker can simply disable the IP redirection feature using StopHook\nagain.\nIn addition, Maggie contains SOCKS5 proxy functionality for more complex network operations.\nThe unknown Exploit commands\nMaggie’s command list includes four commands that suggest exploit usage:\nExploit AddUser\nExploit Run\nExploit Clone\nExploit TS\nIt appears that the actual implementation of all four exploit commands depends on a DLL not included with Maggie directly. Instead, the caller provides a DLL name as well as an additional parameter when calling each function. We therefore assume the caller manually uploads the exploit DLL prior to issuing any exploit commands.\nMaggie would then load the user-specified DLL, look for an export named either StartPrinter\nor ProcessCommand\n(depending on the exact command used) and pass the user-supplied argument.\nWe were not able to dig up any potential candidate DLLs Maggie might be referencing during our research so it’s unclear what specific exploit may be utilized here.\nSQL bruteforcing and the curious Maggie backdoor user\nMaggie’s command set also includes two commands that allow it to bruteforce logins to other MSSQL servers:\nSqlScan\nWinSockScan\nTo start a bruteforce scan, the controller would have to specify a host, user and password list file previously uploaded to the infected server, as well as an optional thread count. Maggie then creates every combination of (host,user,pass) and attempts to log in via SQL using ODBC, or a reimplementation only using basic socket functions in the case of WinSockScan\n.\nSuccessful logins are written to a hardcoded log file, which can be in one of two locations:\nC:\\ProgramData\\success.dat\n<MAGGIE_LOCATION>\\success.dat\nMaggie then tries to determine if the bruteforced login has admin rights. In case it successfully bruteforced an admin user, Maggie proceeds with adding a hardcoded backdoor user.\nBased on this finding, DCSO CyTec conducted a scan on publicly reachable MSSQL servers in order to determine how prevalent the identified backdoor user is.\nOut of approximately 600,000 scanned servers worldwide, we identified 285 servers infected with Maggie’s backdoor user, spread over 42 countries.\nThe distribution shows a clear focus on the Asia-Pacific region, with South Korea, India and Vietnam as top 3 followed by China and Taiwan in the fourth and fifth place. Other countries appear to be incidental.\nA logical next step would be to see if and how the affected servers are being utilized, which however goes beyond the scope of our analysis.\nIoCs\nAs usual, you can find below IoCs in the form of a MISP event on our GitHub.\nMaggie ESP DLLs\nf29a311d62c54bbb01f675db9864f4ab0b3483e6cfdd15a745d4943029dcdf14\na375ae44c8ecb158895356d1519fe374dc99c4c6b13f826529c71fb1d47095c3\neb7b33b436d034b2992c4f40082ba48c744d546daa3b49be8564f2c509bd80e9\n854bb57bbd22b64679b3574724fafd7f9de23f5f71365b1dd8757286cec87430RAR SFX with Maggie\n4311c24670172957b4b0fb7ca9898451878faeb5dcec75f7920f1f7ad339d958\nd0bc30c940b525e7307eca0df85f1d97060ccd4df5761c952811673bc21bc794ITW URLs\nhttp://58.180.56.28/sql64.dll\nhttp://106.251.252.83/sql64.dll\nhttp://183.111.148.147/sql64.dll\nhttp://xw.xxuz.com/VV61599.exe\nhttp://58.180.56.28/vv61599.exeHardcoded User-Agent\nMozilla/4.0 (compatible)File paths\nC:\\ProgramData\\Success.dat\nSuccess.dat\nFailure.dat\nAccessControl.Dat\nMITRE ATT&CK\nT1110 Brute Force\nT1090 Connection Proxy",
+  "sanitized_txt": "MSSQL, meet Maggie Continuing our monitoring of signed binaries, DCSO CyTec recently found a novel backdoor malware targeting Microsoft SQL servers.\nThe malware comes in form of an “Extended Stored Procedure” DLL, a special type of extension used by Microsoft SQL servers. Once loaded into a server by an attacker, it is controlled solely using SQL queries and offers a variety of functionality to run commands, interact with files and function as a network bridge head into the environment of the infected server.\nIn addition, the backdoor has capabilities to bruteforce logins to other MSSQL servers while adding a special hardcoded backdoor user in the case of successfully bruteforcing admin logins. Based on this finding, we identified over 250 servers affected worldwide, with a clear focus on the Asia-Pacific region.\nBased on artifacts found in the malware, DCSO CyTec calls this novel threat “Maggie”.\nIn our follow-up post “Tracking down Maggie” we also provide practical tips on how to detect Maggie in your environment.\nBlog authored by Johann Aydinbas and Axel Wauer Discovery While looking for new threats, a file caught our attention. Detected as APT_ShadowForce_Malware_ON_Nov17_1 by THOR and with a matching AV detection by AhnLab-V3 as Trojan/Win.ShadowForce.R472810 we decided to take a closer look.\nThe DLL file is signed by DEEPSoft Co., Ltd.\non 2022–04–12. According to its export directory, the file calls itself sqlmaggieAntiVirus_64.dll and only offers a single export called maggie .\nExtended Stored Procedures Closer inspection revealed this DLL to be an Extended Stored Procedure .\nExtended Stored Procedures are a way to offer extended functionality to SQL queries for use in an MSSQL server, similar to the infamous xp_cmdshell stored procedure, which allows SQL queries to run shell commands.\nESPs are common DLL files using a simplistic API. When executed, ESPs are passed a handle to the client connection which allows them to fetch user-supplied arguments (via srv_paramdata) and return unstructured data to the caller (via srv_sendmsg).\nMaggie utilizes this message-passing interface to implement a fully functional backdoor controlled only using SQL queries.\nIn order to install Maggie, an attacker has to be able to place an ESP file in a directory accessible by the MSSQL server, and has to have valid credentials to load the Maggie ESP into the server. It is unclear how an actual attack with Maggie is performed in the real-world.\nAfter manually loading Maggie with sp_addextendedproc maggie, '<path to DLL>';\nan authenticated user could start to issue commands to the backdoor via SQL queries, e.g. to call the whoami shell command:\n$ exec maggie 'Exec whoami';\nMSSQL Procedure 04/08/2022 Execute Command: Exec whoami Executing whoami Successfully nt service\\mssqlserver Commands Once installed, Maggie offers a variety of commands to query for system information, interact with files and folders, execute programs as well as various network-related functionality like enabling TermService, running a Socks5 proxy server or setting up port forwarding to make Maggie act as a bridge head into the server’s network environment.\nThe full list of commands we have identified:\nCommands can take multiple arguments, separated by spaces. For some commands, Maggie even includes usage instructions:\nMaggie as a network bridge head Maggie contains functionality for simple TCP redirection, allowing it to function as a network bridge head from the Internet to any IP address reachable by the infected MSSQL server.\nWhen enabled, Maggie redirects any incoming connection (on any port the MSSQL server is listening on) to a previously set IP and port, if the source IP address matches a user-specified IP mask. The implementation enables port reuse, making the redirection transparent to authorized users, while any other connecting IP is able to use the server without any interference or knowledge of Maggie.\nFor this to work, StartHook instructs Maggie to install network API hooks for the following functions:\n- accept - AcceptEx - WSAAccept - setsockopt - CreateIoCompletionPort allowing Maggie to intercept connections before reaching the underlying services.\nThe redirection setup can be controlled using the SetClientData command with SetClientData <allowed IP mask> <destination IP> <destination port> in order to enable redirection for the given IP mask (can end with ‘*’ wildcard) to the specified IP and port.\nOnce finished, an attacker can simply disable the IP redirection feature using StopHook again.\nIn addition, Maggie contains SOCKS5 proxy functionality for more complex network operations.\nThe unknown Exploit commands Maggie’s command list includes four commands that suggest exploit usage:\nExploit AddUser Exploit Run Exploit Clone Exploit TS It appears that the actual implementation of all four exploit commands depends on a DLL not included with Maggie directly. Instead, the caller provides a DLL name as well as an additional parameter when calling each function. We therefore assume the caller manually uploads the exploit DLL prior to issuing any exploit commands.\nMaggie would then load the user-specified DLL, look for an export named either StartPrinter or ProcessCommand (depending on the exact command used) and pass the user-supplied argument.\nWe were not able to dig up any potential candidate DLLs Maggie might be referencing during our research so it’s unclear what specific exploit may be utilized here.\nSQL bruteforcing and the curious Maggie backdoor user Maggie’s command set also includes two commands that allow it to bruteforce logins to other MSSQL servers:\nSqlScan WinSockScan To start a bruteforce scan, the controller would have to specify a host, user and password list file previously uploaded to the infected server, as well as an optional thread count. Maggie then creates every combination of (host,user,pass) and attempts to log in via SQL using ODBC, or a reimplementation only using basic socket functions in the case of WinSockScan .\nSuccessful logins are written to a hardcoded log file, which can be in one of two locations:\nC:\\ProgramData\\success.dat <MAGGIE_LOCATION>\\success.dat Maggie then tries to determine if the bruteforced login has admin rights. In case it successfully bruteforced an admin user, Maggie proceeds with adding a hardcoded backdoor user.\nBased on this finding, DCSO CyTec conducted a scan on publicly reachable MSSQL servers in order to determine how prevalent the identified backdoor user is.\nOut of approximately 600,000 scanned servers worldwide, we identified 285 servers infected with Maggie’s backdoor user, spread over 42 countries.\nThe distribution shows a clear focus on the Asia-Pacific region, with South Korea, India and Vietnam as top 3 followed by China and Taiwan in the fourth and fifth place. Other countries appear to be incidental.\nA logical next step would be to see if and how the affected servers are being utilized, which however goes beyond the scope of our analysis.\nIoCs As usual, you can find below IoCs in the form of a MISP event on our GitHub.",
+  "ID_list": [
+    "T1090",
+    "T1110"
+  ],
+  "Name_list": [
+    "Proxy",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1110": [
+      {
+        "sentence": "MSSQL, meet Maggie Continuing our monitoring of signed binaries, DCSO CyTec recently found a novel backdoor malware targeting Microsoft SQL servers.",
+        "score": 0.3864
+      },
+      {
+        "sentence": "The malware comes in form of an “Extended Stored Procedure” DLL, a special type of extension used by Microsoft SQL servers.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "In addition, the backdoor has capabilities to bruteforce logins to other MSSQL servers while adding a special hardcoded backdoor user in the case of successfully bruteforcing admin logins.",
+        "score": 0.9088
+      },
+      {
+        "sentence": "Based on this finding, we identified over 250 servers affected worldwide, with a clear focus on the Asia-Pacific region.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "Blog authored by Johann Aydinbas and Axel Wauer Discovery While looking for new threats, a file caught our attention.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "Extended Stored Procedures Closer inspection revealed this DLL to be an Extended Stored Procedure .",
+        "score": 0.3084
+      },
+      {
+        "sentence": "Extended Stored Procedures are a way to offer extended functionality to SQL queries for use in an MSSQL server, similar to the infamous xp_cmdshell stored procedure, which allows SQL queries to run shell commands.",
+        "score": 0.3257
+      },
+      {
+        "sentence": "In order to install Maggie, an attacker has to be able to place an ESP file in a directory accessible by the MSSQL server, and has to have valid credentials to load the Maggie ESP into the server.",
+        "score": 0.3388
+      },
+      {
+        "sentence": "It is unclear how an actual attack with Maggie is performed in the real-world.",
+        "score": 0.3493
+      },
+      {
+        "sentence": "When enabled, Maggie redirects any incoming connection (on any port the MSSQL server is listening on) to a previously set IP and port, if the source IP address matches a user-specified IP mask.",
+        "score": 0.4084
+      },
+      {
+        "sentence": "The implementation enables port reuse, making the redirection transparent to authorized users, while any other connecting IP is able to use the server without any interference or knowledge of Maggie.",
+        "score": 0.3775
+      },
+      {
+        "sentence": "In addition, Maggie contains SOCKS5 proxy functionality for more complex network operations.",
+        "score": 0.3384
+      },
+      {
+        "sentence": "The unknown Exploit commands Maggie’s command list includes four commands that suggest exploit usage: Exploit AddUser Exploit Run Exploit Clone Exploit TS It appears that the actual implementation of all four exploit commands depends on a DLL not included with Maggie directly.",
+        "score": 0.4393
+      },
+      {
+        "sentence": "We therefore assume the caller manually uploads the exploit DLL prior to issuing any exploit commands.",
+        "score": 0.3217
+      },
+      {
+        "sentence": "Maggie would then load the user-specified DLL, look for an export named either StartPrinter or ProcessCommand (depending on the exact command used) and pass the user-supplied argument.",
+        "score": 0.3131
+      },
+      {
+        "sentence": "We were not able to dig up any potential candidate DLLs Maggie might be referencing during our research so it’s unclear what specific exploit may be utilized here.",
+        "score": 0.5051
+      },
+      {
+        "sentence": "SQL bruteforcing and the curious Maggie backdoor user Maggie’s command set also includes two commands that allow it to bruteforce logins to other MSSQL servers: SqlScan WinSockScan To start a bruteforce scan, the controller would have to specify a host, user and password list file previously uploaded to the infected server, as well as an optional thread count.",
+        "score": 0.8664
+      },
+      {
+        "sentence": "Maggie then creates every combination of (host,user,pass) and attempts to log in via SQL using ODBC, or a reimplementation only using basic socket functions in the case of WinSockScan .",
+        "score": 0.6529
+      },
+      {
+        "sentence": "Successful logins are written to a hardcoded log file, which can be in one of two locations: C:\\ProgramData\\success.dat <MAGGIE_LOCATION>\\success.dat Maggie then tries to determine if the bruteforced login has admin rights.",
+        "score": 0.8035
+      },
+      {
+        "sentence": "In case it successfully bruteforced an admin user, Maggie proceeds with adding a hardcoded backdoor user.",
+        "score": 0.7706
+      },
+      {
+        "sentence": "Based on this finding, DCSO CyTec conducted a scan on publicly reachable MSSQL servers in order to determine how prevalent the identified backdoor user is.",
+        "score": 0.591
+      },
+      {
+        "sentence": "Out of approximately 600,000 scanned servers worldwide, we identified 285 servers infected with Maggie’s backdoor user, spread over 42 countries.",
+        "score": 0.4058
+      },
+      {
+        "sentence": "A logical next step would be to see if and how the affected servers are being utilized, which however goes beyond the scope of our analysis.",
+        "score": 0.4486
+      }
+    ],
+    "T1090": [
+      {
+        "sentence": "The malware comes in form of an “Extended Stored Procedure” DLL, a special type of extension used by Microsoft SQL servers.",
+        "score": 0.3251
+      },
+      {
+        "sentence": "Once loaded into a server by an attacker, it is controlled solely using SQL queries and offers a variety of functionality to run commands, interact with files and function as a network bridge head into the environment of the infected server.",
+        "score": 0.408
+      },
+      {
+        "sentence": "In addition, the backdoor has capabilities to bruteforce logins to other MSSQL servers while adding a special hardcoded backdoor user in the case of successfully bruteforcing admin logins.",
+        "score": 0.4334
+      },
+      {
+        "sentence": "Based on this finding, we identified over 250 servers affected worldwide, with a clear focus on the Asia-Pacific region.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "Blog authored by Johann Aydinbas and Axel Wauer Discovery While looking for new threats, a file caught our attention.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "Extended Stored Procedures Closer inspection revealed this DLL to be an Extended Stored Procedure .",
+        "score": 0.3017
+      },
+      {
+        "sentence": "Extended Stored Procedures are a way to offer extended functionality to SQL queries for use in an MSSQL server, similar to the infamous xp_cmdshell stored procedure, which allows SQL queries to run shell commands.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "ESPs are common DLL files using a simplistic API.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "When executed, ESPs are passed a handle to the client connection which allows them to fetch user-supplied arguments (via srv_paramdata) and return unstructured data to the caller (via srv_sendmsg).",
+        "score": 0.3481
+      },
+      {
+        "sentence": "Maggie utilizes this message-passing interface to implement a fully functional backdoor controlled only using SQL queries.",
+        "score": 0.4098
+      },
+      {
+        "sentence": "In order to install Maggie, an attacker has to be able to place an ESP file in a directory accessible by the MSSQL server, and has to have valid credentials to load the Maggie ESP into the server.",
+        "score": 0.3045
+      },
+      {
+        "sentence": "It is unclear how an actual attack with Maggie is performed in the real-world.",
+        "score": 0.3078
+      },
+      {
+        "sentence": "The full list of commands we have identified: Commands can take multiple arguments, separated by spaces.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "For some commands, Maggie even includes usage instructions: Maggie as a network bridge head Maggie contains functionality for simple TCP redirection, allowing it to function as a network bridge head from the Internet to any IP address reachable by the infected MSSQL server.",
+        "score": 0.747
+      },
+      {
+        "sentence": "When enabled, Maggie redirects any incoming connection (on any port the MSSQL server is listening on) to a previously set IP and port, if the source IP address matches a user-specified IP mask.",
+        "score": 0.6654
+      },
+      {
+        "sentence": "The implementation enables port reuse, making the redirection transparent to authorized users, while any other connecting IP is able to use the server without any interference or knowledge of Maggie.",
+        "score": 0.8017
+      },
+      {
+        "sentence": "For this to work, StartHook instructs Maggie to install network API hooks for the following functions: - accept - AcceptEx - WSAAccept - setsockopt - CreateIoCompletionPort allowing Maggie to intercept connections before reaching the underlying services.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "The redirection setup can be controlled using the SetClientData command with SetClientData <allowed IP mask> <destination IP> <destination port> in order to enable redirection for the given IP mask (can end with ‘*’ wildcard) to the specified IP and port.",
+        "score": 0.7135
+      },
+      {
+        "sentence": "Once finished, an attacker can simply disable the IP redirection feature using StopHook again.",
+        "score": 0.5644
+      },
+      {
+        "sentence": "In addition, Maggie contains SOCKS5 proxy functionality for more complex network operations.",
+        "score": 0.8392
+      },
+      {
+        "sentence": "The unknown Exploit commands Maggie’s command list includes four commands that suggest exploit usage: Exploit AddUser Exploit Run Exploit Clone Exploit TS It appears that the actual implementation of all four exploit commands depends on a DLL not included with Maggie directly.",
+        "score": 0.328
+      },
+      {
+        "sentence": "Instead, the caller provides a DLL name as well as an additional parameter when calling each function.",
+        "score": 0.3089
+      },
+      {
+        "sentence": "Maggie would then load the user-specified DLL, look for an export named either StartPrinter or ProcessCommand (depending on the exact command used) and pass the user-supplied argument.",
+        "score": 0.34
+      },
+      {
+        "sentence": "We were not able to dig up any potential candidate DLLs Maggie might be referencing during our research so it’s unclear what specific exploit may be utilized here.",
+        "score": 0.3461
+      },
+      {
+        "sentence": "SQL bruteforcing and the curious Maggie backdoor user Maggie’s command set also includes two commands that allow it to bruteforce logins to other MSSQL servers: SqlScan WinSockScan To start a bruteforce scan, the controller would have to specify a host, user and password list file previously uploaded to the infected server, as well as an optional thread count.",
+        "score": 0.4108
+      },
+      {
+        "sentence": "Maggie then creates every combination of (host,user,pass) and attempts to log in via SQL using ODBC, or a reimplementation only using basic socket functions in the case of WinSockScan .",
+        "score": 0.4264
+      },
+      {
+        "sentence": "Successful logins are written to a hardcoded log file, which can be in one of two locations: C:\\ProgramData\\success.dat <MAGGIE_LOCATION>\\success.dat Maggie then tries to determine if the bruteforced login has admin rights.",
+        "score": 0.3318
+      },
+      {
+        "sentence": "In case it successfully bruteforced an admin user, Maggie proceeds with adding a hardcoded backdoor user.",
+        "score": 0.4317
+      },
+      {
+        "sentence": "Based on this finding, DCSO CyTec conducted a scan on publicly reachable MSSQL servers in order to determine how prevalent the identified backdoor user is.",
+        "score": 0.5601
+      },
+      {
+        "sentence": "Out of approximately 600,000 scanned servers worldwide, we identified 285 servers infected with Maggie’s backdoor user, spread over 42 countries.",
+        "score": 0.3876
+      },
+      {
+        "sentence": "The distribution shows a clear focus on the Asia-Pacific region, with South Korea, India and Vietnam as top 3 followed by China and Taiwan in the fourth and fifth place.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "Other countries appear to be incidental.",
+        "score": 0.3208
+      },
+      {
+        "sentence": "A logical next step would be to see if and how the affected servers are being utilized, which however goes beyond the scope of our analysis.",
+        "score": 0.5825
+      },
+      {
+        "sentence": "IoCs As usual, you can find below IoCs in the form of a MISP event on our GitHub.",
+        "score": 0.364
+      }
+    ]
+  }
+}

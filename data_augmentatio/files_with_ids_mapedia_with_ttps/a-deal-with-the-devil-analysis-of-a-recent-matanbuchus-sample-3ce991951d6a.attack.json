@@ -1,0 +1,1124 @@
+{
+  "original_txt": "A deal with the devil: Analysis of a recent Matanbuchus sample\nMatanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums. Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads. Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.\nSince the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage. In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.\nThe sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.\nThis blog was authored by Johann Aydinbas and Colin Murphy\nAttack Chain\nWe start our analysis with the MSI installer package ea8b828430149f67f45f9a71ee486bc674e21da7.\nIt disguises itself as a Visual Studio installer:\nThe .msi\nfile has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date:\nOn execution, it creates a directory called VisualStudioIDE\nin %LOCALAPPDATA%\nand drops 3 files:\nWhile locale.nls\nis the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign. DWLog.dll\nis a DLL signed by “Adobe Inc.”, MSTTSLoc.dll\nappears to be a Microsoft Text to Speech component, but neither appears to be an active part of the attack chain.\nAfter dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe\n:\nWhile the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime. If omitted, the loader does not continue. This is likely to avoid execution in sandboxes which simply execute available exports one by one.\nObfuscation\nBoth Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.\nAll used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.\nAll API calls are obfuscated as well. Matanbuchus uses an FNV-1a hash to look up the desired API’s address before each call.\nFirst Stage\nThe first stage of Matanbuchus, locale.nls\n, acts as a loader for the core component. The loader component has mainly two functions:\n- Keep itself updated\n- Fetch the 2nd stage and execute it from memory\nAfter execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.\nNext it tries to retrieve the core component from a different URL. The response is base64-decoded and decrypted using a 24 byte rolling xor.\nIf retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer\n.\nSecond Stage\nThe second stage is the core component of Matanbuchus. It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.\nUnlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send\nand recv\n.\nServer and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key. The JSON keys are also hardcoded per sample.\nFetching tasks\nA typical sequence of fetching a task starts with Matanbuchus sending a system information packet to its C2:\nWe’ve identified the following fields:\n| Key | Meaning |\n|-------|---------------------|\n| 3CEk | CPU info from cpuid |\n| 3fe11 | Amount of RAM |\n| 3m7x | \"User\" or \"Admin\" |\n| DS2x | Bitness |\n| Eo6 | Botnet/campaign |\n| Fto | Number of CPUs |\n| Q6X6 | Domain name |\n| Vz | Module path |\n| cBF | MAC address |\n| f1da | Logon server |\n| tW | Computer name |\n| wP6 | Bot version |\n| zkC7 | NetBIOS name |\n| Los | Unknown, hardcoded |\nThe server then responds with a task object:\nThe fields are:\n| Key | Meaning |\n|-----|-----------------|\n| Gp | Command string |\n| Pk | Argument |\n| vM | Task identifier |\nAfter the client executes the given task, it communicates the status back to the server, providing the previously supplied task identifier (vM\n) in a field named bN\n.\nThe field NSeyDX\nis hardcoded into the response, its purpose is unknown.\nThe field Jb\nis used to communicate success/failure of a given task. For a successful task execution, it is set to vpes\nas shown above, or to indicate failure it is set to jpofxs\n. Both strings are also hardcoded.\nCommands\nSurprisingly, the command field Gp\nas issued by the C2 is in plaintext (before encryption) and quite verbose.\nWhile we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below. It is unclear if this is an oversight on the developer’s part or intended.\nExcept for the 1st entry (“Vs”), which is used as a no-op command, the others are rather descriptive and provide a variety of ways to execute additional code:\nVs\nRunning exe\nStarting the exe with parameters\nHigh start exe\nRunDll32 & Execute\nRegsvr32 & Execute\nRun CMD in memory\nRun PS in memory\nMemLoadDllMain || MemLoadExe\nRunning dll in memory #2 (DllRegisterServer)\nRunning dll in memory #3 (DllInstall(Install))\nRunning dll in memory #3 (DllInstall(Unstall))\nMemLoadShellCode\nCrypt update & Bots upgrade\nUninstall\nCommands typically receive a URL as argument Pk\nfrom where to fetch the payload. Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.\nFor files written to disk, Matanbuchus uses the directory\n%PROGRAMDATA%\\%PROCESSOR_REVISION%\nas storage, e.g. C:\\ProgramData\\9e09\\\n. File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls\nor .exe\n.\nThe command High start exe\nis used to run executables with elevated privileges via ShellExecuteExA(verb=runas)\n.\nShellcode fetched by MemLoadShellCode\nis expected to be in hex string format, decoded and executed using CreateThread\nin the same process.\nTools\nTo aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus. You can grab the script on our GitHub.\nIoCs\nIf you prefer MISP, you can find below IoCs in form of a MISP event on our GitHub as well.\nMSI Installer\n34839e85cb8ae781654f2f9f0529114dbf21399e02bea3c9de94f6c247807e7elocale.nls, Matanbuchus loader\n67a9e8599ab71865a97e75dae9be438c24d015a93e6a12fb5b450ec558528290Matanbuchus core\n44ddcdae080f2588b4452698b73f3a1d1d03af5b7b9a97e6ffc5ce3fa021bfc8ITW URL\nhttps://trainprinting[.]com/wp-content/upgrade/upgrades/docs.zipLoader update URLs\nhttps://azureliveapps[.]com/BNUwRuzkgS/auth.php\nhttps://roamingslivedb[.]com/BNUwRuzkgS/auth.phpCore component URL\nhttps://azure-dbupdate[.]cloud/BNUwRuzkgS/index.php\nhttps://azureboot[.]com/BNUwRuzkgS/index.phpC2 domains\nazureboot[.]com\nazure-dbupdate[.]cloud\nroamingslivedb[.]com\nazureliveapps[.]comHardcoded URL path in core component\n/vmagtc/njqeee/requets/index.phpHardcoded high port\n23644Hardcoded user agent\nWindows-Update-Agent/11.0.10011.16384 Client-Protocol/2.0\nMITRE ATT&CK\nT1027 Obfuscated Files or Information\nT1059 Command and Scripting Interpreter\nT1059.001 PowerShell\nT1059.003 Windows Command Shell\nT1218.007 Msiexec\nT1218.010 Regsvr32\nT1497 Virtualization/Sandbox Evasion\nT1571 Non-Standard Port\nT1573.001 Symmetric Cryptography",
+  "sanitized_txt": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums. Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads. Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.\nSince the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage. In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.\nThe sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.\nThis blog was authored by Johann Aydinbas and Colin Murphy Attack Chain We start our analysis with the MSI installer package ea8b828430149f67f45f9a71ee486bc674e21da7.\nIt disguises itself as a Visual Studio installer:\nThe .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date:\nOn execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files:\nWhile locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign. DWLog.dll is a DLL signed by “Adobe Inc.”, MSTTSLoc.dll appears to be a Microsoft Text to Speech component, but neither appears to be an active part of the attack chain.\nAfter dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe :\nWhile the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime. If omitted, the loader does not continue. This is likely to avoid execution in sandboxes which simply execute available exports one by one.\nObfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.\nAll used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.\nAll API calls are obfuscated as well. Matanbuchus uses an FNV-1a hash to look up the desired API’s address before each call.\nFirst Stage The first stage of Matanbuchus, locale.nls , acts as a loader for the core component. The loader component has mainly two functions:\n- Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.\nNext it tries to retrieve the core component from a different URL. The response is base64-decoded and decrypted using a 24 byte rolling xor.\nIf retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .\nSecond Stage The second stage is the core component of Matanbuchus. It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.\nUnlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send and recv .\nServer and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key. The JSON keys are also hardcoded per sample.\nFetching tasks A typical sequence of fetching a task starts with Matanbuchus sending a system information packet to its C2:\nWe’ve identified the following fields:\n| Key | Meaning | |-------|---------------------| | 3CEk | CPU info from cpuid | | 3fe11 | Amount of RAM | | 3m7x | \"User\" or \"Admin\" | | DS2x | Bitness | | Eo6 | Botnet/campaign | | Fto | Number of CPUs | | Q6X6 | Domain name | | Vz | Module path | | cBF | MAC address | | f1da | Logon server | | tW | Computer name | | wP6 | Bot version | | zkC7 | NetBIOS name | | Los | Unknown, hardcoded | The server then responds with a task object:\nThe fields are:\n| Key | Meaning | |-----|-----------------| | Gp | Command string | | Pk | Argument | | vM | Task identifier | After the client executes the given task, it communicates the status back to the server, providing the previously supplied task identifier (vM ) in a field named bN .\nThe field NSeyDX is hardcoded into the response, its purpose is unknown.\nThe field Jb is used to communicate success/failure of a given task. For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs . Both strings are also hardcoded.\nCommands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.\nWhile we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below. It is unclear if this is an oversight on the developer’s part or intended.\nExcept for the 1st entry (“Vs”), which is used as a no-op command, the others are rather descriptive and provide a variety of ways to execute additional code:\nVs Running exe Starting the exe with parameters High start exe RunDll32 & Execute Regsvr32 & Execute Run CMD in memory Run PS in memory MemLoadDllMain || MemLoadExe Running dll in memory #2 (DllRegisterServer) Running dll in memory #3 (DllInstall(Install)) Running dll in memory #3 (DllInstall(Unstall)) MemLoadShellCode Crypt update & Bots upgrade Uninstall Commands typically receive a URL as argument Pk from where to fetch the payload. Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.\nFor files written to disk, Matanbuchus uses the directory %PROGRAMDATA%\\%PROCESSOR_REVISION% as storage, e.g. C:\\ProgramData\\9e09\\ . File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .\nThe command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .\nShellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.\nTools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus. You can grab the script on our GitHub.\nIoCs If you prefer MISP, you can find below IoCs in form of a MISP event on our GitHub as well.",
+  "ID_list": [
+    "T1027",
+    "T1059",
+    "T1059.001",
+    "T1059.003",
+    "T1218.007",
+    "T1218.010",
+    "T1497",
+    "T1571",
+    "T1573.001"
+  ],
+  "Name_list": [
+    "Code Signing",
+    "Execution",
+    "Regsvr32"
+  ],
+  "TTP_sentences": {
+    "T1027": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.6225
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.7082
+      },
+      {
+        "sentence": "Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.",
+        "score": 0.5256
+      },
+      {
+        "sentence": "Since the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage.",
+        "score": 0.5269
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.6554
+      },
+      {
+        "sentence": "The sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.",
+        "score": 0.5733
+      },
+      {
+        "sentence": "This blog was authored by Johann Aydinbas and Colin Murphy Attack Chain We start our analysis with the MSI installer package ea8b828430149f67f45f9a71ee486bc674e21da7.",
+        "score": 0.5392
+      },
+      {
+        "sentence": "It disguises itself as a Visual Studio installer: The .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date: On execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files: While locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign.",
+        "score": 0.5521
+      },
+      {
+        "sentence": "DWLog.dll is a DLL signed by “Adobe Inc.”, MSTTSLoc.dll appears to be a Microsoft Text to Speech component, but neither appears to be an active part of the attack chain.",
+        "score": 0.4439
+      },
+      {
+        "sentence": "After dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe : While the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime.",
+        "score": 0.4523
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.5746
+      },
+      {
+        "sentence": "This is likely to avoid execution in sandboxes which simply execute available exports one by one.",
+        "score": 0.5628
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.7788
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.6476
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.7498
+      },
+      {
+        "sentence": "Matanbuchus uses an FNV-1a hash to look up the desired API’s address before each call.",
+        "score": 0.5072
+      },
+      {
+        "sentence": "First Stage The first stage of Matanbuchus, locale.nls , acts as a loader for the core component.",
+        "score": 0.5876
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.4444
+      },
+      {
+        "sentence": "Next it tries to retrieve the core component from a different URL.",
+        "score": 0.4066
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.5993
+      },
+      {
+        "sentence": "If retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .",
+        "score": 0.3904
+      },
+      {
+        "sentence": "Second Stage The second stage is the core component of Matanbuchus.",
+        "score": 0.4317
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.4701
+      },
+      {
+        "sentence": "Unlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send and recv .",
+        "score": 0.3864
+      },
+      {
+        "sentence": "Server and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key.",
+        "score": 0.7196
+      },
+      {
+        "sentence": "The JSON keys are also hardcoded per sample.",
+        "score": 0.511
+      },
+      {
+        "sentence": "The field NSeyDX is hardcoded into the response, its purpose is unknown.",
+        "score": 0.3847
+      },
+      {
+        "sentence": "For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs .",
+        "score": 0.4004
+      },
+      {
+        "sentence": "Both strings are also hardcoded.",
+        "score": 0.5683
+      },
+      {
+        "sentence": "Commands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.",
+        "score": 0.4737
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.335
+      },
+      {
+        "sentence": "It is unclear if this is an oversight on the developer’s part or intended.",
+        "score": 0.3839
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.4993
+      },
+      {
+        "sentence": "C:\\ProgramData\\9e09\\ .",
+        "score": 0.4222
+      },
+      {
+        "sentence": "File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .",
+        "score": 0.4895
+      },
+      {
+        "sentence": "The command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .",
+        "score": 0.4648
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.5937
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.7238
+      },
+      {
+        "sentence": "You can grab the script on our GitHub.",
+        "score": 0.3854
+      },
+      {
+        "sentence": "IoCs If you prefer MISP, you can find below IoCs in form of a MISP event on our GitHub as well.",
+        "score": 0.3782
+      }
+    ],
+    "T1059": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.4536
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.5696
+      },
+      {
+        "sentence": "Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.",
+        "score": 0.4198
+      },
+      {
+        "sentence": "Since the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage.",
+        "score": 0.4491
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.5084
+      },
+      {
+        "sentence": "The sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.",
+        "score": 0.3401
+      },
+      {
+        "sentence": "This blog was authored by Johann Aydinbas and Colin Murphy Attack Chain We start our analysis with the MSI installer package ea8b828430149f67f45f9a71ee486bc674e21da7.",
+        "score": 0.3565
+      },
+      {
+        "sentence": "It disguises itself as a Visual Studio installer: The .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date: On execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files: While locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign.",
+        "score": 0.378
+      },
+      {
+        "sentence": "DWLog.dll is a DLL signed by “Adobe Inc.”, MSTTSLoc.dll appears to be a Microsoft Text to Speech component, but neither appears to be an active part of the attack chain.",
+        "score": 0.3133
+      },
+      {
+        "sentence": "After dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe : While the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime.",
+        "score": 0.4832
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.4933
+      },
+      {
+        "sentence": "This is likely to avoid execution in sandboxes which simply execute available exports one by one.",
+        "score": 0.446
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.5016
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.4629
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.4954
+      },
+      {
+        "sentence": "First Stage The first stage of Matanbuchus, locale.nls , acts as a loader for the core component.",
+        "score": 0.492
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.4376
+      },
+      {
+        "sentence": "Next it tries to retrieve the core component from a different URL.",
+        "score": 0.3905
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.4718
+      },
+      {
+        "sentence": "If retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .",
+        "score": 0.3643
+      },
+      {
+        "sentence": "Second Stage The second stage is the core component of Matanbuchus.",
+        "score": 0.4683
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.7159
+      },
+      {
+        "sentence": "Unlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send and recv .",
+        "score": 0.4636
+      },
+      {
+        "sentence": "Server and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key.",
+        "score": 0.5144
+      },
+      {
+        "sentence": "The JSON keys are also hardcoded per sample.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "The field NSeyDX is hardcoded into the response, its purpose is unknown.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs .",
+        "score": 0.3606
+      },
+      {
+        "sentence": "Both strings are also hardcoded.",
+        "score": 0.4565
+      },
+      {
+        "sentence": "Commands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.",
+        "score": 0.6206
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.4884
+      },
+      {
+        "sentence": "It is unclear if this is an oversight on the developer’s part or intended.",
+        "score": 0.3598
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.57
+      },
+      {
+        "sentence": "C:\\ProgramData\\9e09\\ .",
+        "score": 0.3553
+      },
+      {
+        "sentence": "File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .",
+        "score": 0.444
+      },
+      {
+        "sentence": "The command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .",
+        "score": 0.5232
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.5545
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.5776
+      },
+      {
+        "sentence": "You can grab the script on our GitHub.",
+        "score": 0.4229
+      },
+      {
+        "sentence": "IoCs If you prefer MISP, you can find below IoCs in form of a MISP event on our GitHub as well.",
+        "score": 0.3234
+      }
+    ],
+    "T1059.001": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.4657
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.5029
+      },
+      {
+        "sentence": "Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.",
+        "score": 0.3973
+      },
+      {
+        "sentence": "Since the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage.",
+        "score": 0.4271
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.4531
+      },
+      {
+        "sentence": "The sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.",
+        "score": 0.3891
+      },
+      {
+        "sentence": "This blog was authored by Johann Aydinbas and Colin Murphy Attack Chain We start our analysis with the MSI installer package ea8b828430149f67f45f9a71ee486bc674e21da7.",
+        "score": 0.365
+      },
+      {
+        "sentence": "It disguises itself as a Visual Studio installer: The .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date: On execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files: While locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign.",
+        "score": 0.3382
+      },
+      {
+        "sentence": "After dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe : While the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime.",
+        "score": 0.4601
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.4343
+      },
+      {
+        "sentence": "This is likely to avoid execution in sandboxes which simply execute available exports one by one.",
+        "score": 0.4947
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.3959
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.406
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "Matanbuchus uses an FNV-1a hash to look up the desired API’s address before each call.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "First Stage The first stage of Matanbuchus, locale.nls , acts as a loader for the core component.",
+        "score": 0.4369
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.454
+      },
+      {
+        "sentence": "Next it tries to retrieve the core component from a different URL.",
+        "score": 0.3792
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "If retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .",
+        "score": 0.3955
+      },
+      {
+        "sentence": "Second Stage The second stage is the core component of Matanbuchus.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.6421
+      },
+      {
+        "sentence": "Unlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send and recv .",
+        "score": 0.3806
+      },
+      {
+        "sentence": "Server and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key.",
+        "score": 0.4178
+      },
+      {
+        "sentence": "The JSON keys are also hardcoded per sample.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs .",
+        "score": 0.318
+      },
+      {
+        "sentence": "Both strings are also hardcoded.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "Commands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.",
+        "score": 0.4448
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.4511
+      },
+      {
+        "sentence": "It is unclear if this is an oversight on the developer’s part or intended.",
+        "score": 0.3098
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.5789
+      },
+      {
+        "sentence": "File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .",
+        "score": 0.3433
+      },
+      {
+        "sentence": "The command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .",
+        "score": 0.553
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.4836
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.4864
+      },
+      {
+        "sentence": "You can grab the script on our GitHub.",
+        "score": 0.5072
+      },
+      {
+        "sentence": "IoCs If you prefer MISP, you can find below IoCs in form of a MISP event on our GitHub as well.",
+        "score": 0.3194
+      }
+    ],
+    "T1059.003": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.3343
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.4542
+      },
+      {
+        "sentence": "Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "Since the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage.",
+        "score": 0.333
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.4026
+      },
+      {
+        "sentence": "It disguises itself as a Visual Studio installer: The .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date: On execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files: While locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "After dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe : While the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime.",
+        "score": 0.5002
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.4342
+      },
+      {
+        "sentence": "This is likely to avoid execution in sandboxes which simply execute available exports one by one.",
+        "score": 0.3978
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.3921
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.4
+      },
+      {
+        "sentence": "First Stage The first stage of Matanbuchus, locale.nls , acts as a loader for the core component.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "Next it tries to retrieve the core component from a different URL.",
+        "score": 0.3265
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.3714
+      },
+      {
+        "sentence": "If retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .",
+        "score": 0.3127
+      },
+      {
+        "sentence": "Second Stage The second stage is the core component of Matanbuchus.",
+        "score": 0.3865
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.6581
+      },
+      {
+        "sentence": "Unlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send and recv .",
+        "score": 0.4116
+      },
+      {
+        "sentence": "Server and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs .",
+        "score": 0.333
+      },
+      {
+        "sentence": "Both strings are also hardcoded.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "Commands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.",
+        "score": 0.6281
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.5074
+      },
+      {
+        "sentence": "It is unclear if this is an oversight on the developer’s part or intended.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.4909
+      },
+      {
+        "sentence": "File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .",
+        "score": 0.4746
+      },
+      {
+        "sentence": "The command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .",
+        "score": 0.4907
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.4637
+      },
+      {
+        "sentence": "You can grab the script on our GitHub.",
+        "score": 0.3607
+      }
+    ],
+    "T1218.010": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.3984
+      },
+      {
+        "sentence": "The sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "It disguises itself as a Visual Studio installer: The .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date: On execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files: While locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign.",
+        "score": 0.3827
+      },
+      {
+        "sentence": "DWLog.dll is a DLL signed by “Adobe Inc.”, MSTTSLoc.dll appears to be a Microsoft Text to Speech component, but neither appears to be an active part of the attack chain.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "After dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe : While the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime.",
+        "score": 0.558
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.385
+      },
+      {
+        "sentence": "This is likely to avoid execution in sandboxes which simply execute available exports one by one.",
+        "score": 0.4863
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.3476
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.3833
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.4055
+      },
+      {
+        "sentence": "First Stage The first stage of Matanbuchus, locale.nls , acts as a loader for the core component.",
+        "score": 0.4512
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.3111
+      },
+      {
+        "sentence": "Next it tries to retrieve the core component from a different URL.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.3083
+      },
+      {
+        "sentence": "If retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .",
+        "score": 0.5463
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.3701
+      },
+      {
+        "sentence": "Server and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key.",
+        "score": 0.3182
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.3822
+      },
+      {
+        "sentence": "The command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .",
+        "score": 0.4529
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.4169
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.3155
+      },
+      {
+        "sentence": "You can grab the script on our GitHub.",
+        "score": 0.3027
+      }
+    ],
+    "T1497": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.4264
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.3767
+      },
+      {
+        "sentence": "Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.",
+        "score": 0.39
+      },
+      {
+        "sentence": "Since the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.3594
+      },
+      {
+        "sentence": "The sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.",
+        "score": 0.508
+      },
+      {
+        "sentence": "This blog was authored by Johann Aydinbas and Colin Murphy Attack Chain We start our analysis with the MSI installer package ea8b828430149f67f45f9a71ee486bc674e21da7.",
+        "score": 0.3814
+      },
+      {
+        "sentence": "It disguises itself as a Visual Studio installer: The .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date: On execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files: While locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "DWLog.dll is a DLL signed by “Adobe Inc.”, MSTTSLoc.dll appears to be a Microsoft Text to Speech component, but neither appears to be an active part of the attack chain.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "After dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe : While the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime.",
+        "score": 0.53
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "This is likely to avoid execution in sandboxes which simply execute available exports one by one.",
+        "score": 0.4796
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.4117
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.372
+      },
+      {
+        "sentence": "Matanbuchus uses an FNV-1a hash to look up the desired API’s address before each call.",
+        "score": 0.4804
+      },
+      {
+        "sentence": "First Stage The first stage of Matanbuchus, locale.nls , acts as a loader for the core component.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "If retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .",
+        "score": 0.3209
+      },
+      {
+        "sentence": "Second Stage The second stage is the core component of Matanbuchus.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs .",
+        "score": 0.3013
+      },
+      {
+        "sentence": "Both strings are also hardcoded.",
+        "score": 0.3381
+      },
+      {
+        "sentence": "Commands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .",
+        "score": 0.3267
+      },
+      {
+        "sentence": "The command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .",
+        "score": 0.3047
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.3592
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.3836
+      }
+    ],
+    "T1571": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.4346
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.391
+      },
+      {
+        "sentence": "Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.",
+        "score": 0.3357
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "The sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.",
+        "score": 0.3105
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.3293
+      },
+      {
+        "sentence": "This is likely to avoid execution in sandboxes which simply execute available exports one by one.",
+        "score": 0.3593
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.4246
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.4239
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.4549
+      },
+      {
+        "sentence": "Matanbuchus uses an FNV-1a hash to look up the desired API’s address before each call.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.4062
+      },
+      {
+        "sentence": "Next it tries to retrieve the core component from a different URL.",
+        "score": 0.332
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.4124
+      },
+      {
+        "sentence": "If retrieval is successful, the core component is manually mapped into the same process and executed by calling its export DllRegisterServer .",
+        "score": 0.3356
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.327
+      },
+      {
+        "sentence": "Unlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send and recv .",
+        "score": 0.6397
+      },
+      {
+        "sentence": "Server and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key.",
+        "score": 0.5177
+      },
+      {
+        "sentence": "The JSON keys are also hardcoded per sample.",
+        "score": 0.409
+      },
+      {
+        "sentence": "The field NSeyDX is hardcoded into the response, its purpose is unknown.",
+        "score": 0.503
+      },
+      {
+        "sentence": "The field Jb is used to communicate success/failure of a given task.",
+        "score": 0.3787
+      },
+      {
+        "sentence": "For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs .",
+        "score": 0.3252
+      },
+      {
+        "sentence": "Both strings are also hardcoded.",
+        "score": 0.4803
+      },
+      {
+        "sentence": "Commands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.",
+        "score": 0.4428
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.3339
+      },
+      {
+        "sentence": "File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .",
+        "score": 0.3395
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.4381
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.4523
+      },
+      {
+        "sentence": "IoCs If you prefer MISP, you can find below IoCs in form of a MISP event on our GitHub as well.",
+        "score": 0.3728
+      }
+    ],
+    "T1573.001": [
+      {
+        "sentence": "A deal with the devil: Analysis of a recent Matanbuchus sample Matanbuchus is the name given to a Malware-as-a-Service sold on Russian-speaking cybercriminal forums.",
+        "score": 0.4015
+      },
+      {
+        "sentence": "Starting at a rental price of $2,500, the malware consists of an obfuscated two-stage loader which has been deployed in conjunction with Qakbot and Cobalt Strike payloads.",
+        "score": 0.4712
+      },
+      {
+        "sentence": "Last year, Unit42 observed the malware used in activity targeting a Belgian technology company and American educational institutions.",
+        "score": 0.3275
+      },
+      {
+        "sentence": "Since the fall of last year, there have been few public reports about Matanbuchus, and in general, reports have focused primarily on the first loader stage.",
+        "score": 0.3172
+      },
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.3177
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "Obfuscation Both Matanbuchus stages use string and API obfuscation as previously documented by 0ffset.",
+        "score": 0.491
+      },
+      {
+        "sentence": "All used strings are stored on the stack at runtime, transferred to a static location and then decrypted using an 8 byte rolling xor for further use.",
+        "score": 0.4877
+      },
+      {
+        "sentence": "All API calls are obfuscated as well.",
+        "score": 0.4339
+      },
+      {
+        "sentence": "The loader component has mainly two functions: - Keep itself updated - Fetch the 2nd stage and execute it from memory After execution, the loader first attempts to update itself by fetching a hardcoded URL via HTTPS.",
+        "score": 0.4337
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.5414
+      },
+      {
+        "sentence": "Second Stage The second stage is the core component of Matanbuchus.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.3696
+      },
+      {
+        "sentence": "Unlike the first stage, communication with the C2 server is done over plain HTTP on a hardcoded high port, manually implemented using low-level network APIs such as send and recv .",
+        "score": 0.5533
+      },
+      {
+        "sentence": "Server and client exchange base64-encoded JSON objects, with the JSON values additionally being RC4-encrypted, using a hardcoded key.",
+        "score": 0.7132
+      },
+      {
+        "sentence": "The JSON keys are also hardcoded per sample.",
+        "score": 0.4645
+      },
+      {
+        "sentence": "The field NSeyDX is hardcoded into the response, its purpose is unknown.",
+        "score": 0.4008
+      },
+      {
+        "sentence": "The field Jb is used to communicate success/failure of a given task.",
+        "score": 0.5092
+      },
+      {
+        "sentence": "For a successful task execution, it is set to vpes as shown above, or to indicate failure it is set to jpofxs .",
+        "score": 0.4462
+      },
+      {
+        "sentence": "Both strings are also hardcoded.",
+        "score": 0.4441
+      },
+      {
+        "sentence": "Commands Surprisingly, the command field Gp as issued by the C2 is in plaintext (before encryption) and quite verbose.",
+        "score": 0.6286
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.3103
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.3399
+      },
+      {
+        "sentence": "File names are randomly generated with a fixed length (11–13 chars) depending on the exact command and only consist of upper and lowercase letters, with a file extension of .nls or .exe .",
+        "score": 0.4551
+      },
+      {
+        "sentence": "Shellcode fetched by MemLoadShellCode is expected to be in hex string format, decoded and executed using CreateThread in the same process.",
+        "score": 0.4042
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.5206
+      },
+      {
+        "sentence": "IoCs If you prefer MISP, you can find below IoCs in form of a MISP event on our GitHub as well.",
+        "score": 0.3562
+      }
+    ],
+    "T1218.007": [
+      {
+        "sentence": "In this report, we inspect the second stage of the loader which was briefly mentioned in the article published by Unit42 but not analyzed in depth.",
+        "score": 0.3352
+      },
+      {
+        "sentence": "The sample analyzed here was found on VirusTotal while investigating signed binaries which appeared in a routine code signing hunt.",
+        "score": 0.3309
+      },
+      {
+        "sentence": "This blog was authored by Johann Aydinbas and Colin Murphy Attack Chain We start our analysis with the MSI installer package ea8b828430149f67f45f9a71ee486bc674e21da7.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "It disguises itself as a Visual Studio installer: The .msi file has a valid signature from “ADVANCED ACCESS SERVICES LTD” with a recent signing date: On execution, it creates a directory called VisualStudioIDE in %LOCALAPPDATA% and drops 3 files: While locale.nls is the actual Matanbuchus loader component, the other two files don’t seem to serve a purpose and are likely benign.",
+        "score": 0.5004
+      },
+      {
+        "sentence": "DWLog.dll is a DLL signed by “Adobe Inc.”, MSTTSLoc.dll appears to be a Microsoft Text to Speech component, but neither appears to be an active part of the attack chain.",
+        "score": 0.3575
+      },
+      {
+        "sentence": "After dropping the files, the installer finally executes the Matanbuchus loader component via regsvr32.exe : While the value of the argument supplied via “-i” does not matter, the loader component does check for the existence of an argument at runtime.",
+        "score": 0.4241
+      },
+      {
+        "sentence": "If omitted, the loader does not continue.",
+        "score": 0.3199
+      },
+      {
+        "sentence": "The response is base64-decoded and decrypted using a 24 byte rolling xor.",
+        "score": 0.312
+      },
+      {
+        "sentence": "It is responsible for fetching and executing commands, such as running shell commands, executing shellcode or loading further PE files.",
+        "score": 0.3329
+      },
+      {
+        "sentence": "While we did not receive any actual tasks during our analysis, we created a fake server to verify this finding and can confirm that the commands work as listed below.",
+        "score": 0.3172
+      },
+      {
+        "sentence": "Depending on the type of command, payloads are either manual mapped into the process memory and executed from there or written to disk before execution.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "The command High start exe is used to run executables with elevated privileges via ShellExecuteExA(verb=runas) .",
+        "score": 0.3296
+      },
+      {
+        "sentence": "Tools To aid the analysis, we’ve written a small script to decrypt base64 blobs as exchanged by Matanbuchus.",
+        "score": 0.3661
+      }
+    ]
+  }
+}

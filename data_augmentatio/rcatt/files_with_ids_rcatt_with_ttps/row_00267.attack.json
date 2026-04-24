@@ -1,0 +1,212 @@
+{
+  "original_txt": "BLOG Registry Analysis with CrowdResponse August 28, 2014Chad TilburyResearch & Threat Intel Blue The third release of the free CrowdResponse incident response collection tool is now available! This time around we include plugins that facilitate the collection of Windows registry data. Our inspiration for this release was one of those vulnerabilities that just won\\xe2\\x80\\x99t die \\xe2\\x80\\x93 Windows Sticky Keys. We\\xe2\\x80\\x99ll show how to identify this attack while demonstrating the new additions. New Plugins @RegDump [-ds] <reg key> RegDump recursively extracts Windows registry key and value data. -d Nested output format -s Recursive dump <reg key> Registry key to start dump from Valid registry hive names are: HKLM, HKCU, HKCR, HKU, and HKAU (pseudo key representing all users) @RegFile [-scmh] <reg key> RegFile searches for registry string values (REG_SZ and REG_EXPAND_SZ) and identifies file path data. If the file exists on disk, file information, hash, and digital signature details are recorded. -s Recursive dump -c Verify digital signature of discovered files -m Compute MD5 hashes -h Compute SHA256 hashes <reg key> Registry key to start dump from The Attack The Sticky Keys attack is one of those vulnerabilities that is nearly too simple to believe. With a high success rate in most Windows environments, it is not surprising that we still see even some of our more advanced adversaries putting it into play. The original Sticky Keys attack involved replacing the C:\\\\Windows\\\\System32\\\\sethc.exe binary with something that could provide access to the underlying OS, such as cmd.exe. After the switch, all it takes is five presses of the Shift-key from the logon screen and cmd.exe is executed. Since sethc.exe is executed pre-login, the attacker effectively gets a shell without needing to authenticate. This reduces the logging footprint (no compromised account logon necessary!) and gives the added bonus of providing a shell running with LOCAL_SYSTEM privileges. Sticky Keys Attack As new versions of Windows introduced slightly better protection mechanisms for the System32 folder, a new variant emerged \\xe2\\x80\\x93 setting cmd.exe as a debugger to the sethc.exe process. One simple addition to the Windows registry and the attack works just as before, except there is no longer a need to perform file replacement. REG ADD \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\sethc.exe\" /t REG_SZ /v Debugger /d \\xe2\\x80\\x9cC:\\\\windows\\\\system32\\\\cmd.exe\\xe2\\x80\\x9d /f Another common variant takes advantage of a different part of the accessibility suite, Utilman. The attack is identical to the sethc.exe registry debugger modification seen above, except the binary is now Utilman.exe and a simple Windows key + U combination will present a LOCAL_SYSTEM privileged shell. REG ADD \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution tilman.exe\" /t REG_SZ /v Debugger /d \\xe2\\x80\\x9cC:\\\\windows\\\\system32\\\\cmd.exe\\xe2\\x80\\x9d /f An important detail about this vulnerability is the attacker must have prior access to the system. That can be either via an administrator account (necessary to modify HKLM or write files to C:\\\\Windows\\\\System32) or via physical access to the machine, with modifications done via a bootable USB. Hence it is largely used post-compromise in conjunction with RDP as a convenient means for attackers to pivot through the network or to regain access after a password reset. Finding evidence of a Sticky Keys attack may lead the responder to the initial compromise of a system, but it will not be the first malicious activity to occur. Finding Sticky Key Attacks File Replacement One of the clever things that make the Sticky Keys attack difficult to identify is that the file replacement uses a legitimate Windows binary (cmd.exe). Thus, the resultant file will still nicely match your list of known good hashes. The trick of course is to not only compare hashes, but to ensure you are matching the filename with the correct hash. Using the CrowdResponse @DirList plugin, we can pull filenames, hashes, and digital signatures for all files in the C:\\\\Windows\\\\System32 folder. From the CrowdResponse config file: @dirlist \"%windir%\\\\system32\" -h -m -r -s -t -p 2 -z 30 -i \"\\\\.(exe|dll|sys)$\" With the output in hand (or in a backend database), a simple query for well-known sethc.exe or cmd.exe hashes can be constructed to easily identify anomalies. In this example we see cmd.exe and sethc.exe both having the same (cmd.exe) hash. Simple Query Registry Analysis Imagine a tool that dumps all of your favorite registry locations for inspection along with validating any binaries that are referred to within those registry locations. This use case nicely covers the capabilities of CrowdResponse\\xe2\\x80\\x99s new @RegDump and @RegFile plugins. Let\\xe2\\x80\\x99s see how they work when searching for Sticky Key modifications. From the CrowdResponse config file: @RegDump \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\" -s @RegFile \\xe2\\x80\\x9cHKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\xe2\\x80\\x9d -s -c -h -m CrowdResponse Config File String Value Found The @RegDump output clearly shows utilman.exe as an outlier (it was the only one in the list with a \\xe2\\x80\\x9cdebugger\\xe2\\x80\\x9d value) and @RegFile nicely identified the full path in that registry value and provided hash and digital signature information. While this example shows us using the new registry plugins to identify Sticky Key modifications, they are equally useful to collect known hotspots in the registry, such as the infamous \\xe2\\x80\\x9cRun\\xe2\\x80\\x9d keys and other registry-based ASEPs. YARA You may recall that one of the first features of CrowdResponse was the ability to scan memory and disk for arbitrary YARA signatures. YARA\\xe2\\x80\\x99s power lies in its simplicity, and there are some great signatures available to help you find all kinds of evil. Florian Roth at BSK Consulting shared a clever YARA signature for detecting sethc.exe file replacement. The signature looks for well-known strings within sethc.exe, and if they are not found, flags the binary for potential file replacement. A slightly modified version can be used with CrowdResponse: CrowdResponse \\xe2\\x80\\x93o out.xml @yara \\xe2\\x80\\x93m sethc.yar \\xe2\\x80\\x93f sethc.exe \\xe2\\x80\\x93t %windir%\\\\System32 Contents of sethc.yar: Rule Sethc_Replace { strings: $s1 = \"stickykeys\" fullword nocase $s2 = \"stickykeys\" wide nocase $s3 = \"Control_RunDLL access.cpl\" wide $s4 = \"SETHC.EXE\" wide } The command uses the CrowdResponse @YARA module to scan anything named sethc.exe in the \\\\Windows\\\\System32 folder, flagging the binary if specific strings are not present. Scaling Your Efforts It is increasingly necessary to collect and analyze incident response data at scale. Scaling analysis to hundreds or thousands of systems requires a process that can collect the results of a tool like CrowdResponse and get the data into a searchable repository. Once accomplished, you can easily detect the Sticky Keys attack with a search similar to the one seen below. Sticky Keys Attack Search Query In this example an analyst with knowledge of the Sticky Keys vulnerability created a simple query and identified three new compromised systems. Other possible searches include the presence of a \\xe2\\x80\\x9cDebugger\\xe2\\x80\\x9d value and hash comparisons of sethc.exe and utilman.exe. Remediation What can be done about this attack once it is identified? Like many Windows vulnerabilities, the most effective mitigation is to prevent adversaries from achieving administrative privileges. Modifying the necessary keys or files in this attack requires administrative rights. Beyond that, there are some things you can do to make the attack slightly more difficult and potentially easier to detect. Upgrade systems to at least Win7/Win2008R2. This does not remove the vulnerability, but at least makes file replacement slightly more difficult. Turn off sticky keys via the registry. An obvious solution, but unfortunately an attacker with administrative rights can easily re-enable. Enforce Network Level Authentication for RDP connections. Available starting with Windows 7 and Server 2008, NLA requires account authentication before a RDP session is established. NLA could be an elegant fix, except that an adversary with administrative rights can easily disable it. Require IPsec to pre-authenticate RDP sessions. This solution mitigates any advantages Sticky Keys give to an attacker, but requires significant up-front work. Set real-time triggers looking for changes to file system or registry in your security tools. Tune end-point monitoring or HIPS to look for telltale signs of file replacement and registry modification. Want to try it yourself? Download the latest version of CrowdResponse here. A big thank you to Robin Keir and Danny Lungstrom for their work on this release. The CrowdStrike team is committed to developing and delivering free community tools like CrowdResponse, CrowdInspect, Tortilla, and the Heartbleed Scanner. If you have any questions or would like additional information on our services, products, or intelligence offerings, please reach out to us via our contact page. For immediate assistance with an Incident Response, the CrowdStrike Services team can be contacted at 1.855.CROWDIR (276-9347). Tweet Share CrowdStrike Falcon Free Trial Chad Tilbury Chad Tilbury has over 15 years experience investigating computer crimes, specializing in intrusion incident response, digital forensic examinations, and corporate espionage. His extensive law enforcement and international experience stems from working with a broad cross-section of Fortune 500 corporations and government agencies around the world. As faculty with the SANS Institute in digital forensics, Chad is responsible for educating thousands of students each year in advanced forensics and incident response techniques. As Technical Director for CrowdStrike, Chad provides leadership for the services team, driving innovation to support customers in a variety of offerings. Chad is a graduate of the U.S. Air Force Academy and holds a M.S. and B.S. in Computer Science and GCFA, GREM, GCIH, ENCE, and CISSP certifications. Related Content Student Looking At Three Computer Screens With Ransomware Ransomware Increases the Back-to-School Blues As students all over the United States donned their backpacks and packed their lunches to go\\xe2\\x80\\xa6 SPIDER Adversary Image In Front Of Red Code Who is Salty Spider (Sality)? Common Aliases SALTY SIDER is most commonly identified with the botnet it maintains (Sality) and it\\xe2\\x80\\x99s\\xe2\\x80\\xa6 Laptop With Mobile Threat Landscape Cover Image Webcast: A Deep Dive Into the Mobile Malware Report Trends and Recommendations A new webcast, \\xe2\\x80\\x9cThreat Landscape: Mobile Malware,\\xe2\\x80\\x9d delves into the challenges of securing mobile devices in\\xe2\\x80\\xa6 CATEGORIES ENDPOINT PROTECTION(181) EXECUTIVE VIEWPOINT(95) FROM THE FRONT LINES(86) RESEARCH & THREAT INTEL(138) TECH CENTER(56) CONNECT WITH US CrowdStrike Falcon Free Trial FEATURED ARTICLES How to gain visibility into Mobile Devices September 17, 2019 Ransomware Increases the Back-to-School Blues September 17, 2019 How to use Falcon Insight to get Additional USB Device Visibility September 16, 2019 Using Docker to Do Machine Learning at Scale September 13, 2019 SUBSCRIBE Sign up now to receive the latest notifications and updates from CrowdStrike. SIGN UP See CrowdStrike Falcon in Action Detect, prevent, and respond to attacks\\xe2\\x80\\x94 even malware-free intrusions\\xe2\\x80\\x94at any stage, with next-generation endpoint protection. SEE DEMO Hat-tribution to PLA Unit 61486Occupy Central: The Umbrella Revolution and Chinese Intelligence Copyright \\xc2\\xa9 2019 CrowdStrike Privacy Request Info Blog Join Our Team Sitemap Contact Us 1.888.512.8906 English",
+  "sanitized_txt": "BLOG Registry Analysis with CrowdResponse August 28, 2014Chad TilburyResearch & Threat Intel Blue The third release of the free CrowdResponse incident response collection tool is now available! This time around we include plugins that facilitate the collection of Windows registry data. Our inspiration for this release was one of those vulnerabilities that just won\\xe2\\x80\\x99t die \\xe2\\x80\\x93 Windows Sticky Keys. We\\xe2\\x80\\x99ll show how to identify this attack while demonstrating the new additions. New Plugins @RegDump [-ds] <reg key> RegDump recursively extracts Windows registry key and value data. -d Nested output format -s Recursive dump <reg key> Registry key to start dump from Valid registry hive names are: HKLM, HKCU, HKCR, HKU, and HKAU (pseudo key representing all users) @RegFile [-scmh] <reg key> RegFile searches for registry string values (REG_SZ and REG_EXPAND_SZ) and identifies file path data. If the file exists on disk, file information, hash, and digital signature details are recorded. -s Recursive dump -c Verify digital signature of discovered files -m Compute MD5 hashes -h Compute SHA256 hashes <reg key> Registry key to start dump from The Attack The Sticky Keys attack is one of those vulnerabilities that is nearly too simple to believe. With a high success rate in most Windows environments, it is not surprising that we still see even some of our more advanced adversaries putting it into play. The original Sticky Keys attack involved replacing the C:\\\\Windows\\\\System32\\\\sethc.exe binary with something that could provide access to the underlying OS, such as cmd.exe. After the switch, all it takes is five presses of the Shift-key from the logon screen and cmd.exe is executed. Since sethc.exe is executed pre-login, the attacker effectively gets a shell without needing to authenticate. This reduces the logging footprint (no compromised account logon necessary!) and gives the added bonus of providing a shell running with LOCAL_SYSTEM privileges. Sticky Keys Attack As new versions of Windows introduced slightly better protection mechanisms for the System32 folder, a new variant emerged \\xe2\\x80\\x93 setting cmd.exe as a debugger to the sethc.exe process. One simple addition to the Windows registry and the attack works just as before, except there is no longer a need to perform file replacement. REG ADD \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\sethc.exe\" /t REG_SZ /v Debugger /d \\xe2\\x80\\x9cC:\\\\windows\\\\system32\\\\cmd.exe\\xe2\\x80\\x9d /f Another common variant takes advantage of a different part of the accessibility suite, Utilman. The attack is identical to the sethc.exe registry debugger modification seen above, except the binary is now Utilman.exe and a simple Windows key + U combination will present a LOCAL_SYSTEM privileged shell. REG ADD \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution tilman.exe\" /t REG_SZ /v Debugger /d \\xe2\\x80\\x9cC:\\\\windows\\\\system32\\\\cmd.exe\\xe2\\x80\\x9d /f An important detail about this vulnerability is the attacker must have prior access to the system. That can be either via an administrator account (necessary to modify HKLM or write files to C:\\\\Windows\\\\System32) or via physical access to the machine, with modifications done via a bootable USB. Hence it is largely used post-compromise in conjunction with RDP as a convenient means for attackers to pivot through the network or to regain access after a password reset. Finding evidence of a Sticky Keys attack may lead the responder to the initial compromise of a system, but it will not be the first malicious activity to occur. Finding Sticky Key Attacks File Replacement One of the clever things that make the Sticky Keys attack difficult to identify is that the file replacement uses a legitimate Windows binary (cmd.exe). Thus, the resultant file will still nicely match your list of known good hashes. The trick of course is to not only compare hashes, but to ensure you are matching the filename with the correct hash. Using the CrowdResponse @DirList plugin, we can pull filenames, hashes, and digital signatures for all files in the C:\\\\Windows\\\\System32 folder. From the CrowdResponse config file: @dirlist \"%windir%\\\\system32\" -h -m -r -s -t -p 2 -z 30 -i \"\\\\.(exe|dll|sys)$\" With the output in hand (or in a backend database), a simple query for well-known sethc.exe or cmd.exe hashes can be constructed to easily identify anomalies. In this example we see cmd.exe and sethc.exe both having the same (cmd.exe) hash. Simple Query Registry Analysis Imagine a tool that dumps all of your favorite registry locations for inspection along with validating any binaries that are referred to within those registry locations. This use case nicely covers the capabilities of CrowdResponse\\xe2\\x80\\x99s new @RegDump and @RegFile plugins. Let\\xe2\\x80\\x99s see how they work when searching for Sticky Key modifications. From the CrowdResponse config file: @RegDump \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\" -s @RegFile \\xe2\\x80\\x9cHKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\xe2\\x80\\x9d -s -c -h -m CrowdResponse Config File String Value Found The @RegDump output clearly shows utilman.exe as an outlier (it was the only one in the list with a \\xe2\\x80\\x9cdebugger\\xe2\\x80\\x9d value) and @RegFile nicely identified the full path in that registry value and provided hash and digital signature information. While this example shows us using the new registry plugins to identify Sticky Key modifications, they are equally useful to collect known hotspots in the registry, such as the infamous \\xe2\\x80\\x9cRun\\xe2\\x80\\x9d keys and other registry-based ASEPs. YARA You may recall that one of the first features of CrowdResponse was the ability to scan memory and disk for arbitrary YARA signatures. YARA\\xe2\\x80\\x99s power lies in its simplicity, and there are some great signatures available to help you find all kinds of evil. Florian Roth at BSK Consulting shared a clever YARA signature for detecting sethc.exe file replacement. The signature looks for well-known strings within sethc.exe, and if they are not found, flags the binary for potential file replacement. A slightly modified version can be used with CrowdResponse: CrowdResponse \\xe2\\x80\\x93o out.xml @yara \\xe2\\x80\\x93m sethc.yar \\xe2\\x80\\x93f sethc.exe \\xe2\\x80\\x93t %windir%\\\\System32 Contents of sethc.yar: Rule Sethc_Replace { strings: $s1 = \"stickykeys\" fullword nocase $s2 = \"stickykeys\" wide nocase $s3 = \"Control_RunDLL access.cpl\" wide $s4 = \"SETHC.EXE\" wide } The command uses the CrowdResponse @YARA module to scan anything named sethc.exe in the \\\\Windows\\\\System32 folder, flagging the binary if specific strings are not present. Scaling Your Efforts It is increasingly necessary to collect and analyze incident response data at scale. Scaling analysis to hundreds or thousands of systems requires a process that can collect the results of a tool like CrowdResponse and get the data into a searchable repository. Once accomplished, you can easily detect the Sticky Keys attack with a search similar to the one seen below. Sticky Keys Attack Search Query In this example an analyst with knowledge of the Sticky Keys vulnerability created a simple query and identified three new compromised systems. Other possible searches include the presence of a \\xe2\\x80\\x9cDebugger\\xe2\\x80\\x9d value and hash comparisons of sethc.exe and utilman.exe. Remediation What can be done about this attack once it is identified? Like many Windows vulnerabilities, the most effective mitigation is to prevent adversaries from achieving administrative privileges. Modifying the necessary keys or files in this attack requires administrative rights. Beyond that, there are some things you can do to make the attack slightly more difficult and potentially easier to detect. Upgrade systems to at least Win7/Win2008R2. This does not remove the vulnerability, but at least makes file replacement slightly more difficult. Turn off sticky keys via the registry. An obvious solution, but unfortunately an attacker with administrative rights can easily re-enable. Enforce Network Level Authentication for RDP connections. Available starting with Windows 7 and Server 2008, NLA requires account authentication before a RDP session is established. NLA could be an elegant fix, except that an adversary with administrative rights can easily disable it. Require IPsec to pre-authenticate RDP sessions. This solution mitigates any advantages Sticky Keys give to an attacker, but requires significant up-front work. Set real-time triggers looking for changes to file system or registry in your security tools. Tune end-point monitoring or HIPS to look for telltale signs of file replacement and registry modification. Want to try it yourself? Download the latest version of CrowdResponse here. A big thank you to Robin Keir and Danny Lungstrom for their work on this release. The CrowdStrike team is committed to developing and delivering free community tools like CrowdResponse, CrowdInspect, Tortilla, and the Heartbleed Scanner. If you have any questions or would like additional information on our services, products, or intelligence offerings, please reach out to us via our contact page. For immediate assistance with an Incident Response, the CrowdStrike Services team can be contacted at 1.855.CROWDIR (276-9347). Tweet Share CrowdStrike Falcon Free Trial Chad Tilbury Chad Tilbury has over 15 years experience investigating computer crimes, specializing in intrusion incident response, digital forensic examinations, and corporate espionage. His extensive law enforcement and international experience stems from working with a broad cross-section of Fortune 500 corporations and government agencies around the world. As faculty with the SANS Institute in digital forensics, Chad is responsible for educating thousands of students each year in advanced forensics and incident response techniques. As Technical Director for CrowdStrike, Chad provides leadership for the services team, driving innovation to support customers in a variety of offerings. Chad is a graduate of the U.S. Air Force Academy and holds a M.S. and B.S. in Computer Science and GCFA, GREM, GCIH, ENCE, and CISSP certifications. Related Content Student Looking At Three Computer Screens With Ransomware Ransomware Increases the Back-to-School Blues As students all over the United States donned their backpacks and packed their lunches to go\\xe2\\x80\\xa6 SPIDER Adversary Image In Front Of Red Code Who is Salty Spider (Sality)? Common Aliases SALTY SIDER is most commonly identified with the botnet it maintains (Sality) and it\\xe2\\x80\\x99s\\xe2\\x80\\xa6 Laptop With Mobile Threat Landscape Cover Image Webcast: A Deep Dive Into the Mobile Malware Report Trends and Recommendations A new webcast, \\xe2\\x80\\x9cThreat Landscape: Mobile Malware,\\xe2\\x80\\x9d delves into the challenges of securing mobile devices in\\xe2\\x80\\xa6 CATEGORIES ENDPOINT PROTECTION(181) EXECUTIVE VIEWPOINT(95) FROM THE FRONT LINES(86) RESEARCH & THREAT INTEL(138) TECH CENTER(56) CONNECT WITH US CrowdStrike Falcon Free Trial FEATURED ARTICLES How to gain visibility into Mobile Devices September 17, 2019 Ransomware Increases the Back-to-School Blues September 17, 2019 How to use Falcon Insight to get Additional USB Device Visibility September 16, 2019 Using Docker to Do Machine Learning at Scale September 13, 2019 SUBSCRIBE Sign up now to receive the latest notifications and updates from CrowdStrike. SIGN UP See CrowdStrike Falcon in Action Detect, prevent, and respond to attacks\\xe2\\x80\\x94 even malware-free intrusions\\xe2\\x80\\x94at any stage, with next-generation endpoint protection. SEE DEMO Hat-tribution to PLA Unit 61486Occupy Central: The Umbrella Revolution and Chinese Intelligence Copyright \\xc2\\xa9 2019 CrowdStrike Privacy Request Info Blog Join Our Team Sitemap Contact Us 1.888.512.8906 English",
+  "ID_list": [
+    "T1015",
+    "TA0003",
+    "TA0004"
+  ],
+  "Name_list": [
+    "At",
+    "Botnet",
+    "Malware",
+    "Tool",
+    "Vulnerabilities"
+  ],
+  "TTP_sentences": {
+    "T1015": [
+      {
+        "sentence": "BLOG Registry Analysis with CrowdResponse August 28, 2014Chad TilburyResearch & Threat Intel Blue The third release of the free CrowdResponse incident response collection tool is now available!",
+        "score": 0.3427
+      },
+      {
+        "sentence": "This time around we include plugins that facilitate the collection of Windows registry data.",
+        "score": 0.3015
+      },
+      {
+        "sentence": "Our inspiration for this release was one of those vulnerabilities that just won\\xe2\\x80\\x99t die \\xe2\\x80\\x93 Windows Sticky Keys.",
+        "score": 0.466
+      },
+      {
+        "sentence": "New Plugins @RegDump [-ds] <reg key> RegDump recursively extracts Windows registry key and value data. -d Nested output format -s Recursive dump <reg key> Registry key to start dump from Valid registry hive names are: HKLM, HKCU, HKCR, HKU, and HKAU (pseudo key representing all users) @RegFile [-scmh] <reg key> RegFile searches for registry string values (REG_SZ and REG_EXPAND_SZ) and identifies file path data.",
+        "score": 0.3506
+      },
+      {
+        "sentence": "If the file exists on disk, file information, hash, and digital signature details are recorded. -s Recursive dump -c Verify digital signature of discovered files -m Compute MD5 hashes -h Compute SHA256 hashes <reg key> Registry key to start dump from The Attack The Sticky Keys attack is one of those vulnerabilities that is nearly too simple to believe.",
+        "score": 0.3939
+      },
+      {
+        "sentence": "With a high success rate in most Windows environments, it is not surprising that we still see even some of our more advanced adversaries putting it into play.",
+        "score": 0.4519
+      },
+      {
+        "sentence": "The original Sticky Keys attack involved replacing the C:\\\\Windows\\\\System32\\\\sethc.exe binary with something that could provide access to the underlying OS, such as cmd.exe.",
+        "score": 0.6331
+      },
+      {
+        "sentence": "After the switch, all it takes is five presses of the Shift-key from the logon screen and cmd.exe is executed.",
+        "score": 0.6616
+      },
+      {
+        "sentence": "Since sethc.exe is executed pre-login, the attacker effectively gets a shell without needing to authenticate.",
+        "score": 0.712
+      },
+      {
+        "sentence": "This reduces the logging footprint (no compromised account logon necessary!) and gives the added bonus of providing a shell running with LOCAL_SYSTEM privileges.",
+        "score": 0.5102
+      },
+      {
+        "sentence": "Sticky Keys Attack As new versions of Windows introduced slightly better protection mechanisms for the System32 folder, a new variant emerged \\xe2\\x80\\x93 setting cmd.exe as a debugger to the sethc.exe process.",
+        "score": 0.6232
+      },
+      {
+        "sentence": "One simple addition to the Windows registry and the attack works just as before, except there is no longer a need to perform file replacement.",
+        "score": 0.3895
+      },
+      {
+        "sentence": "REG ADD \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\sethc.exe\" /t REG_SZ /v Debugger /d \\xe2\\x80\\x9cC:\\\\windows\\\\system32\\\\cmd.exe\\xe2\\x80\\x9d /f Another common variant takes advantage of a different part of the accessibility suite, Utilman.",
+        "score": 0.6148
+      },
+      {
+        "sentence": "The attack is identical to the sethc.exe registry debugger modification seen above, except the binary is now Utilman.exe and a simple Windows key + U combination will present a LOCAL_SYSTEM privileged shell.",
+        "score": 0.6731
+      },
+      {
+        "sentence": "REG ADD \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution tilman.exe\" /t REG_SZ /v Debugger /d \\xe2\\x80\\x9cC:\\\\windows\\\\system32\\\\cmd.exe\\xe2\\x80\\x9d /f An important detail about this vulnerability is the attacker must have prior access to the system.",
+        "score": 0.5402
+      },
+      {
+        "sentence": "That can be either via an administrator account (necessary to modify HKLM or write files to C:\\\\Windows\\\\System32) or via physical access to the machine, with modifications done via a bootable USB.",
+        "score": 0.497
+      },
+      {
+        "sentence": "Hence it is largely used post-compromise in conjunction with RDP as a convenient means for attackers to pivot through the network or to regain access after a password reset.",
+        "score": 0.3993
+      },
+      {
+        "sentence": "Finding evidence of a Sticky Keys attack may lead the responder to the initial compromise of a system, but it will not be the first malicious activity to occur.",
+        "score": 0.3164
+      },
+      {
+        "sentence": "Finding Sticky Key Attacks File Replacement One of the clever things that make the Sticky Keys attack difficult to identify is that the file replacement uses a legitimate Windows binary (cmd.exe).",
+        "score": 0.4265
+      },
+      {
+        "sentence": "From the CrowdResponse config file: @dirlist \"%windir%\\\\system32\" -h -m -r -s -t -p 2 -z 30 -i \"\\\\.(exe|dll|sys)$\" With the output in hand (or in a backend database), a simple query for well-known sethc.exe or cmd.exe hashes can be constructed to easily identify anomalies.",
+        "score": 0.4911
+      },
+      {
+        "sentence": "In this example we see cmd.exe and sethc.exe both having the same (cmd.exe) hash.",
+        "score": 0.4911
+      },
+      {
+        "sentence": "This use case nicely covers the capabilities of CrowdResponse\\xe2\\x80\\x99s new @RegDump and @RegFile plugins.",
+        "score": 0.3383
+      },
+      {
+        "sentence": "Let\\xe2\\x80\\x99s see how they work when searching for Sticky Key modifications.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "While this example shows us using the new registry plugins to identify Sticky Key modifications, they are equally useful to collect known hotspots in the registry, such as the infamous \\xe2\\x80\\x9cRun\\xe2\\x80\\x9d keys and other registry-based ASEPs.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "Florian Roth at BSK Consulting shared a clever YARA signature for detecting sethc.exe file replacement.",
+        "score": 0.4848
+      },
+      {
+        "sentence": "The signature looks for well-known strings within sethc.exe, and if they are not found, flags the binary for potential file replacement.",
+        "score": 0.4556
+      },
+      {
+        "sentence": "Once accomplished, you can easily detect the Sticky Keys attack with a search similar to the one seen below.",
+        "score": 0.3366
+      },
+      {
+        "sentence": "Sticky Keys Attack Search Query In this example an analyst with knowledge of the Sticky Keys vulnerability created a simple query and identified three new compromised systems.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "Other possible searches include the presence of a \\xe2\\x80\\x9cDebugger\\xe2\\x80\\x9d value and hash comparisons of sethc.exe and utilman.exe.",
+        "score": 0.5394
+      },
+      {
+        "sentence": "Like many Windows vulnerabilities, the most effective mitigation is to prevent adversaries from achieving administrative privileges.",
+        "score": 0.3946
+      },
+      {
+        "sentence": "Modifying the necessary keys or files in this attack requires administrative rights.",
+        "score": 0.3858
+      },
+      {
+        "sentence": "Upgrade systems to at least Win7/Win2008R2.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "This does not remove the vulnerability, but at least makes file replacement slightly more difficult.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "Turn off sticky keys via the registry.",
+        "score": 0.428
+      },
+      {
+        "sentence": "An obvious solution, but unfortunately an attacker with administrative rights can easily re-enable.",
+        "score": 0.3604
+      },
+      {
+        "sentence": "Enforce Network Level Authentication for RDP connections.",
+        "score": 0.3425
+      },
+      {
+        "sentence": "Available starting with Windows 7 and Server 2008, NLA requires account authentication before a RDP session is established.",
+        "score": 0.4253
+      },
+      {
+        "sentence": "NLA could be an elegant fix, except that an adversary with administrative rights can easily disable it.",
+        "score": 0.3199
+      },
+      {
+        "sentence": "Require IPsec to pre-authenticate RDP sessions.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "This solution mitigates any advantages Sticky Keys give to an attacker, but requires significant up-front work.",
+        "score": 0.408
+      },
+      {
+        "sentence": "Tune end-point monitoring or HIPS to look for telltale signs of file replacement and registry modification.",
+        "score": 0.3552
+      },
+      {
+        "sentence": "Download the latest version of CrowdResponse here.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "A big thank you to Robin Keir and Danny Lungstrom for their work on this release.",
+        "score": 0.3266
+      },
+      {
+        "sentence": "The CrowdStrike team is committed to developing and delivering free community tools like CrowdResponse, CrowdInspect, Tortilla, and the Heartbleed Scanner.",
+        "score": 0.3009
+      },
+      {
+        "sentence": "Chad is a graduate of the U.S.",
+        "score": 0.36
+      },
+      {
+        "sentence": "Air Force Academy and holds a M.S. and B.S. in Computer Science and GCFA, GREM, GCIH, ENCE, and CISSP certifications.",
+        "score": 0.3151
+      },
+      {
+        "sentence": "Related Content Student Looking At Three Computer Screens With Ransomware Ransomware Increases the Back-to-School Blues As students all over the United States donned their backpacks and packed their lunches to go\\xe2\\x80\\xa6 SPIDER Adversary Image In Front Of Red Code Who is Salty Spider (Sality)?",
+        "score": 0.4955
+      },
+      {
+        "sentence": "SEE DEMO Hat-tribution to PLA Unit 61486Occupy Central: The Umbrella Revolution and Chinese Intelligence Copyright \\xc2\\xa9 2019 CrowdStrike Privacy Request Info Blog Join Our Team Sitemap Contact Us 1.888.512.8906 English",
+        "score": 0.3069
+      }
+    ]
+  }
+}

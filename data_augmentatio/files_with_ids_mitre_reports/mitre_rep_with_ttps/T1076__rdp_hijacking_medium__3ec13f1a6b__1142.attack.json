@@ -1,0 +1,216 @@
+{
+  "original_txt": "RDP hijacking — how to hijack RDS and RemoteApp sessions transparently to move through an organisation\nHow you can very easily use Remote Desktop Services to gain lateral movement through a network, using no external software — and how to defend against it.\nBrief background on RDP session connection\nIf you’ve used Remote Desktop Services before, or Terminal Services if you’re as old as me, you will know there’s a feature where you connect to another user’s session — if you know their password. Did you know you can also hijack a session without the user password? Read on.\nYou can right click a user in Task Manager, use tsadmin.msc, or use the command tscon.exe. It will ask for a password, and bomb if you can’t authenticate as the user:\nSome tricks allow credential-less Session Hijacking\nHere’s the deal. As revealed by by Benjamin Delpy (of Mimikatz) in 2011 and by Alexander Korznikov on Friday, if you run tscon.exe as the SYSTEM user, you can connect to any session without a password. It doesn’t prompt, it just connects you to the user’s desktop. I believe this is due to the way session shadowing was implemented in Microsoft Windows, and it runs throughout the years like this.\nNow, you might be saying ‘If you’re SYSTEM, you’re already root… You can already do anything’.\nYes. Yes you can. You could, for example, dump out the server memory and get user passwords. That’s a long process compared to just running tscon.exe with a session number, and instantly get the desktop of said user — with no obvious trace, or external tools. This isn’t about SYSTEM — this is about what you can do with it very quickly, and quietly. Attackers aren’t interested in playing, they’re interested in what they can do with techniques. This is a very valid technique.\nSo, you have full blown RDP session hijacking, with a single command.\nSome parameters about how far this reaches\n- You can connect to disconnected sessions. So if somebody logged out 3 days ago, you can just connect straight to their session and start using it.\n- It unlocks locked sessions. So if a user is away from their desk, you steal their session AND it unlocks the ‘workstation’ without needing any credentials.\n- It works for the physical console. So you can hijack the screen remotely. It also unlocks the physical console, too.\n- You can connect to ANY session — so if, for example, it’s the Helpdesk, you can connect to it without any authentication. If it’s a Domain Admin, you’re in. Because of the above point (you can connect to disconnected sessions), this makes it an incredibly simple way to laterally move through a network.\n- You can use win32k SYSTEM exploits — there are many — to gain SYSTEM permissions, and then use this feature. Meaning even as a standard user, if patches aren’t applied properly you can use this. Obviously, any route to SYSTEM is valid — e.g. any method to get to a local administrator (there’s a few!).\n- There are no external tools. Nothing to get through application allow listing. No executable is written to disk.\n- Unless you know what to monitor (more on that later), you won’t know this is happening.\n- It works remotely. You can take over sessions on remote computers, even if you’re not logged into that server.\nGaining SYSTEM for tscon.exe\nIf you’re an administrator, you can use a service as Alexander demonstrates:\nIn essence it is really easy, just use the quser command to get the Session ID you want to hijack, and your own SESSIONNAME. Then run tscon with the Session ID for hijack, and your own SESSIONNAME. Your own Session will be replaced with the hijacked session. The service will run as SYSTEM by default — you’re in.\nJust remember to delete the service afterwards, if you’re evil.\nHere’s an example of it in practice on a Windows Server 2012 R2 server:\nhttps://www.youtube.com/watch?v=OgsoIoWmhWw\nOther methods:\n- You can use Scheduled Tasks to gain SYSTEM and run the command. Just schedule the command to run immediately as SYSTEM with interactive privileges.\n- Use can use a variety of methods like Sticky Keys to get SYSTEM, without even needing to log in (in the future). See below.\n- Exploits etc (see above).\nLateral movement\nMost organisations allow Remote Desktop through their internal network, because it’s 2017 and that’s how Windows administration works. Also, RemoteApp uses RDP. Because of this, it’s a fantastic way to move around an organisation’s network — forget passwords, just surf around and abuse other people’s access. You appear in the organisation logs as that user, not yourself.\nHow to backdoor for credential-less hijacking\nRemote Desktop bruteforcing is a major problem. Anybody who has setup a honeypot recently will know within seconds you will be getting hit with failed RDP logins. First they portscan, then thousands of login attempts arrive.\nIt gets worse — I run RDP honeypots, and I see them regularly — when breached they get backdoored using the techniques below.\nFrom research, over 1 in 200 scanned Remote Desktop servers online are already backdoored using these methods. This means that you can session hijack with them right now, without even needing to try to log in or authenticate in any way. That’s bad. Consider Shodan shows there are millions of RDP servers online right now, and the number grows constantly with cloud services etc, this is going to generate… issues.\nRDP backdoor method one — Sticky Keys\nThe concept here is pretty simple — Windows supports a feature called Sticky Keys, which is an Accessibility feature built into the OS and available pre-logon (at the login screen, either via a physical console or via Remote Desktop). It runs as SYSTEM.\nIf you set Sethc.exe (Sticky Keys) to spawn cmd.exe, you have a backdoor you can use if you are locked out of a box — you have SYSTEM access, so you can do anything even without an account. You can do this by either replacing sethc.exe with cmd.exe — this requires a reboot, and physical access to the box — or just set the registry key using the command below.\nREG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\sethc.exe\" /t REG_SZ /v Debugger /d “C:\\windows\\system32\\cmd.exe” /f\nTa-da! The box is now permanently backdoored. Just Remote Desktop in and at the login screen, hit F5 a bunch of times.\nMethod two — Utilman\nIt’s exactly the same as before, just trojan utilman.exe instead. At the login screen, press Windows Key+U, and you get a cmd.exe window as SYSTEM.\nREG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\utilman.exe\" /t REG_SZ /v Debugger /d “C:\\windows\\system32\\cmd.exe” /f\nScanning for backdoor’d RDP servers\nThere is a prebuilt tool here, which works wonders — just spin it up and find servers which already have a SYSTEM level backdoor exposed:\nFrom online scanning, a significant amount of open RDP servers online are already backdoored.\nMimikatz module\nThere is now a Mimikatz module for very easily doing this:\nMitigations\nOS-I had a section about Window Server 2016 here, however after further investigation it appears to also be impacted. After testing this applies to every OS since Windows 2000, including Windows 10 and 2016.\nGroup Policy — I strongly recommend you use Group Policy to log off disconnected sessions, either immediately or soon after the user disconnects. This will NOT be popular in IT environments — but the risk is now completely real that they can very easily — with one built in command — be hijacked more or less silently in the real world. I would also log off idle sessions.\nDon’t expose RDS/RDP to the internet — if you do, I strongly suggest you implement multi-factor authentication. You can use things like Microsoft RD Gateway or Azure Multi-Factor Authentication Server to get very low cost multi-factor authentication. If you’re exposing RDP directly to the internet and somebody creates a local user or your domain users have easy to guess or reused credentials, things will go downhill fast. Trust me — I’ve seen hospitals and others be ransomware’d by RDS servers.\nMonitoring\nIt is surprisingly very difficult to record session hijacking — there is one event log (Microsoft-Windows-TerminalServices-LocalSessionManager/Operational) which records sessions connecting — however it does not appear to differentiate between a normal user connecting and tscon.exe being used — I’ve been through every other event log and can’t see anything which suggests this is happening. This is actually a major issue and I lobby Microsoft to add some kind of Event Log ASAP — it’s a real gap.\nMy suggestion is you alert for other related behaviour using the Event Log and tools like Microsoft OMS, Windows Event Forwarding, Splunk etc. You’re looking for SYSTEM being misused.\nFor example abnormal Service creation and abnormal scheduled task creation should be logged centrally, and recorded against. Additionally, you can look for Mimikatz related activity.\n- k\nFAQ\nQ: This isn’t new or a vulnerability.\nA: Java applets and macros aren’t new. If the technique works, it will get used. This one has flown under the radar — that doesn’t mean it is not valid.\nQ: If you have SYSTEM you already own the box.\nA: Correct. Can you type one command and get the unlocked desktop of a user, even if they went on holiday a week ago, without a log of it? Now you can.",
+  "sanitized_txt": "RDP hijacking — how to hijack RDS and RemoteApp sessions transparently to move through an organisation How you can very easily use Remote Desktop Services to gain lateral movement through a network, using no external software — and how to defend against it.\nBrief background on RDP session connection If you’ve used Remote Desktop Services before, or Terminal Services if you’re as old as me, you will know there’s a feature where you connect to another user’s session — if you know their password. Did you know you can also hijack a session without the user password? Read on.\nYou can right click a user in Task Manager, use tsadmin.msc, or use the command tscon.exe. It will ask for a password, and bomb if you can’t authenticate as the user:\nSome tricks allow credential-less Session Hijacking Here’s the deal. As revealed by by Benjamin Delpy (of Mimikatz) in 2011 and by Alexander Korznikov on Friday, if you run tscon.exe as the SYSTEM user, you can connect to any session without a password. It doesn’t prompt, it just connects you to the user’s desktop. I believe this is due to the way session shadowing was implemented in Microsoft Windows, and it runs throughout the years like this.\nNow, you might be saying ‘If you’re SYSTEM, you’re already root… You can already do anything’.\nYes. Yes you can. You could, for example, dump out the server memory and get user passwords. That’s a long process compared to just running tscon.exe with a session number, and instantly get the desktop of said user — with no obvious trace, or external tools. This isn’t about SYSTEM — this is about what you can do with it very quickly, and quietly. Attackers aren’t interested in playing, they’re interested in what they can do with techniques. This is a very valid technique.\nSo, you have full blown RDP session hijacking, with a single command.\nSome parameters about how far this reaches - You can connect to disconnected sessions. So if somebody logged out 3 days ago, you can just connect straight to their session and start using it.\n- It unlocks locked sessions. So if a user is away from their desk, you steal their session AND it unlocks the ‘workstation’ without needing any credentials.\n- It works for the physical console. So you can hijack the screen remotely. It also unlocks the physical console, too.\n- You can connect to ANY session — so if, for example, it’s the Helpdesk, you can connect to it without any authentication. If it’s a Domain Admin, you’re in. Because of the above point (you can connect to disconnected sessions), this makes it an incredibly simple way to laterally move through a network.\n- You can use win32k SYSTEM exploits — there are many — to gain SYSTEM permissions, and then use this feature. Meaning even as a standard user, if patches aren’t applied properly you can use this. Obviously, any route to SYSTEM is valid — e.g. any method to get to a local administrator (there’s a few!).\n- There are no external tools. Nothing to get through application allow listing. No executable is written to disk.\n- Unless you know what to monitor (more on that later), you won’t know this is happening.\n- It works remotely. You can take over sessions on remote computers, even if you’re not logged into that server.\nGaining SYSTEM for tscon.exe If you’re an administrator, you can use a service as Alexander demonstrates:\nIn essence it is really easy, just use the quser command to get the Session ID you want to hijack, and your own SESSIONNAME. Then run tscon with the Session ID for hijack, and your own SESSIONNAME. Your own Session will be replaced with the hijacked session. The service will run as SYSTEM by default — you’re in.\nJust remember to delete the service afterwards, if you’re evil.\nHere’s an example of it in practice on a Windows Server 2012 R2 server:\nhttps://www.youtube.com/watch?v=OgsoIoWmhWw Other methods:\n- You can use Scheduled Tasks to gain SYSTEM and run the command. Just schedule the command to run immediately as SYSTEM with interactive privileges.\n- Use can use a variety of methods like Sticky Keys to get SYSTEM, without even needing to log in (in the future). See below.\n- Exploits etc (see above).\nLateral movement Most organisations allow Remote Desktop through their internal network, because it’s 2017 and that’s how Windows administration works. Also, RemoteApp uses RDP. Because of this, it’s a fantastic way to move around an organisation’s network — forget passwords, just surf around and abuse other people’s access. You appear in the organisation logs as that user, not yourself.\nHow to backdoor for credential-less hijacking Remote Desktop bruteforcing is a major problem. Anybody who has setup a honeypot recently will know within seconds you will be getting hit with failed RDP logins. First they portscan, then thousands of login attempts arrive.\nIt gets worse — I run RDP honeypots, and I see them regularly — when breached they get backdoored using the techniques below.\nFrom research, over 1 in 200 scanned Remote Desktop servers online are already backdoored using these methods. This means that you can session hijack with them right now, without even needing to try to log in or authenticate in any way. That’s bad. Consider Shodan shows there are millions of RDP servers online right now, and the number grows constantly with cloud services etc, this is going to generate… issues.\nRDP backdoor method one — Sticky Keys The concept here is pretty simple — Windows supports a feature called Sticky Keys, which is an Accessibility feature built into the OS and available pre-logon (at the login screen, either via a physical console or via Remote Desktop). It runs as SYSTEM.\nIf you set Sethc.exe (Sticky Keys) to spawn cmd.exe, you have a backdoor you can use if you are locked out of a box — you have SYSTEM access, so you can do anything even without an account. You can do this by either replacing sethc.exe with cmd.exe — this requires a reboot, and physical access to the box — or just set the registry key using the command below.\nREG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\sethc.exe\" /t REG_SZ /v Debugger /d “C:\\windows\\system32\\cmd.exe” /f Ta-da! The box is now permanently backdoored. Just Remote Desktop in and at the login screen, hit F5 a bunch of times.\nMethod two — Utilman It’s exactly the same as before, just trojan utilman.exe instead. At the login screen, press Windows Key+U, and you get a cmd.exe window as SYSTEM.\nREG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\utilman.exe\" /t REG_SZ /v Debugger /d “C:\\windows\\system32\\cmd.exe” /f Scanning for backdoor’d RDP servers There is a prebuilt tool here, which works wonders — just spin it up and find servers which already have a SYSTEM level backdoor exposed:\nFrom online scanning, a significant amount of open RDP servers online are already backdoored.\nMimikatz module There is now a Mimikatz module for very easily doing this:\nMitigations OS-I had a section about Window Server 2016 here, however after further investigation it appears to also be impacted. After testing this applies to every OS since Windows 2000, including Windows 10 and 2016.\nGroup Policy — I strongly recommend you use Group Policy to log off disconnected sessions, either immediately or soon after the user disconnects. This will NOT be popular in IT environments — but the risk is now completely real that they can very easily — with one built in command — be hijacked more or less silently in the real world. I would also log off idle sessions.\nDon’t expose RDS/RDP to the internet — if you do, I strongly suggest you implement multi-factor authentication. You can use things like Microsoft RD Gateway or Azure Multi-Factor Authentication Server to get very low cost multi-factor authentication. If you’re exposing RDP directly to the internet and somebody creates a local user or your domain users have easy to guess or reused credentials, things will go downhill fast. Trust me — I’ve seen hospitals and others be ransomware’d by RDS servers.\nMonitoring It is surprisingly very difficult to record session hijacking — there is one event log (Microsoft-Windows-TerminalServices-LocalSessionManager/Operational) which records sessions connecting — however it does not appear to differentiate between a normal user connecting and tscon.exe being used — I’ve been through every other event log and can’t see anything which suggests this is happening. This is actually a major issue and I lobby Microsoft to add some kind of Event Log ASAP — it’s a real gap.\nMy suggestion is you alert for other related behaviour using the Event Log and tools like Microsoft OMS, Windows Event Forwarding, Splunk etc. You’re looking for SYSTEM being misused.\nFor example abnormal Service creation and abnormal scheduled task creation should be logged centrally, and recorded against. Additionally, you can look for Mimikatz related activity.\n- k FAQ Q: This isn’t new or a vulnerability.\nA: Java applets and macros aren’t new. If the technique works, it will get used. This one has flown under the radar — that doesn’t mean it is not valid.\nQ: If you have SYSTEM you already own the box.\nA: Correct. Can you type one command and get the unlocked desktop of a user, even if they went on holiday a week ago, without a log of it? Now you can.",
+  "ID_list": [
+    "T1076"
+  ],
+  "Name_list": [
+    "Execution",
+    "Impact",
+    "Lateral Movement"
+  ],
+  "TTP_sentences": {
+    "T1076": [
+      {
+        "sentence": "RDP hijacking — how to hijack RDS and RemoteApp sessions transparently to move through an organisation How you can very easily use Remote Desktop Services to gain lateral movement through a network, using no external software — and how to defend against it.",
+        "score": 0.7284
+      },
+      {
+        "sentence": "Brief background on RDP session connection If you’ve used Remote Desktop Services before, or Terminal Services if you’re as old as me, you will know there’s a feature where you connect to another user’s session — if you know their password.",
+        "score": 0.8863
+      },
+      {
+        "sentence": "Did you know you can also hijack a session without the user password?",
+        "score": 0.4051
+      },
+      {
+        "sentence": "You can right click a user in Task Manager, use tsadmin.msc, or use the command tscon.exe.",
+        "score": 0.4379
+      },
+      {
+        "sentence": "It will ask for a password, and bomb if you can’t authenticate as the user: Some tricks allow credential-less Session Hijacking Here’s the deal.",
+        "score": 0.3764
+      },
+      {
+        "sentence": "As revealed by by Benjamin Delpy (of Mimikatz) in 2011 and by Alexander Korznikov on Friday, if you run tscon.exe as the SYSTEM user, you can connect to any session without a password.",
+        "score": 0.4711
+      },
+      {
+        "sentence": "It doesn’t prompt, it just connects you to the user’s desktop.",
+        "score": 0.5617
+      },
+      {
+        "sentence": "I believe this is due to the way session shadowing was implemented in Microsoft Windows, and it runs throughout the years like this.",
+        "score": 0.4113
+      },
+      {
+        "sentence": "That’s a long process compared to just running tscon.exe with a session number, and instantly get the desktop of said user — with no obvious trace, or external tools.",
+        "score": 0.6125
+      },
+      {
+        "sentence": "So, you have full blown RDP session hijacking, with a single command.",
+        "score": 0.6678
+      },
+      {
+        "sentence": "Some parameters about how far this reaches - You can connect to disconnected sessions.",
+        "score": 0.5132
+      },
+      {
+        "sentence": "So if somebody logged out 3 days ago, you can just connect straight to their session and start using it. - It unlocks locked sessions.",
+        "score": 0.5721
+      },
+      {
+        "sentence": "So if a user is away from their desk, you steal their session AND it unlocks the ‘workstation’ without needing any credentials. - It works for the physical console.",
+        "score": 0.5657
+      },
+      {
+        "sentence": "So you can hijack the screen remotely.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "It also unlocks the physical console, too. - You can connect to ANY session — so if, for example, it’s the Helpdesk, you can connect to it without any authentication.",
+        "score": 0.5392
+      },
+      {
+        "sentence": "If it’s a Domain Admin, you’re in.",
+        "score": 0.3617
+      },
+      {
+        "sentence": "Because of the above point (you can connect to disconnected sessions), this makes it an incredibly simple way to laterally move through a network. - You can use win32k SYSTEM exploits — there are many — to gain SYSTEM permissions, and then use this feature.",
+        "score": 0.3703
+      },
+      {
+        "sentence": "Meaning even as a standard user, if patches aren’t applied properly you can use this.",
+        "score": 0.3072
+      },
+      {
+        "sentence": "Obviously, any route to SYSTEM is valid — e.g. any method to get to a local administrator (there’s a few!). - There are no external tools.",
+        "score": 0.3223
+      },
+      {
+        "sentence": "No executable is written to disk. - Unless you know what to monitor (more on that later), you won’t know this is happening. - It works remotely.",
+        "score": 0.4041
+      },
+      {
+        "sentence": "You can take over sessions on remote computers, even if you’re not logged into that server.",
+        "score": 0.5493
+      },
+      {
+        "sentence": "Then run tscon with the Session ID for hijack, and your own SESSIONNAME.",
+        "score": 0.3177
+      },
+      {
+        "sentence": "Your own Session will be replaced with the hijacked session.",
+        "score": 0.4106
+      },
+      {
+        "sentence": "Just schedule the command to run immediately as SYSTEM with interactive privileges. - Use can use a variety of methods like Sticky Keys to get SYSTEM, without even needing to log in (in the future).",
+        "score": 0.3207
+      },
+      {
+        "sentence": "Lateral movement Most organisations allow Remote Desktop through their internal network, because it’s 2017 and that’s how Windows administration works.",
+        "score": 0.7321
+      },
+      {
+        "sentence": "Also, RemoteApp uses RDP.",
+        "score": 0.8642
+      },
+      {
+        "sentence": "Because of this, it’s a fantastic way to move around an organisation’s network — forget passwords, just surf around and abuse other people’s access.",
+        "score": 0.4265
+      },
+      {
+        "sentence": "How to backdoor for credential-less hijacking Remote Desktop bruteforcing is a major problem.",
+        "score": 0.4971
+      },
+      {
+        "sentence": "Anybody who has setup a honeypot recently will know within seconds you will be getting hit with failed RDP logins.",
+        "score": 0.6594
+      },
+      {
+        "sentence": "It gets worse — I run RDP honeypots, and I see them regularly — when breached they get backdoored using the techniques below.",
+        "score": 0.5846
+      },
+      {
+        "sentence": "From research, over 1 in 200 scanned Remote Desktop servers online are already backdoored using these methods.",
+        "score": 0.6195
+      },
+      {
+        "sentence": "This means that you can session hijack with them right now, without even needing to try to log in or authenticate in any way.",
+        "score": 0.418
+      },
+      {
+        "sentence": "Consider Shodan shows there are millions of RDP servers online right now, and the number grows constantly with cloud services etc, this is going to generate… issues.",
+        "score": 0.693
+      },
+      {
+        "sentence": "RDP backdoor method one — Sticky Keys The concept here is pretty simple — Windows supports a feature called Sticky Keys, which is an Accessibility feature built into the OS and available pre-logon (at the login screen, either via a physical console or via Remote Desktop).",
+        "score": 0.7164
+      },
+      {
+        "sentence": "If you set Sethc.exe (Sticky Keys) to spawn cmd.exe, you have a backdoor you can use if you are locked out of a box — you have SYSTEM access, so you can do anything even without an account.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "You can do this by either replacing sethc.exe with cmd.exe — this requires a reboot, and physical access to the box — or just set the registry key using the command below.",
+        "score": 0.342
+      },
+      {
+        "sentence": "Just Remote Desktop in and at the login screen, hit F5 a bunch of times.",
+        "score": 0.6317
+      },
+      {
+        "sentence": "At the login screen, press Windows Key+U, and you get a cmd.exe window as SYSTEM.",
+        "score": 0.3643
+      },
+      {
+        "sentence": "REG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\utilman.exe\" /t REG_SZ /v Debugger /d “C:\\windows\\system32\\cmd.exe” /f Scanning for backdoor’d RDP servers There is a prebuilt tool here, which works wonders — just spin it up and find servers which already have a SYSTEM level backdoor exposed: From online scanning, a significant amount of open RDP servers online are already backdoored.",
+        "score": 0.6493
+      },
+      {
+        "sentence": "Mimikatz module There is now a Mimikatz module for very easily doing this: Mitigations OS-I had a section about Window Server 2016 here, however after further investigation it appears to also be impacted.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "After testing this applies to every OS since Windows 2000, including Windows 10 and 2016.",
+        "score": 0.3015
+      },
+      {
+        "sentence": "Group Policy — I strongly recommend you use Group Policy to log off disconnected sessions, either immediately or soon after the user disconnects.",
+        "score": 0.488
+      },
+      {
+        "sentence": "I would also log off idle sessions.",
+        "score": 0.5256
+      },
+      {
+        "sentence": "Don’t expose RDS/RDP to the internet — if you do, I strongly suggest you implement multi-factor authentication.",
+        "score": 0.5178
+      },
+      {
+        "sentence": "You can use things like Microsoft RD Gateway or Azure Multi-Factor Authentication Server to get very low cost multi-factor authentication.",
+        "score": 0.3153
+      },
+      {
+        "sentence": "If you’re exposing RDP directly to the internet and somebody creates a local user or your domain users have easy to guess or reused credentials, things will go downhill fast.",
+        "score": 0.6851
+      },
+      {
+        "sentence": "Monitoring It is surprisingly very difficult to record session hijacking — there is one event log (Microsoft-Windows-TerminalServices-LocalSessionManager/Operational) which records sessions connecting — however it does not appear to differentiate between a normal user connecting and tscon.exe being used — I’ve been through every other event log and can’t see anything which suggests this is happening.",
+        "score": 0.5326
+      },
+      {
+        "sentence": "Additionally, you can look for Mimikatz related activity. - k FAQ Q: This isn’t new or a vulnerability.",
+        "score": 0.378
+      },
+      {
+        "sentence": "Can you type one command and get the unlocked desktop of a user, even if they went on holiday a week ago, without a log of it?",
+        "score": 0.4704
+      },
+      {
+        "sentence": "Now you can.",
+        "score": 0.3319
+      }
+    ]
+  }
+}

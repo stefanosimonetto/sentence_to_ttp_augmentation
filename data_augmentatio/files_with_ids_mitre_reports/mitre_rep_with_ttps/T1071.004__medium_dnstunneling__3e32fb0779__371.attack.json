@@ -1,0 +1,248 @@
+{
+  "original_txt": "Learn how easy is to bypass firewalls using DNS tunneling (and also how to block it)\nSee how I played red team/blue team on this simple network security experiment.\nMany tutorials out there explain how to perform DNS tunneling but most of them feel like just a compilation of the commands needed to execute it, with almost no explanation on the networking background.\nWhat’s even worse: No one seems to discuss how to prevent DNS tunneling from happening in your network.\n1. What is it and why would someone use it:\nDNS tunneling is a method used to send data over the DNS protocol, a protocol which has never been intended for data transfer. Because of that, people tend to overlook it and it has become a popular but effective tool in many attacks.\nMost popular use case for DNS tunneling is obtaining free internet through bypassing captive portals at airports, hotels, or if you feel patient the not-so-cheap in flight Wi-Fi.\nOn those shared internet hotspots HTTP traffic is blocked until a username/password is provided, however DNS traffic is generally still allowed in the background: we can encode our HTTP traffic over DNS and voilà, we have internet access.\nThis sounds fun but reality is, browsing anything on DNS tunneling is slow. Like, back to 1998 slow.\nAnother more dangerous use of DNS tunneling would be bypassing network security devices (Firewalls, DLP appliances…) to set up a direct and unmonitored communications channel on an organisation’s network. Possibilities here are endless: Data exfiltration, setting up another penetration testing tool… you name it.\nTo make it even more worrying, there’s a large amount of easy to use DNS tunneling tools out there.\nThere’s even at least one VPN over DNS provider (warning: the design of the website is hideous, making me doubt on the legitimacy of it).\nAs a pentester all this is great, as a network admin not so much.\n2. How does it work:\nFor those who know nothing about DNS but still made it here, I think you deserve a very brief explanation on what DNS does: DNS is like a phonebook for the internet, it translates URLs (human-friendly language, the person’s name), into an IP address (machine-friendly language, the phone number). That helps us remember many websites, same as we can remember many people’s names.\nFor those who know what DNS is I would suggest looking here for a quick refresh on DNS, but in short what you need to know is:\n- A Record: Maps a domain name to an IP address.\nexample.com → 12.34.52.67\n- NS Record (a.k.a. Nameserver record): Maps a domain name to a list of DNS servers, in case our website is hosted in multiple servers.\nexample.com → server1.example.com, server2.example.com\nWho is involved in DNS tunneling?\n- Client. Will launch DNS requests with data in them to a domain.\n- One Domain that we can configure. So DNS servers will redirect its requests to a defined server of our own.\n- Server. This is the defined nameserver which will ultimately receive the DNS requests.\nThe 6 Steps in DNS tunneling (simplified):\n- The client encodes data in a DNS request. The way it does this is by prepending a piece of data in the domain of the request. For example: mypieceofdata.server1.example.com\n- The DNS request goes out to a DNS server.\n- The DNS server finds out the A register of your domain with the IP address of your server.\n- The request for mypieceofdata.server1.example.com is forwarded to the server.\n- The server processes whatever the mypieceofdata was supposed to do. Let’s assume it was an HTTP request.\n- The server replies back over DNS and woop woop, we’ve got signal.\nAs you can imagine with this setup the key to having a fast internet connection is low latency, and when most airlines provide internet connections with around 1 second of ping, you might spend the whole 17 hours 40 minutes between Auckland and Doha to load this article.\n3. Step by step example using iodine:\nFor this example we will use the famous tool iodine. From their website, the name came from this:\nThe name iodine was chosen since it starts with IOD (IP Over DNS) and since iodine has atomic number 53, which happens to be the DNS port number.\n1. Checklist before you start — What you need:\n- A domain that you can configure. Godaddy allows this for their cheap .xyz domains.\n- A device that acts as a server which has a public IP address and if you have it behind a firewall, make sure it is reachable through UDP 53. For this example I am using an old Raspberry Pi but you can run iodine on a plethora of devices. (If you’re reading a specific article like this I assume you know how to run linux on a Raspberry and how to install iodine!).\n- A client with iodine installed. For this I will use my Kali VM but again, you can even run iodine on Windows if you want.\n2. Register a domain on GoDaddy and configure it like this:\nA record called dnsa.exampledomain.xyz → your public IP address\nNS record called t.exampledomain.xyz → dnsa.exampledomain.xyz\n→ Protip: Having a short subdomain name like “t” will allow you to pack in more data in every single request.\nYou can do this with a dynamic IP but you will need to use Dynamid DNS provider and point the NS record to it.\n3. Wait for it to propagate.\nThis could go from 1 to 24 hours.\n4. Run iodine on your server:\n$ sudo iodined -c -f 10.0.0.1 -P password t.exampledomain.xyz\n…If you copy paste that password you deserve whatever happens due to it.\n5. Verify that it works:\nAt this point you can verify your DNS setup on the following tool from the iodine team: https://code.kryo.se/iodine/check-it/\nIodine must be running on the server and be reachable from the internet!\nIt is also a good moment to check what is your client’s public IP address and note it down, that will help verify later that DNS tunneling works.\n6. Run iodine on the client and establish the DNS tunnel:\nOn the client:\nroot@kali:~#iodine -I 50 -f -P password t.exampledomain.xyz.\nA new network interface should appear in your client, and you should be able to ping the server’s tunnel IP address we configured before.\nNow, at this point you could set up a route for your traffic to be sent to 10.0.0.1 and you’d be good to go. However DNS traffic is not encrypted so an extra step we can take is…\n7. Establish an SSH tunnel over the DNS tunnel:\nOn the client establish an SSH tunnel against the server:\nssh -D 8080-N 10.0.0.1\n-N makes it not execute a remote command, -D creates a socket to listen on this port and whenever a connection is done to it it forwards traffic over the SSH tunnel.\n8. Change proxy settings accordingly on your browser:\n9. Enjoy your slow, yet free, internet access.\nGood way to test it is checking that your public IP address on the client is now the same as on the server… Congratulations!\n4. Blocking DNS tunneling on your network (with an example!):\nNow this is the bit where I’ve struggled to find more information on.\nThere’s many approaches you can follow to block DNS tunneling, which one to choose will depend on your current deployment:\n1. Detection of known malicious domains:\nThis is done by analyzing the DNS queries from your network and if one of them is for a known bad domain, it is dropped.\nThe easiest way to implement this is by using a public DNS resolver that provides a layer of security. Free examples of this are Cloudfare (just check you’re not using 1.1.1.1 in your network…), or OpenDNS (free for home use). Enterprise solutions include some of the Infoblox products or Cisco Umbrella to name the most common ones.\nAlternatively some firewalls provide URL security and might be able to block known domains.\nFor this method you are relying on a blacklist of known malicious domains, so if you are victim of a targeted or small scale attack, chances are this is going to be useless.\n2. Traffic Analysis:\nMore of a reactive measure, however if we have an idea of the average DNS requests in your network or hosts you should be able to detect when there is a sudden increase in DNS activity.\nAgain, there are many tools you can use for this. From firewalls that have application visibility (most NGFW should do this), network flow analysis tools, or dedicated DNS security appliances like the ones from Infoblox.\n3. Intrusion Prevention Systems:\nSome IPS systems such as Snort will include detect packets unique to iodine:\n# alert udp $EXTERNAL_NET 53 -> $HOME_NET any (msg:”APP-DETECT iodine dns tunnelling handshake server ACK”; flow:to_client; byte_test:1,&,0x80,2; content:”|00 01 00 01 00|”; depth:5; offset:4; content:”v”; within:1; distance:4; content:”VACK”; within:200; fast_pattern; metadata:service dns; reference:url,code.kryo.se/iodine/README.html; classtype:policy-violation; sid:27046; rev:2;)\nSome other more generic rules will detect long URLs in DNS requests, these rules that can easily be bypassed by shortening the payload in every request (although slowing down the tunnel speed).\nBlocking DNS Tunnel — An example:\nDuring my Iodine deployment I was sending all traffic through a Palo Alto Networks firewall in my environment. The plan was to play first the attacker role and later the defender.\nFirst I configured a basic URL filtering rule to block social network websites:\nIn seconds I established my DNS tunnel… and it worked! Soon I was loading Facebook.\nI was surprised on how easy it was to bypass the URL filtering engine, and then I proceeded to switch teams and see how could I block this.\nThe starting point would be traffic analysis, I expected a big amount of DNS traffic and then some convoluted solution to block sudden changes in traffic patterns.\nHowever this is what I found to my surprise:\nThe firewall was detecting that I was sending TCP traffic over DNS. But how?\nClicking on the application details I could see the following:\nIt looks like the application detection engine detects traffic from most DNS tunneling tools, in a similar way as we saw that Snort has a couple of rules to detect Iodine traffic, and puts them under the same category.\nGrouping all these types of apps into one application group makes it more easy to manage than having a single Snort alert.\nLet’s create a rule now that will block these type of applications:\nEasy! Let’s see if it works:\nFirst we run Iodine…\nJob’s done! Our network should now be secured against most DNS tunneling attacks.\nTo simulate a true real world scenario I should switch sides again and try to bypass again this firewall but being honest, that would be way more complex.\nRemember to always test your defenses, at least before this dude does:\nAnything you didn’t like? Please tell me why!",
+  "sanitized_txt": "Learn how easy is to bypass firewalls using DNS tunneling (and also how to block it) See how I played red team/blue team on this simple network security experiment.\nMany tutorials out there explain how to perform DNS tunneling but most of them feel like just a compilation of the commands needed to execute it, with almost no explanation on the networking background.\nWhat’s even worse: No one seems to discuss how to prevent DNS tunneling from happening in your network.\n1. What is it and why would someone use it:\nDNS tunneling is a method used to send data over the DNS protocol, a protocol which has never been intended for data transfer. Because of that, people tend to overlook it and it has become a popular but effective tool in many attacks.\nMost popular use case for DNS tunneling is obtaining free internet through bypassing captive portals at airports, hotels, or if you feel patient the not-so-cheap in flight Wi-Fi.\nOn those shared internet hotspots HTTP traffic is blocked until a username/password is provided, however DNS traffic is generally still allowed in the background: we can encode our HTTP traffic over DNS and voilà, we have internet access.\nThis sounds fun but reality is, browsing anything on DNS tunneling is slow. Like, back to 1998 slow.\nAnother more dangerous use of DNS tunneling would be bypassing network security devices (Firewalls, DLP appliances…) to set up a direct and unmonitored communications channel on an organisation’s network. Possibilities here are endless: Data exfiltration, setting up another penetration testing tool… you name it.\nTo make it even more worrying, there’s a large amount of easy to use DNS tunneling tools out there.\nThere’s even at least one VPN over DNS provider (warning: the design of the website is hideous, making me doubt on the legitimacy of it).\nAs a pentester all this is great, as a network admin not so much.\n2. How does it work:\nFor those who know nothing about DNS but still made it here, I think you deserve a very brief explanation on what DNS does: DNS is like a phonebook for the internet, it translates URLs (human-friendly language, the person’s name), into an IP address (machine-friendly language, the phone number). That helps us remember many websites, same as we can remember many people’s names.\nFor those who know what DNS is I would suggest looking here for a quick refresh on DNS, but in short what you need to know is:\n- A Record: Maps a domain name to an IP address.\nexample.com → 12.34.52.67 - NS Record (a.k.a. Nameserver record): Maps a domain name to a list of DNS servers, in case our website is hosted in multiple servers.\nexample.com → server1.example.com, server2.example.com Who is involved in DNS tunneling?\n- Client. Will launch DNS requests with data in them to a domain.\n- One Domain that we can configure. So DNS servers will redirect its requests to a defined server of our own.\n- Server. This is the defined nameserver which will ultimately receive the DNS requests.\nThe 6 Steps in DNS tunneling (simplified):\n- The client encodes data in a DNS request. The way it does this is by prepending a piece of data in the domain of the request. For example: mypieceofdata.server1.example.com - The DNS request goes out to a DNS server.\n- The DNS server finds out the A register of your domain with the IP address of your server.\n- The request for mypieceofdata.server1.example.com is forwarded to the server.\n- The server processes whatever the mypieceofdata was supposed to do. Let’s assume it was an HTTP request.\n- The server replies back over DNS and woop woop, we’ve got signal.\nAs you can imagine with this setup the key to having a fast internet connection is low latency, and when most airlines provide internet connections with around 1 second of ping, you might spend the whole 17 hours 40 minutes between Auckland and Doha to load this article.\n3. Step by step example using iodine:\nFor this example we will use the famous tool iodine. From their website, the name came from this:\nThe name iodine was chosen since it starts with IOD (IP Over DNS) and since iodine has atomic number 53, which happens to be the DNS port number.\n1. Checklist before you start — What you need:\n- A domain that you can configure. Godaddy allows this for their cheap .xyz domains.\n- A device that acts as a server which has a public IP address and if you have it behind a firewall, make sure it is reachable through UDP 53. For this example I am using an old Raspberry Pi but you can run iodine on a plethora of devices. (If you’re reading a specific article like this I assume you know how to run linux on a Raspberry and how to install iodine!).\n- A client with iodine installed. For this I will use my Kali VM but again, you can even run iodine on Windows if you want.\n2. Register a domain on GoDaddy and configure it like this:\nA record called dnsa.exampledomain.xyz → your public IP address NS record called t.exampledomain.xyz → dnsa.exampledomain.xyz → Protip: Having a short subdomain name like “t” will allow you to pack in more data in every single request.\nYou can do this with a dynamic IP but you will need to use Dynamid DNS provider and point the NS record to it.\n3. Wait for it to propagate.\nThis could go from 1 to 24 hours.\n4. Run iodine on your server:\n$ sudo iodined -c -f 10.0.0.1 -P password t.exampledomain.xyz …If you copy paste that password you deserve whatever happens due to it.\n5. Verify that it works:\nAt this point you can verify your DNS setup on the following tool from the iodine team: https://code.kryo.se/iodine/check-it/ Iodine must be running on the server and be reachable from the internet!\nIt is also a good moment to check what is your client’s public IP address and note it down, that will help verify later that DNS tunneling works.\n6. Run iodine on the client and establish the DNS tunnel:\nOn the client:\nroot@kali:~#iodine -I 50 -f -P password t.exampledomain.xyz.\nA new network interface should appear in your client, and you should be able to ping the server’s tunnel IP address we configured before.\nNow, at this point you could set up a route for your traffic to be sent to 10.0.0.1 and you’d be good to go. However DNS traffic is not encrypted so an extra step we can take is… 7. Establish an SSH tunnel over the DNS tunnel:\nOn the client establish an SSH tunnel against the server:\nssh -D 8080-N 10.0.0.1 -N makes it not execute a remote command, -D creates a socket to listen on this port and whenever a connection is done to it it forwards traffic over the SSH tunnel.\n8. Change proxy settings accordingly on your browser:\n9. Enjoy your slow, yet free, internet access.\nGood way to test it is checking that your public IP address on the client is now the same as on the server… Congratulations!\n4. Blocking DNS tunneling on your network (with an example!):\nNow this is the bit where I’ve struggled to find more information on.\nThere’s many approaches you can follow to block DNS tunneling, which one to choose will depend on your current deployment:\n1. Detection of known malicious domains:\nThis is done by analyzing the DNS queries from your network and if one of them is for a known bad domain, it is dropped.\nThe easiest way to implement this is by using a public DNS resolver that provides a layer of security. Free examples of this are Cloudfare (just check you’re not using 1.1.1.1 in your network…), or OpenDNS (free for home use). Enterprise solutions include some of the Infoblox products or Cisco Umbrella to name the most common ones.\nAlternatively some firewalls provide URL security and might be able to block known domains.\nFor this method you are relying on a blacklist of known malicious domains, so if you are victim of a targeted or small scale attack, chances are this is going to be useless.\n2. Traffic Analysis:\nMore of a reactive measure, however if we have an idea of the average DNS requests in your network or hosts you should be able to detect when there is a sudden increase in DNS activity.\nAgain, there are many tools you can use for this. From firewalls that have application visibility (most NGFW should do this), network flow analysis tools, or dedicated DNS security appliances like the ones from Infoblox.\n3. Intrusion Prevention Systems:\nSome IPS systems such as Snort will include detect packets unique to iodine:\n# alert udp $EXTERNAL_NET 53 -> $HOME_NET any (msg:”APP-DETECT iodine dns tunnelling handshake server ACK”; flow:to_client; byte_test:1,&,0x80,2; content:”|00 01 00 01 00|”; depth:5; offset:4; content:”v”; within:1; distance:4; content:”VACK”; within:200; fast_pattern; metadata:service dns; reference:url,code.kryo.se/iodine/README.html; classtype:policy-violation; sid:27046; rev:2;) Some other more generic rules will detect long URLs in DNS requests, these rules that can easily be bypassed by shortening the payload in every request (although slowing down the tunnel speed).\nBlocking DNS Tunnel — An example:\nDuring my Iodine deployment I was sending all traffic through a Palo Alto Networks firewall in my environment. The plan was to play first the attacker role and later the defender.\nFirst I configured a basic URL filtering rule to block social network websites:\nIn seconds I established my DNS tunnel… and it worked! Soon I was loading Facebook.\nI was surprised on how easy it was to bypass the URL filtering engine, and then I proceeded to switch teams and see how could I block this.\nThe starting point would be traffic analysis, I expected a big amount of DNS traffic and then some convoluted solution to block sudden changes in traffic patterns.\nHowever this is what I found to my surprise:\nThe firewall was detecting that I was sending TCP traffic over DNS. But how?\nClicking on the application details I could see the following:\nIt looks like the application detection engine detects traffic from most DNS tunneling tools, in a similar way as we saw that Snort has a couple of rules to detect Iodine traffic, and puts them under the same category.\nGrouping all these types of apps into one application group makes it more easy to manage than having a single Snort alert.\nLet’s create a rule now that will block these type of applications:\nEasy! Let’s see if it works:\nFirst we run Iodine… Job’s done! Our network should now be secured against most DNS tunneling attacks.\nTo simulate a true real world scenario I should switch sides again and try to bypass again this firewall but being honest, that would be way more complex.\nRemember to always test your defenses, at least before this dude does:\nAnything you didn’t like? Please tell me why!",
+  "ID_list": [
+    "T1071.004"
+  ],
+  "Name_list": [
+    "Exfiltration",
+    "Proxy",
+    "Sudo"
+  ],
+  "TTP_sentences": {
+    "T1071.004": [
+      {
+        "sentence": "Learn how easy is to bypass firewalls using DNS tunneling (and also how to block it) See how I played red team/blue team on this simple network security experiment.",
+        "score": 0.5114
+      },
+      {
+        "sentence": "Many tutorials out there explain how to perform DNS tunneling but most of them feel like just a compilation of the commands needed to execute it, with almost no explanation on the networking background.",
+        "score": 0.6931
+      },
+      {
+        "sentence": "What’s even worse: No one seems to discuss how to prevent DNS tunneling from happening in your network.",
+        "score": 0.5697
+      },
+      {
+        "sentence": "What is it and why would someone use it: DNS tunneling is a method used to send data over the DNS protocol, a protocol which has never been intended for data transfer.",
+        "score": 0.6961
+      },
+      {
+        "sentence": "Most popular use case for DNS tunneling is obtaining free internet through bypassing captive portals at airports, hotels, or if you feel patient the not-so-cheap in flight Wi-Fi.",
+        "score": 0.514
+      },
+      {
+        "sentence": "On those shared internet hotspots HTTP traffic is blocked until a username/password is provided, however DNS traffic is generally still allowed in the background: we can encode our HTTP traffic over DNS and voilà, we have internet access.",
+        "score": 0.6772
+      },
+      {
+        "sentence": "This sounds fun but reality is, browsing anything on DNS tunneling is slow.",
+        "score": 0.6219
+      },
+      {
+        "sentence": "Like, back to 1998 slow.",
+        "score": 0.3491
+      },
+      {
+        "sentence": "Another more dangerous use of DNS tunneling would be bypassing network security devices (Firewalls, DLP appliances…) to set up a direct and unmonitored communications channel on an organisation’s network.",
+        "score": 0.6207
+      },
+      {
+        "sentence": "To make it even more worrying, there’s a large amount of easy to use DNS tunneling tools out there.",
+        "score": 0.6353
+      },
+      {
+        "sentence": "There’s even at least one VPN over DNS provider (warning: the design of the website is hideous, making me doubt on the legitimacy of it).",
+        "score": 0.5037
+      },
+      {
+        "sentence": "How does it work: For those who know nothing about DNS but still made it here, I think you deserve a very brief explanation on what DNS does: DNS is like a phonebook for the internet, it translates URLs (human-friendly language, the person’s name), into an IP address (machine-friendly language, the phone number).",
+        "score": 0.673
+      },
+      {
+        "sentence": "That helps us remember many websites, same as we can remember many people’s names.",
+        "score": 0.3329
+      },
+      {
+        "sentence": "For those who know what DNS is I would suggest looking here for a quick refresh on DNS, but in short what you need to know is: - A Record: Maps a domain name to an IP address. example.com → 12.34.52.67 - NS Record (a.k.a.",
+        "score": 0.6477
+      },
+      {
+        "sentence": "Nameserver record): Maps a domain name to a list of DNS servers, in case our website is hosted in multiple servers. example.com → server1.example.com, server2.example.com Who is involved in DNS tunneling? - Client.",
+        "score": 0.68
+      },
+      {
+        "sentence": "Will launch DNS requests with data in them to a domain. - One Domain that we can configure.",
+        "score": 0.7339
+      },
+      {
+        "sentence": "So DNS servers will redirect its requests to a defined server of our own. - Server.",
+        "score": 0.6556
+      },
+      {
+        "sentence": "This is the defined nameserver which will ultimately receive the DNS requests.",
+        "score": 0.6206
+      },
+      {
+        "sentence": "The 6 Steps in DNS tunneling (simplified): - The client encodes data in a DNS request.",
+        "score": 0.7748
+      },
+      {
+        "sentence": "The way it does this is by prepending a piece of data in the domain of the request.",
+        "score": 0.6131
+      },
+      {
+        "sentence": "For example: mypieceofdata.server1.example.com - The DNS request goes out to a DNS server. - The DNS server finds out the A register of your domain with the IP address of your server. - The request for mypieceofdata.server1.example.com is forwarded to the server. - The server processes whatever the mypieceofdata was supposed to do.",
+        "score": 0.7206
+      },
+      {
+        "sentence": "Let’s assume it was an HTTP request. - The server replies back over DNS and woop woop, we’ve got signal.",
+        "score": 0.7316
+      },
+      {
+        "sentence": "As you can imagine with this setup the key to having a fast internet connection is low latency, and when most airlines provide internet connections with around 1 second of ping, you might spend the whole 17 hours 40 minutes between Auckland and Doha to load this article.",
+        "score": 0.4968
+      },
+      {
+        "sentence": "From their website, the name came from this: The name iodine was chosen since it starts with IOD (IP Over DNS) and since iodine has atomic number 53, which happens to be the DNS port number.",
+        "score": 0.5715
+      },
+      {
+        "sentence": "Godaddy allows this for their cheap .xyz domains. - A device that acts as a server which has a public IP address and if you have it behind a firewall, make sure it is reachable through UDP 53.",
+        "score": 0.4964
+      },
+      {
+        "sentence": "For this example I am using an old Raspberry Pi but you can run iodine on a plethora of devices. (If you’re reading a specific article like this I assume you know how to run linux on a Raspberry and how to install iodine!). - A client with iodine installed.",
+        "score": 0.3006
+      },
+      {
+        "sentence": "For this I will use my Kali VM but again, you can even run iodine on Windows if you want.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "Register a domain on GoDaddy and configure it like this: A record called dnsa.exampledomain.xyz → your public IP address NS record called t.exampledomain.xyz → dnsa.exampledomain.xyz → Protip: Having a short subdomain name like “t” will allow you to pack in more data in every single request.",
+        "score": 0.578
+      },
+      {
+        "sentence": "You can do this with a dynamic IP but you will need to use Dynamid DNS provider and point the NS record to it.",
+        "score": 0.5103
+      },
+      {
+        "sentence": "Wait for it to propagate.",
+        "score": 0.3122
+      },
+      {
+        "sentence": "Run iodine on your server: $ sudo iodined -c -f 10.0.0.1 -P password t.exampledomain.xyz …If you copy paste that password you deserve whatever happens due to it.",
+        "score": 0.3295
+      },
+      {
+        "sentence": "Verify that it works: At this point you can verify your DNS setup on the following tool from the iodine team: https://code.kryo.se/iodine/check-it/ Iodine must be running on the server and be reachable from the internet!",
+        "score": 0.4813
+      },
+      {
+        "sentence": "It is also a good moment to check what is your client’s public IP address and note it down, that will help verify later that DNS tunneling works.",
+        "score": 0.4633
+      },
+      {
+        "sentence": "Run iodine on the client and establish the DNS tunnel: On the client: root@kali:~#iodine -I 50 -f -P password t.exampledomain.xyz.",
+        "score": 0.4628
+      },
+      {
+        "sentence": "A new network interface should appear in your client, and you should be able to ping the server’s tunnel IP address we configured before.",
+        "score": 0.4313
+      },
+      {
+        "sentence": "Now, at this point you could set up a route for your traffic to be sent to 10.0.0.1 and you’d be good to go.",
+        "score": 0.4715
+      },
+      {
+        "sentence": "However DNS traffic is not encrypted so an extra step we can take is… 7.",
+        "score": 0.6549
+      },
+      {
+        "sentence": "Establish an SSH tunnel over the DNS tunnel: On the client establish an SSH tunnel against the server: ssh -D 8080-N 10.0.0.1 -N makes it not execute a remote command, -D creates a socket to listen on this port and whenever a connection is done to it it forwards traffic over the SSH tunnel.",
+        "score": 0.4828
+      },
+      {
+        "sentence": "Change proxy settings accordingly on your browser: 9.",
+        "score": 0.3465
+      },
+      {
+        "sentence": "Enjoy your slow, yet free, internet access.",
+        "score": 0.3557
+      },
+      {
+        "sentence": "Good way to test it is checking that your public IP address on the client is now the same as on the server… Congratulations!",
+        "score": 0.3623
+      },
+      {
+        "sentence": "Blocking DNS tunneling on your network (with an example!): Now this is the bit where I’ve struggled to find more information on.",
+        "score": 0.5741
+      },
+      {
+        "sentence": "There’s many approaches you can follow to block DNS tunneling, which one to choose will depend on your current deployment: 1.",
+        "score": 0.5056
+      },
+      {
+        "sentence": "Detection of known malicious domains: This is done by analyzing the DNS queries from your network and if one of them is for a known bad domain, it is dropped.",
+        "score": 0.7049
+      },
+      {
+        "sentence": "The easiest way to implement this is by using a public DNS resolver that provides a layer of security.",
+        "score": 0.5563
+      },
+      {
+        "sentence": "Free examples of this are Cloudfare (just check you’re not using 1.1.1.1 in your network…), or OpenDNS (free for home use).",
+        "score": 0.4317
+      },
+      {
+        "sentence": "Alternatively some firewalls provide URL security and might be able to block known domains.",
+        "score": 0.44
+      },
+      {
+        "sentence": "For this method you are relying on a blacklist of known malicious domains, so if you are victim of a targeted or small scale attack, chances are this is going to be useless.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "Traffic Analysis: More of a reactive measure, however if we have an idea of the average DNS requests in your network or hosts you should be able to detect when there is a sudden increase in DNS activity.",
+        "score": 0.6873
+      },
+      {
+        "sentence": "From firewalls that have application visibility (most NGFW should do this), network flow analysis tools, or dedicated DNS security appliances like the ones from Infoblox.",
+        "score": 0.373
+      },
+      {
+        "sentence": "Blocking DNS Tunnel — An example: During my Iodine deployment I was sending all traffic through a Palo Alto Networks firewall in my environment.",
+        "score": 0.4791
+      },
+      {
+        "sentence": "First I configured a basic URL filtering rule to block social network websites: In seconds I established my DNS tunnel… and it worked!",
+        "score": 0.5097
+      },
+      {
+        "sentence": "I was surprised on how easy it was to bypass the URL filtering engine, and then I proceeded to switch teams and see how could I block this.",
+        "score": 0.3866
+      },
+      {
+        "sentence": "The starting point would be traffic analysis, I expected a big amount of DNS traffic and then some convoluted solution to block sudden changes in traffic patterns.",
+        "score": 0.6471
+      },
+      {
+        "sentence": "However this is what I found to my surprise: The firewall was detecting that I was sending TCP traffic over DNS.",
+        "score": 0.6944
+      },
+      {
+        "sentence": "Clicking on the application details I could see the following: It looks like the application detection engine detects traffic from most DNS tunneling tools, in a similar way as we saw that Snort has a couple of rules to detect Iodine traffic, and puts them under the same category.",
+        "score": 0.5873
+      },
+      {
+        "sentence": "Our network should now be secured against most DNS tunneling attacks.",
+        "score": 0.507
+      },
+      {
+        "sentence": "To simulate a true real world scenario I should switch sides again and try to bypass again this firewall but being honest, that would be way more complex.",
+        "score": 0.3029
+      }
+    ]
+  }
+}

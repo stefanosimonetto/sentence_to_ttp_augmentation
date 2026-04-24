@@ -1,0 +1,1894 @@
+{
+  "original_txt": "For a while, ESET researchers have been tracking the activities of the Winnti Group, active since at least 2012 and responsible for high-profile supply-chain attacks against\nthe video game and software industry\n. Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations. This backdoor bears multiple similarities to the\nPortReuse\nbackdoor, another tool used by the Winnti Group that was first\ndocumented by ESET in October 2019\n, such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.\nEarlier this year, we received a sample of this new backdoor called\nskip-2.0\nby its authors and part of the Winnti Group’s arsenal. This backdoor targets MSSQL Server 11 and 12, allowing the attacker to connect stealthily to any MSSQL account by using a magic password – while automatically hiding these connections from the logs. Such a backdoor could allow an attacker to stealthily copy, modify or delete database content. This could be used, for example, to manipulate in-game currencies for financial gain. In-game currency database manipulations by Winnti operators have\nalready been reported\n. To the best of our knowledge,\nskip-2.0\nis the first MSSQL Server backdoor to be documented publicly. Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to\nCensys'\ns data.\nWe recently published a\nwhite paper\nupdating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called\nPortReuse.\nIt uses an identical packer to that used with the payload embedded in compromised video games\nuncovered by ESET in March 2019\n. The VMProtected launcher that drops the\nPortReuse\nbackdoor was also found being used to launch recent\nShadowPad\nversions. In that context, we were able to find a new tool called\nskip.2-0\nby its developer. It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset. This leads us to ascribe\nskip-2.0\nto that toolset also.\nThis article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of\nskip.2-0\nwith the Winnti Group's known arsenal – in particular, with the\nPortReuse\nbackdoor and\nShadowPad\n. A note on the reasons why we chose the “Winnti Group” naming can be found on our\nwhite paper\n.\nVMProtected launcher\nWe found\nskip-2.0\nwhile looking for VMProtected launchers, for which the payload is usually either\nPortReuse\nor\nShadowPad\n.\nEmbedded payload\nAs with the encrypted\nPortReuse\nand\nShadowPad\npayloads\n, skip-2.0\nis embedded in the VMProtected launcher's overlay, as shown in Figure 1:\nFigure 1. VMProtected launcher's headers. The payload is embedded in the PE overlay.\nEncryption\nThe payload encryption is identical to that used in the other VMProtected launchers. It is RC5-encrypted with a key derived from the\nVolumeID\nand the string\nf@Ukd!rCto R$. –\nas described in our\nprevious white paper on the Winnti Group arsenal.\nPersistence\nAs in the case of\nPortReuse\nand\nShadowPad\n, the launcher probably persists by exploiting a\nDLL hijacking vulnerability\nby being installed at\nC:\\Windows\\System32\\TSVIPSrv.DLL\n. This results in the DLL being loaded by the standard Windows\nSessionEnv\nservice at system startup.\nWinnti Group's custom packer\nOnce decrypted the embedded payload is actually Winnti Group's custom packer. This packer is the same shellcode that was documented in our\nprevious article\nand\nwhite paper\n. It is used to pack the\nPortReuse\nbackdoor as well as the payload embedded in the compromised video games.\nPacker configuration\nAs described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL). The payload's packer configuration is shown in Table 1.\nParent SHA-1\nPayload SHA-1\nRC4 key\nFilename\nLaunch type\n9aafe81d07b3e5bb282608f0a2a4656eb485b7c9\na2571946ab181657eb825cde07188e8bcd689575\n163716559\nInner-Loader.dll\n2\nTable 1. Payload's packer configuration\nOne can see from the packer configuration that the payload is called\nInner-Loader\n.\nInner-Loader\nis the name of an injector that is the part of the Winnti Group’s arsenal used to inject the\nPortReuse\nbackdoor into processes listening on a particular port, as described in\nour previous publication\n. Beyond that identical name, by analyzing this payload it appears that it is another variant of the\nInner-Loader\ninjector.\nInner-Loader injector\nThis variant of\nInner-Loader\n, instead of looking for a process listening on a particular port, as in the case when injecting the\nPortReuse\nbackdoor, looks for a process called\nsqlserv.exe\n, which is the conventional process name of MSSQL Server. If found,\nInner-Loader\nthen injects a payload into this process. This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.\nParent SHA-1\nPayload SHA-1\nRC4 key\nFilename\nLaunch type\na2571946ab181657eb825cde07188e8bcd689575\n60b9428d00be5ce562ff3d888441220290a6dac7\n923567961\nskip-2.0.dll\n2\nTable 2. Packer configuration of the payload embedded in Inner-Loader\nThe original filename of this injected payload is\nskip-2.0.dll\n.\nskip-2.0\nAfter having been injected and launched by\nInner-Loader\n,\nskip-2.\n0 first checks whether it is executing within an\nsqlserv.exe\nprocess and if so, retrieves a handle to\nsqllang.dll\n, which is loaded by\nsqlserv.exe\n. It then proceeds to find and hook multiple functions from that DLL. Figure 2 depicts the\nskip-2.0\nchain of compromise.\nFigure 2. skip-2.0 unpacking and injection\nHooking sqllang.dll\nThe hooking procedure used by\nskip-2.0\nis very similar to the one used by\nNetAgent\n, the\nPortReuse\nmodule responsible for installing the networking hook. This hooking library is based on the\ndistorm\nopen source disassembler that is used by multiple open source hooking frameworks. In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked. One can see in Figure 3 that the hooking procedure used by\nNetAgent\nand\nskip-2.0\nare almost identical.\nFigure 3. Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures\nThere is one notable difference, which is the fact that the hooking function from\nskip-2.0\ntakes the address of the hook to be installed as an argument, while for\nNetAgent\n, the address of the hook to install is hardcoded. This is due to the fact that\nskip-2.0\nhas to hook multiple functions in\nsqllang.dll\nto operate properly, while\nNetAgent\ntargets only a single function.\nTo locate each\nsqllang.dll\nfunction to be hooked,\nskip-2.0\nfirst retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers. Then an array of bytes to be matched within\nsqllang.dll\nis initialized as shown in Figure 4. Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.\nFigure 4. Hex-Rays output of the procedure initializing the byte array to match in\nsqllang.dll\nThe success of the hook installation is then logged in cleartext in a log file located at the hardcoded path\nC:\\Windows\\Temp\\TS_2CE1.tmp\nand shown in Figure 5.\nFigure 5. Log generated during hooks installation\nShould the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.\nMatching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows\nskip-2.0\nto be more resilient to MSSQL updates and to potentially target multiple\nsqllang.dll\nupdates.\nOne password to rule them all\nThe functions targeted by\nskip-2.0\nare related to authentication and event logging. The targeted functions include:\nCPwdPolicyManager::ValidatePwdForLogin\nCSECAuthenticate::AuthenticateLoginIdentity\nReportLoginSuccess\nIssueLoginSuccessReport\nFExecuteLogonTriggers\nXeSqlPkg::sql_statement_completed::Publish\nXeSqlPkg::sql_batch_completed::Publish\nSecAuditPkg::audit_event::Publish\nXeSqlPkg::login::Publish\nXeSqlPkg::ual_instrument_called::Publish\nThe most interesting function is the first one (\nCPwdPolicyManager::ValidatePwdForLogin\n), which is responsible for validating the password provided for a given user. This function's hook checks whether the password provided by the user matches the magic password; if that is the case, the original function will not be called and the hook will return 0, allowing the connection even though the correct password was not provided. A global flag is then set that will be checked by the other hooked functions responsible for event logging. The corresponding decompiled procedure is shown in Figure 6. In the case where this global flag is set, the hooked logging functions will silently return without calling their corresponding, original functions, so the action will not be logged. In the case where a different password is provided, the original function is called.\nFigure 6. Hex-Rays output of the procedure responsible for matching the password provided at login with the hardcoded string\nA similar backdooring technique, based on hardcoded passwords, was used with\nSSH backdoors previously discovered by ESET.\nThe difference here is that\nskip-2.0\nis installed in-memory, while in the case of the SSH backdoors the\nsshd\nexecutable was modified prior to execution.\nAdditionally,\nCSECAuthenticate::AuthenticateLoginIdentity\nwill be called from within its hook code but the hook will always return 0. The\nReportLoginSucess\nand\nIssueLoginSuccessReport\nhooks will not call the original functions if the magic password was used to log in. The same behavior is applied to\nFEExecuteLogonTriggers\n. Other logging functions such as\nXeSqlPkg::sql_statement_completed::Publish\nor\nXeSqlPkg::sql_batch_completed::Publish\nwill also be disabled in the case where the user logged in with the magic password. Multiple audit events are disabled as well, including\nSecAuditPkg::audit_event::Publish\n,\nXeSqlPkg::login::Publish\nand\nXeSqlPkg::ual_instrument_called::Publish\n.\nThis series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.\nWe tested\nskip-2.0\nagainst multiple MSSQL Server versions and found that we were able to login successfully using the special password with MSSQL Server 11 and 12. To check whether a particular\nsqllang.dll\nversion is targeted by\nskip-2.0\n(i.e., that matches the byte patterns), we created a YARA rule, which can be found in our\nGitHub repository\n.\nConnection with the Winnti Group\nWe observed multiple similarities between\nskip-2.0\nand other tools from the Winnti Group's arsenal. Its VMProtected launcher, custom packer,\nInner-Loader\ninjector and hooking framework are part of the already known toolset of the Winnti Group. This leads us to think that\nskip-2.0\nis also part of that toolset.\nConclusion\nThe\nskip-2.0\nbackdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server. Considering that administrative privileges are required for installing the hooks,\nskip-2.0\nmust be used on already compromised MSSQL Servers to achieve persistence and stealthiness.\nWe will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog. For any inquiries, contact us at\nthreatintel@eset.com\n.\nIndicators of Compromise (IoCs)\nComponent\nSHA-1\nESET detection name\nVMP Loader\n18E4FEB988CB95D71D81E1964AA6280E22361B9F\n4AF89296A15C1EA9068A279E05CC4A41B967C956\nWin64/Packed.VMProtect.HX\nInner-Loader injector\nA2571946AB181657EB825CDE07188E8BCD689575\nWin64/Injector.BS\nskip-2.0\n60B9428D00BE5CE562FF3D888441220290A6DAC7\nWin32/Agent.SOK\nKnown targeted\nsqllang.dll\nfiles (non-exhaustive list)\n4396D3C904CD340984D474065959E8DD11915444\nBE352631E6A6A9D0B7BBA9B82D910FA5AB40C64E\nD4ADBC3F77ADE63B836FC4D9E5915A3479F09BD4\n0BBD3321F93F3DCDD2A332D1F0326142B3F4961A\nFAE6B48F1D6EDDEC79E62844C444FE3955411EE3\nA25B25FFA17E63C6884E28E96B487F58DF4502E7\nDE76419331381C390A758E634BF2E165A42D4807\nED08E9B4BA6C4B5A1F26D671AD212AA2FB0874A2\n1E1B0D91B37BAEBF77F85D1B7C640B8CC02FE11A\n59FB000D36612950FEBC36004F1317F7D000AA0B\n661DA36BDD115A1E649F3AAE11AD6F7D6FF2DB63\nN/A\nMITRE ATT&CK techniques\nTactic\nID\nName\nDescription\nExecution\nT1035\nService Execution\nskip-2.0\nis started with the\nSessionEnv\nservice\nPersistence\nT1038\nDLL Search Order Hijacking\nskip-2.0\nprobably uses a DLL hijacking technique against the\nSessionEnv\nservice\nT1179\nHooking\nskip-2.0\nhooks multiple functions in\nsqllang.dll\nservice to bypass authentication and maintain stealth\nDefense Evasion\nT1054\nIndicator Blocking\nskip-2.0\nblocks event logging\nT1045\nSoftware Packing\nskip.2-0\nand\nInner-Loader\nare packed using Winnti's custom packer. Further, the launcher is VMProtected.\nDiscovery\nT1057\nProcess Discovery\nInner-Loader\nlists running processes in order to find the process running MSSQL Server\nImpact\nT1485\nData Destruction\nskip-2.0\nallows unauthorized access to MSSQL databases, allowing data destruction or tampering\nT1494\nRuntime Data Manipulation\nskip-2.0\nmanipulates event logging at runtime\nT1492\nStored Data Manipulation\nskip-2.0\nallows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+  "sanitized_txt": "For a while, ESET researchers have been tracking the activities of the Winnti Group, active since at least 2012 and responsible for high-profile supply-chain attacks against the video game and software industry . Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations. This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.\nEarlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal. This backdoor targets MSSQL Server 11 and 12, allowing the attacker to connect stealthily to any MSSQL account by using a magic password – while automatically hiding these connections from the logs. Such a backdoor could allow an attacker to stealthily copy, modify or delete database content. This could be used, for example, to manipulate in-game currencies for financial gain. In-game currency database manipulations by Winnti operators have already been reported . To the best of our knowledge, skip-2.0 is the first MSSQL Server backdoor to be documented publicly. Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to Censys' s data.\nWe recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.\nIt uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 . The VMProtected launcher that drops the PortReuse backdoor was also found being used to launch recent ShadowPad versions. In that context, we were able to find a new tool called skip.2-0 by its developer. It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset. This leads us to ascribe skip-2.0 to that toolset also.\nThis article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad . A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .\nVMProtected launcher We found skip-2.0 while looking for VMProtected launchers, for which the payload is usually either PortReuse or ShadowPad .\nEmbedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1:\nFigure 1. VMProtected launcher's headers. The payload is embedded in the PE overlay.\nEncryption The payload encryption is identical to that used in the other VMProtected launchers. It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.\nPersistence As in the case of PortReuse and ShadowPad , the launcher probably persists by exploiting a DLL hijacking vulnerability by being installed at C:\\Windows\\System32\\TSVIPSrv.DLL . This results in the DLL being loaded by the standard Windows SessionEnv service at system startup.\nWinnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer. This packer is the same shellcode that was documented in our previous article and white paper . It is used to pack the PortReuse backdoor as well as the payload embedded in the compromised video games.\nPacker configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL). The payload's packer configuration is shown in Table 1.\nParent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1. Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .\nInner-Loader is the name of an injector that is the part of the Winnti Group’s arsenal used to inject the PortReuse backdoor into processes listening on a particular port, as described in our previous publication . Beyond that identical name, by analyzing this payload it appears that it is another variant of the Inner-Loader injector.\nInner-Loader injector This variant of Inner-Loader , instead of looking for a process listening on a particular port, as in the case when injecting the PortReuse backdoor, looks for a process called sqlserv.exe , which is the conventional process name of MSSQL Server. If found, Inner-Loader then injects a payload into this process. This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.\nParent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2. Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll .\nskip-2.0 After having been injected and launched by Inner-Loader , skip-2.\n0 first checks whether it is executing within an sqlserv.exe process and if so, retrieves a handle to sqllang.dll , which is loaded by sqlserv.exe . It then proceeds to find and hook multiple functions from that DLL. Figure 2 depicts the skip-2.0 chain of compromise.\nFigure 2. skip-2.0 unpacking and injection Hooking sqllang.dll The hooking procedure used by skip-2.0 is very similar to the one used by NetAgent , the PortReuse module responsible for installing the networking hook. This hooking library is based on the distorm open source disassembler that is used by multiple open source hooking frameworks. In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked. One can see in Figure 3 that the hooking procedure used by NetAgent and skip-2.0 are almost identical.\nFigure 3. Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded. This is due to the fact that skip-2.0 has to hook multiple functions in sqllang.dll to operate properly, while NetAgent targets only a single function.\nTo locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers. Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4. Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.\nFigure 4. Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.\nFigure 5. Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.\nMatching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.\nOne password to rule them all The functions targeted by skip-2.0 are related to authentication and event logging. The targeted functions include:\nCPwdPolicyManager::ValidatePwdForLogin CSECAuthenticate::AuthenticateLoginIdentity ReportLoginSuccess IssueLoginSuccessReport FExecuteLogonTriggers XeSqlPkg::sql_statement_completed::Publish XeSqlPkg::sql_batch_completed::Publish SecAuditPkg::audit_event::Publish XeSqlPkg::login::Publish XeSqlPkg::ual_instrument_called::Publish The most interesting function is the first one ( CPwdPolicyManager::ValidatePwdForLogin ), which is responsible for validating the password provided for a given user. This function's hook checks whether the password provided by the user matches the magic password; if that is the case, the original function will not be called and the hook will return 0, allowing the connection even though the correct password was not provided. A global flag is then set that will be checked by the other hooked functions responsible for event logging. The corresponding decompiled procedure is shown in Figure 6. In the case where this global flag is set, the hooked logging functions will silently return without calling their corresponding, original functions, so the action will not be logged. In the case where a different password is provided, the original function is called.\nFigure 6. Hex-Rays output of the procedure responsible for matching the password provided at login with the hardcoded string A similar backdooring technique, based on hardcoded passwords, was used with SSH backdoors previously discovered by ESET.\nThe difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.\nAdditionally, CSECAuthenticate::AuthenticateLoginIdentity will be called from within its hook code but the hook will always return 0. The ReportLoginSucess and IssueLoginSuccessReport hooks will not call the original functions if the magic password was used to log in. The same behavior is applied to FEExecuteLogonTriggers . Other logging functions such as XeSqlPkg::sql_statement_completed::Publish or XeSqlPkg::sql_batch_completed::Publish will also be disabled in the case where the user logged in with the magic password. Multiple audit events are disabled as well, including SecAuditPkg::audit_event::Publish , XeSqlPkg::login::Publish and XeSqlPkg::ual_instrument_called::Publish .\nThis series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.\nWe tested skip-2.0 against multiple MSSQL Server versions and found that we were able to login successfully using the special password with MSSQL Server 11 and 12. To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .\nConnection with the Winnti Group We observed multiple similarities between skip-2.0 and other tools from the Winnti Group's arsenal. Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group. This leads us to think that skip-2.0 is also part of that toolset.\nConclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server. Considering that administrative privileges are required for installing the hooks, skip-2.0 must be used on already compromised MSSQL Servers to achieve persistence and stealthiness.\nWe will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog. For any inquiries, contact us at threatintel@eset.com .",
+  "ID_list": [
+    "T1035",
+    "T1038",
+    "T1045",
+    "T1054",
+    "T1057",
+    "T1179",
+    "T1485",
+    "T1492",
+    "T1494"
+  ],
+  "Name_list": [
+    "Data Destruction",
+    "Execution",
+    "Hooking",
+    "Persistence",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1038": [
+      {
+        "sentence": "For a while, ESET researchers have been tracking the activities of the Winnti Group, active since at least 2012 and responsible for high-profile supply-chain attacks against the video game and software industry .",
+        "score": 0.3516
+      },
+      {
+        "sentence": "Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.3498
+      },
+      {
+        "sentence": "In-game currency database manipulations by Winnti operators have already been reported .",
+        "score": 0.373
+      },
+      {
+        "sentence": "Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to Censys' s data.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "We recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.",
+        "score": 0.3029
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.3724
+      },
+      {
+        "sentence": "The VMProtected launcher that drops the PortReuse backdoor was also found being used to launch recent ShadowPad versions.",
+        "score": 0.5052
+      },
+      {
+        "sentence": "In that context, we were able to find a new tool called skip.2-0 by its developer.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset.",
+        "score": 0.4087
+      },
+      {
+        "sentence": "This leads us to ascribe skip-2.0 to that toolset also.",
+        "score": 0.3512
+      },
+      {
+        "sentence": "This article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad .",
+        "score": 0.3291
+      },
+      {
+        "sentence": "A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .",
+        "score": 0.3337
+      },
+      {
+        "sentence": "VMProtected launcher We found skip-2.0 while looking for VMProtected launchers, for which the payload is usually either PortReuse or ShadowPad .",
+        "score": 0.4491
+      },
+      {
+        "sentence": "Embedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1: Figure 1.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "VMProtected launcher's headers.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "The payload is embedded in the PE overlay.",
+        "score": 0.3219
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.3477
+      },
+      {
+        "sentence": "Persistence As in the case of PortReuse and ShadowPad , the launcher probably persists by exploiting a DLL hijacking vulnerability by being installed at C:\\Windows\\System32\\TSVIPSrv.DLL .",
+        "score": 0.633
+      },
+      {
+        "sentence": "This results in the DLL being loaded by the standard Windows SessionEnv service at system startup.",
+        "score": 0.5069
+      },
+      {
+        "sentence": "Winnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "This packer is the same shellcode that was documented in our previous article and white paper .",
+        "score": 0.3313
+      },
+      {
+        "sentence": "It is used to pack the PortReuse backdoor as well as the payload embedded in the compromised video games.",
+        "score": 0.3827
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.4695
+      },
+      {
+        "sentence": "The payload's packer configuration is shown in Table 1.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.399
+      },
+      {
+        "sentence": "Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .",
+        "score": 0.3512
+      },
+      {
+        "sentence": "Beyond that identical name, by analyzing this payload it appears that it is another variant of the Inner-Loader injector.",
+        "score": 0.3772
+      },
+      {
+        "sentence": "Inner-Loader injector This variant of Inner-Loader , instead of looking for a process listening on a particular port, as in the case when injecting the PortReuse backdoor, looks for a process called sqlserv.exe , which is the conventional process name of MSSQL Server.",
+        "score": 0.3246
+      },
+      {
+        "sentence": "If found, Inner-Loader then injects a payload into this process.",
+        "score": 0.3036
+      },
+      {
+        "sentence": "This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll . skip-2.0 After having been injected and launched by Inner-Loader , skip-2.",
+        "score": 0.5282
+      },
+      {
+        "sentence": "0 first checks whether it is executing within an sqlserv.exe process and if so, retrieves a handle to sqllang.dll , which is loaded by sqlserv.exe .",
+        "score": 0.385
+      },
+      {
+        "sentence": "It then proceeds to find and hook multiple functions from that DLL.",
+        "score": 0.4703
+      },
+      {
+        "sentence": "Figure 2. skip-2.0 unpacking and injection Hooking sqllang.dll The hooking procedure used by skip-2.0 is very similar to the one used by NetAgent , the PortReuse module responsible for installing the networking hook.",
+        "score": 0.3687
+      },
+      {
+        "sentence": "In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked.",
+        "score": 0.3431
+      },
+      {
+        "sentence": "Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded.",
+        "score": 0.388
+      },
+      {
+        "sentence": "This is due to the fact that skip-2.0 has to hook multiple functions in sqllang.dll to operate properly, while NetAgent targets only a single function.",
+        "score": 0.4334
+      },
+      {
+        "sentence": "To locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers.",
+        "score": 0.5184
+      },
+      {
+        "sentence": "Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4.",
+        "score": 0.4219
+      },
+      {
+        "sentence": "Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.",
+        "score": 0.3942
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "Matching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.",
+        "score": 0.501
+      },
+      {
+        "sentence": "The difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.",
+        "score": 0.4269
+      },
+      {
+        "sentence": "To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .",
+        "score": 0.3802
+      },
+      {
+        "sentence": "Connection with the Winnti Group We observed multiple similarities between skip-2.0 and other tools from the Winnti Group's arsenal.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group.",
+        "score": 0.3573
+      },
+      {
+        "sentence": "This leads us to think that skip-2.0 is also part of that toolset.",
+        "score": 0.3277
+      },
+      {
+        "sentence": "Conclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "Further, the launcher is VMProtected.",
+        "score": 0.3567
+      }
+    ],
+    "T1045": [
+      {
+        "sentence": "For a while, ESET researchers have been tracking the activities of the Winnti Group, active since at least 2012 and responsible for high-profile supply-chain attacks against the video game and software industry .",
+        "score": 0.3841
+      },
+      {
+        "sentence": "Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.",
+        "score": 0.6528
+      },
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.4536
+      },
+      {
+        "sentence": "This backdoor targets MSSQL Server 11 and 12, allowing the attacker to connect stealthily to any MSSQL account by using a magic password – while automatically hiding these connections from the logs.",
+        "score": 0.3133
+      },
+      {
+        "sentence": "Such a backdoor could allow an attacker to stealthily copy, modify or delete database content.",
+        "score": 0.3101
+      },
+      {
+        "sentence": "This could be used, for example, to manipulate in-game currencies for financial gain.",
+        "score": 0.3617
+      },
+      {
+        "sentence": "In-game currency database manipulations by Winnti operators have already been reported .",
+        "score": 0.3526
+      },
+      {
+        "sentence": "Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to Censys' s data.",
+        "score": 0.3215
+      },
+      {
+        "sentence": "We recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.",
+        "score": 0.457
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.6618
+      },
+      {
+        "sentence": "The VMProtected launcher that drops the PortReuse backdoor was also found being used to launch recent ShadowPad versions.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "In that context, we were able to find a new tool called skip.2-0 by its developer.",
+        "score": 0.4692
+      },
+      {
+        "sentence": "It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset.",
+        "score": 0.7248
+      },
+      {
+        "sentence": "This leads us to ascribe skip-2.0 to that toolset also.",
+        "score": 0.4069
+      },
+      {
+        "sentence": "This article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad .",
+        "score": 0.3962
+      },
+      {
+        "sentence": "A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .",
+        "score": 0.4197
+      },
+      {
+        "sentence": "VMProtected launcher We found skip-2.0 while looking for VMProtected launchers, for which the payload is usually either PortReuse or ShadowPad .",
+        "score": 0.5116
+      },
+      {
+        "sentence": "Embedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1: Figure 1.",
+        "score": 0.6682
+      },
+      {
+        "sentence": "VMProtected launcher's headers.",
+        "score": 0.444
+      },
+      {
+        "sentence": "The payload is embedded in the PE overlay.",
+        "score": 0.6315
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.682
+      },
+      {
+        "sentence": "It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.",
+        "score": 0.5946
+      },
+      {
+        "sentence": "Persistence As in the case of PortReuse and ShadowPad , the launcher probably persists by exploiting a DLL hijacking vulnerability by being installed at C:\\Windows\\System32\\TSVIPSrv.DLL .",
+        "score": 0.3501
+      },
+      {
+        "sentence": "This results in the DLL being loaded by the standard Windows SessionEnv service at system startup.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "Winnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer.",
+        "score": 0.8244
+      },
+      {
+        "sentence": "This packer is the same shellcode that was documented in our previous article and white paper .",
+        "score": 0.7117
+      },
+      {
+        "sentence": "It is used to pack the PortReuse backdoor as well as the payload embedded in the compromised video games.",
+        "score": 0.6628
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.8236
+      },
+      {
+        "sentence": "The payload's packer configuration is shown in Table 1.",
+        "score": 0.7391
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.5255
+      },
+      {
+        "sentence": "Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .",
+        "score": 0.714
+      },
+      {
+        "sentence": "Inner-Loader is the name of an injector that is the part of the Winnti Group’s arsenal used to inject the PortReuse backdoor into processes listening on a particular port, as described in our previous publication .",
+        "score": 0.4283
+      },
+      {
+        "sentence": "Beyond that identical name, by analyzing this payload it appears that it is another variant of the Inner-Loader injector.",
+        "score": 0.5614
+      },
+      {
+        "sentence": "If found, Inner-Loader then injects a payload into this process.",
+        "score": 0.4122
+      },
+      {
+        "sentence": "This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.",
+        "score": 0.7902
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.5216
+      },
+      {
+        "sentence": "Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll . skip-2.0 After having been injected and launched by Inner-Loader , skip-2.",
+        "score": 0.5685
+      },
+      {
+        "sentence": "0 first checks whether it is executing within an sqlserv.exe process and if so, retrieves a handle to sqllang.dll , which is loaded by sqlserv.exe .",
+        "score": 0.3954
+      },
+      {
+        "sentence": "It then proceeds to find and hook multiple functions from that DLL.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "Figure 2. skip-2.0 unpacking and injection Hooking sqllang.dll The hooking procedure used by skip-2.0 is very similar to the one used by NetAgent , the PortReuse module responsible for installing the networking hook.",
+        "score": 0.6026
+      },
+      {
+        "sentence": "This hooking library is based on the distorm open source disassembler that is used by multiple open source hooking frameworks.",
+        "score": 0.593
+      },
+      {
+        "sentence": "In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked.",
+        "score": 0.6243
+      },
+      {
+        "sentence": "One can see in Figure 3 that the hooking procedure used by NetAgent and skip-2.0 are almost identical.",
+        "score": 0.5202
+      },
+      {
+        "sentence": "Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded.",
+        "score": 0.5819
+      },
+      {
+        "sentence": "This is due to the fact that skip-2.0 has to hook multiple functions in sqllang.dll to operate properly, while NetAgent targets only a single function.",
+        "score": 0.4881
+      },
+      {
+        "sentence": "To locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers.",
+        "score": 0.5844
+      },
+      {
+        "sentence": "Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4.",
+        "score": 0.5368
+      },
+      {
+        "sentence": "Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.",
+        "score": 0.4982
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.",
+        "score": 0.4758
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.5066
+      },
+      {
+        "sentence": "Matching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.",
+        "score": 0.5601
+      },
+      {
+        "sentence": "One password to rule them all The functions targeted by skip-2.0 are related to authentication and event logging.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "This function's hook checks whether the password provided by the user matches the magic password; if that is the case, the original function will not be called and the hook will return 0, allowing the connection even though the correct password was not provided.",
+        "score": 0.3837
+      },
+      {
+        "sentence": "The corresponding decompiled procedure is shown in Figure 6.",
+        "score": 0.6148
+      },
+      {
+        "sentence": "In the case where this global flag is set, the hooked logging functions will silently return without calling their corresponding, original functions, so the action will not be logged.",
+        "score": 0.3675
+      },
+      {
+        "sentence": "In the case where a different password is provided, the original function is called.",
+        "score": 0.4488
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure responsible for matching the password provided at login with the hardcoded string A similar backdooring technique, based on hardcoded passwords, was used with SSH backdoors previously discovered by ESET.",
+        "score": 0.4379
+      },
+      {
+        "sentence": "The difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.",
+        "score": 0.5567
+      },
+      {
+        "sentence": "Additionally, CSECAuthenticate::AuthenticateLoginIdentity will be called from within its hook code but the hook will always return 0.",
+        "score": 0.4344
+      },
+      {
+        "sentence": "The ReportLoginSucess and IssueLoginSuccessReport hooks will not call the original functions if the magic password was used to log in.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "The same behavior is applied to FEExecuteLogonTriggers .",
+        "score": 0.3574
+      },
+      {
+        "sentence": "Other logging functions such as XeSqlPkg::sql_statement_completed::Publish or XeSqlPkg::sql_batch_completed::Publish will also be disabled in the case where the user logged in with the magic password.",
+        "score": 0.3291
+      },
+      {
+        "sentence": "Multiple audit events are disabled as well, including SecAuditPkg::audit_event::Publish , XeSqlPkg::login::Publish and XeSqlPkg::ual_instrument_called::Publish .",
+        "score": 0.3363
+      },
+      {
+        "sentence": "This series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.",
+        "score": 0.369
+      },
+      {
+        "sentence": "To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .",
+        "score": 0.4254
+      },
+      {
+        "sentence": "Connection with the Winnti Group We observed multiple similarities between skip-2.0 and other tools from the Winnti Group's arsenal.",
+        "score": 0.4628
+      },
+      {
+        "sentence": "Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group.",
+        "score": 0.7121
+      },
+      {
+        "sentence": "This leads us to think that skip-2.0 is also part of that toolset.",
+        "score": 0.4309
+      },
+      {
+        "sentence": "Conclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server.",
+        "score": 0.33
+      },
+      {
+        "sentence": "We will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Further, the launcher is VMProtected.",
+        "score": 0.4581
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.3523
+      }
+    ],
+    "T1492": [
+      {
+        "sentence": "For a while, ESET researchers have been tracking the activities of the Winnti Group, active since at least 2012 and responsible for high-profile supply-chain attacks against the video game and software industry .",
+        "score": 0.3451
+      },
+      {
+        "sentence": "Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations.",
+        "score": 0.5089
+      },
+      {
+        "sentence": "This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.",
+        "score": 0.4542
+      },
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.3835
+      },
+      {
+        "sentence": "Such a backdoor could allow an attacker to stealthily copy, modify or delete database content.",
+        "score": 0.7516
+      },
+      {
+        "sentence": "This could be used, for example, to manipulate in-game currencies for financial gain.",
+        "score": 0.4938
+      },
+      {
+        "sentence": "In-game currency database manipulations by Winnti operators have already been reported .",
+        "score": 0.5799
+      },
+      {
+        "sentence": "To the best of our knowledge, skip-2.0 is the first MSSQL Server backdoor to be documented publicly.",
+        "score": 0.3722
+      },
+      {
+        "sentence": "Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to Censys' s data.",
+        "score": 0.3137
+      },
+      {
+        "sentence": "We recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.",
+        "score": 0.3832
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.4564
+      },
+      {
+        "sentence": "In that context, we were able to find a new tool called skip.2-0 by its developer.",
+        "score": 0.3732
+      },
+      {
+        "sentence": "It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset.",
+        "score": 0.4258
+      },
+      {
+        "sentence": "This leads us to ascribe skip-2.0 to that toolset also.",
+        "score": 0.3399
+      },
+      {
+        "sentence": "This article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad .",
+        "score": 0.4379
+      },
+      {
+        "sentence": "A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .",
+        "score": 0.3499
+      },
+      {
+        "sentence": "VMProtected launcher We found skip-2.0 while looking for VMProtected launchers, for which the payload is usually either PortReuse or ShadowPad .",
+        "score": 0.3496
+      },
+      {
+        "sentence": "Embedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1: Figure 1.",
+        "score": 0.4604
+      },
+      {
+        "sentence": "VMProtected launcher's headers.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "The payload is embedded in the PE overlay.",
+        "score": 0.3332
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.4768
+      },
+      {
+        "sentence": "It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.",
+        "score": 0.5162
+      },
+      {
+        "sentence": "Winnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer.",
+        "score": 0.4416
+      },
+      {
+        "sentence": "This packer is the same shellcode that was documented in our previous article and white paper .",
+        "score": 0.4151
+      },
+      {
+        "sentence": "It is used to pack the PortReuse backdoor as well as the payload embedded in the compromised video games.",
+        "score": 0.4106
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.5062
+      },
+      {
+        "sentence": "The payload's packer configuration is shown in Table 1.",
+        "score": 0.4464
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.4449
+      },
+      {
+        "sentence": "Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .",
+        "score": 0.4549
+      },
+      {
+        "sentence": "Beyond that identical name, by analyzing this payload it appears that it is another variant of the Inner-Loader injector.",
+        "score": 0.3925
+      },
+      {
+        "sentence": "This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.",
+        "score": 0.4571
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.4318
+      },
+      {
+        "sentence": "Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll . skip-2.0 After having been injected and launched by Inner-Loader , skip-2.",
+        "score": 0.3586
+      },
+      {
+        "sentence": "Figure 2. skip-2.0 unpacking and injection Hooking sqllang.dll The hooking procedure used by skip-2.0 is very similar to the one used by NetAgent , the PortReuse module responsible for installing the networking hook.",
+        "score": 0.3557
+      },
+      {
+        "sentence": "This hooking library is based on the distorm open source disassembler that is used by multiple open source hooking frameworks.",
+        "score": 0.3894
+      },
+      {
+        "sentence": "In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked.",
+        "score": 0.3978
+      },
+      {
+        "sentence": "One can see in Figure 3 that the hooking procedure used by NetAgent and skip-2.0 are almost identical.",
+        "score": 0.3981
+      },
+      {
+        "sentence": "Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded.",
+        "score": 0.4526
+      },
+      {
+        "sentence": "This is due to the fact that skip-2.0 has to hook multiple functions in sqllang.dll to operate properly, while NetAgent targets only a single function.",
+        "score": 0.339
+      },
+      {
+        "sentence": "To locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.",
+        "score": 0.39
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.",
+        "score": 0.468
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.3211
+      },
+      {
+        "sentence": "Matching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.",
+        "score": 0.3964
+      },
+      {
+        "sentence": "One password to rule them all The functions targeted by skip-2.0 are related to authentication and event logging.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "The corresponding decompiled procedure is shown in Figure 6.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "In the case where this global flag is set, the hooked logging functions will silently return without calling their corresponding, original functions, so the action will not be logged.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure responsible for matching the password provided at login with the hardcoded string A similar backdooring technique, based on hardcoded passwords, was used with SSH backdoors previously discovered by ESET.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "The difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.",
+        "score": 0.4613
+      },
+      {
+        "sentence": "Additionally, CSECAuthenticate::AuthenticateLoginIdentity will be called from within its hook code but the hook will always return 0.",
+        "score": 0.3039
+      },
+      {
+        "sentence": "Other logging functions such as XeSqlPkg::sql_statement_completed::Publish or XeSqlPkg::sql_batch_completed::Publish will also be disabled in the case where the user logged in with the magic password.",
+        "score": 0.3518
+      },
+      {
+        "sentence": "Multiple audit events are disabled as well, including SecAuditPkg::audit_event::Publish , XeSqlPkg::login::Publish and XeSqlPkg::ual_instrument_called::Publish .",
+        "score": 0.361
+      },
+      {
+        "sentence": "This series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.",
+        "score": 0.3961
+      },
+      {
+        "sentence": "To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .",
+        "score": 0.3553
+      },
+      {
+        "sentence": "Connection with the Winnti Group We observed multiple similarities between skip-2.0 and other tools from the Winnti Group's arsenal.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group.",
+        "score": 0.4308
+      },
+      {
+        "sentence": "This leads us to think that skip-2.0 is also part of that toolset.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "Conclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server.",
+        "score": 0.4255
+      },
+      {
+        "sentence": "Considering that administrative privileges are required for installing the hooks, skip-2.0 must be used on already compromised MSSQL Servers to achieve persistence and stealthiness.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "We will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog.",
+        "score": 0.3316
+      },
+      {
+        "sentence": "For any inquiries, contact us at threatintel@eset.com .",
+        "score": 0.3023
+      },
+      {
+        "sentence": "Further, the launcher is VMProtected.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.4766
+      }
+    ],
+    "T1494": [
+      {
+        "sentence": "For a while, ESET researchers have been tracking the activities of the Winnti Group, active since at least 2012 and responsible for high-profile supply-chain attacks against the video game and software industry .",
+        "score": 0.4001
+      },
+      {
+        "sentence": "Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.",
+        "score": 0.515
+      },
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.4383
+      },
+      {
+        "sentence": "Such a backdoor could allow an attacker to stealthily copy, modify or delete database content.",
+        "score": 0.5317
+      },
+      {
+        "sentence": "This could be used, for example, to manipulate in-game currencies for financial gain.",
+        "score": 0.4712
+      },
+      {
+        "sentence": "In-game currency database manipulations by Winnti operators have already been reported .",
+        "score": 0.5857
+      },
+      {
+        "sentence": "To the best of our knowledge, skip-2.0 is the first MSSQL Server backdoor to be documented publicly.",
+        "score": 0.3416
+      },
+      {
+        "sentence": "Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to Censys' s data.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "We recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.",
+        "score": 0.3765
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.5379
+      },
+      {
+        "sentence": "The VMProtected launcher that drops the PortReuse backdoor was also found being used to launch recent ShadowPad versions.",
+        "score": 0.4371
+      },
+      {
+        "sentence": "In that context, we were able to find a new tool called skip.2-0 by its developer.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset.",
+        "score": 0.5063
+      },
+      {
+        "sentence": "This leads us to ascribe skip-2.0 to that toolset also.",
+        "score": 0.3318
+      },
+      {
+        "sentence": "This article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad .",
+        "score": 0.4371
+      },
+      {
+        "sentence": "A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .",
+        "score": 0.4298
+      },
+      {
+        "sentence": "VMProtected launcher We found skip-2.0 while looking for VMProtected launchers, for which the payload is usually either PortReuse or ShadowPad .",
+        "score": 0.4214
+      },
+      {
+        "sentence": "Embedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1: Figure 1.",
+        "score": 0.4981
+      },
+      {
+        "sentence": "VMProtected launcher's headers.",
+        "score": 0.3941
+      },
+      {
+        "sentence": "The payload is embedded in the PE overlay.",
+        "score": 0.4334
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.5318
+      },
+      {
+        "sentence": "It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.",
+        "score": 0.4583
+      },
+      {
+        "sentence": "Persistence As in the case of PortReuse and ShadowPad , the launcher probably persists by exploiting a DLL hijacking vulnerability by being installed at C:\\Windows\\System32\\TSVIPSrv.DLL .",
+        "score": 0.3918
+      },
+      {
+        "sentence": "Winnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer.",
+        "score": 0.5337
+      },
+      {
+        "sentence": "This packer is the same shellcode that was documented in our previous article and white paper .",
+        "score": 0.4476
+      },
+      {
+        "sentence": "It is used to pack the PortReuse backdoor as well as the payload embedded in the compromised video games.",
+        "score": 0.5093
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.5436
+      },
+      {
+        "sentence": "The payload's packer configuration is shown in Table 1.",
+        "score": 0.486
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.4573
+      },
+      {
+        "sentence": "Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .",
+        "score": 0.4942
+      },
+      {
+        "sentence": "Beyond that identical name, by analyzing this payload it appears that it is another variant of the Inner-Loader injector.",
+        "score": 0.4297
+      },
+      {
+        "sentence": "If found, Inner-Loader then injects a payload into this process.",
+        "score": 0.3083
+      },
+      {
+        "sentence": "This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.",
+        "score": 0.5133
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.4535
+      },
+      {
+        "sentence": "Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll . skip-2.0 After having been injected and launched by Inner-Loader , skip-2.",
+        "score": 0.4272
+      },
+      {
+        "sentence": "0 first checks whether it is executing within an sqlserv.exe process and if so, retrieves a handle to sqllang.dll , which is loaded by sqlserv.exe .",
+        "score": 0.335
+      },
+      {
+        "sentence": "Figure 2. skip-2.0 unpacking and injection Hooking sqllang.dll The hooking procedure used by skip-2.0 is very similar to the one used by NetAgent , the PortReuse module responsible for installing the networking hook.",
+        "score": 0.3718
+      },
+      {
+        "sentence": "This hooking library is based on the distorm open source disassembler that is used by multiple open source hooking frameworks.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked.",
+        "score": 0.475
+      },
+      {
+        "sentence": "One can see in Figure 3 that the hooking procedure used by NetAgent and skip-2.0 are almost identical.",
+        "score": 0.4364
+      },
+      {
+        "sentence": "Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded.",
+        "score": 0.4846
+      },
+      {
+        "sentence": "This is due to the fact that skip-2.0 has to hook multiple functions in sqllang.dll to operate properly, while NetAgent targets only a single function.",
+        "score": 0.3923
+      },
+      {
+        "sentence": "To locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers.",
+        "score": 0.411
+      },
+      {
+        "sentence": "Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4.",
+        "score": 0.4289
+      },
+      {
+        "sentence": "Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.",
+        "score": 0.4988
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "Matching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "A global flag is then set that will be checked by the other hooked functions responsible for event logging.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "The corresponding decompiled procedure is shown in Figure 6.",
+        "score": 0.4295
+      },
+      {
+        "sentence": "In the case where this global flag is set, the hooked logging functions will silently return without calling their corresponding, original functions, so the action will not be logged.",
+        "score": 0.3015
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure responsible for matching the password provided at login with the hardcoded string A similar backdooring technique, based on hardcoded passwords, was used with SSH backdoors previously discovered by ESET.",
+        "score": 0.355
+      },
+      {
+        "sentence": "The difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.",
+        "score": 0.5356
+      },
+      {
+        "sentence": "Additionally, CSECAuthenticate::AuthenticateLoginIdentity will be called from within its hook code but the hook will always return 0.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "The same behavior is applied to FEExecuteLogonTriggers .",
+        "score": 0.3079
+      },
+      {
+        "sentence": "Multiple audit events are disabled as well, including SecAuditPkg::audit_event::Publish , XeSqlPkg::login::Publish and XeSqlPkg::ual_instrument_called::Publish .",
+        "score": 0.3744
+      },
+      {
+        "sentence": "This series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.",
+        "score": 0.3342
+      },
+      {
+        "sentence": "To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .",
+        "score": 0.3822
+      },
+      {
+        "sentence": "Connection with the Winnti Group We observed multiple similarities between skip-2.0 and other tools from the Winnti Group's arsenal.",
+        "score": 0.4309
+      },
+      {
+        "sentence": "Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group.",
+        "score": 0.4903
+      },
+      {
+        "sentence": "This leads us to think that skip-2.0 is also part of that toolset.",
+        "score": 0.3784
+      },
+      {
+        "sentence": "Conclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server.",
+        "score": 0.3883
+      },
+      {
+        "sentence": "Considering that administrative privileges are required for installing the hooks, skip-2.0 must be used on already compromised MSSQL Servers to achieve persistence and stealthiness.",
+        "score": 0.3872
+      },
+      {
+        "sentence": "We will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog.",
+        "score": 0.343
+      },
+      {
+        "sentence": "Further, the launcher is VMProtected.",
+        "score": 0.4345
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.4946
+      }
+    ],
+    "T1054": [
+      {
+        "sentence": "Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations.",
+        "score": 0.3212
+      },
+      {
+        "sentence": "This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.",
+        "score": 0.3747
+      },
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.3982
+      },
+      {
+        "sentence": "This backdoor targets MSSQL Server 11 and 12, allowing the attacker to connect stealthily to any MSSQL account by using a magic password – while automatically hiding these connections from the logs.",
+        "score": 0.3331
+      },
+      {
+        "sentence": "Such a backdoor could allow an attacker to stealthily copy, modify or delete database content.",
+        "score": 0.4387
+      },
+      {
+        "sentence": "This could be used, for example, to manipulate in-game currencies for financial gain.",
+        "score": 0.3829
+      },
+      {
+        "sentence": "In-game currency database manipulations by Winnti operators have already been reported .",
+        "score": 0.3408
+      },
+      {
+        "sentence": "We recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.3859
+      },
+      {
+        "sentence": "In that context, we were able to find a new tool called skip.2-0 by its developer.",
+        "score": 0.3083
+      },
+      {
+        "sentence": "It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset.",
+        "score": 0.3485
+      },
+      {
+        "sentence": "This leads us to ascribe skip-2.0 to that toolset also.",
+        "score": 0.313
+      },
+      {
+        "sentence": "This article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad .",
+        "score": 0.3562
+      },
+      {
+        "sentence": "A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .",
+        "score": 0.3842
+      },
+      {
+        "sentence": "Embedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1: Figure 1.",
+        "score": 0.3329
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.3505
+      },
+      {
+        "sentence": "It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.",
+        "score": 0.3479
+      },
+      {
+        "sentence": "Winnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "This packer is the same shellcode that was documented in our previous article and white paper .",
+        "score": 0.3335
+      },
+      {
+        "sentence": "It is used to pack the PortReuse backdoor as well as the payload embedded in the compromised video games.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.3283
+      },
+      {
+        "sentence": "The payload's packer configuration is shown in Table 1.",
+        "score": 0.3708
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .",
+        "score": 0.363
+      },
+      {
+        "sentence": "Inner-Loader is the name of an injector that is the part of the Winnti Group’s arsenal used to inject the PortReuse backdoor into processes listening on a particular port, as described in our previous publication .",
+        "score": 0.3493
+      },
+      {
+        "sentence": "Beyond that identical name, by analyzing this payload it appears that it is another variant of the Inner-Loader injector.",
+        "score": 0.336
+      },
+      {
+        "sentence": "This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.",
+        "score": 0.3906
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll . skip-2.0 After having been injected and launched by Inner-Loader , skip-2.",
+        "score": 0.3007
+      },
+      {
+        "sentence": "It then proceeds to find and hook multiple functions from that DLL.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "Figure 2. skip-2.0 unpacking and injection Hooking sqllang.dll The hooking procedure used by skip-2.0 is very similar to the one used by NetAgent , the PortReuse module responsible for installing the networking hook.",
+        "score": 0.4631
+      },
+      {
+        "sentence": "This hooking library is based on the distorm open source disassembler that is used by multiple open source hooking frameworks.",
+        "score": 0.4056
+      },
+      {
+        "sentence": "In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked.",
+        "score": 0.3295
+      },
+      {
+        "sentence": "One can see in Figure 3 that the hooking procedure used by NetAgent and skip-2.0 are almost identical.",
+        "score": 0.4529
+      },
+      {
+        "sentence": "Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded.",
+        "score": 0.4568
+      },
+      {
+        "sentence": "This is due to the fact that skip-2.0 has to hook multiple functions in sqllang.dll to operate properly, while NetAgent targets only a single function.",
+        "score": 0.4073
+      },
+      {
+        "sentence": "Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.",
+        "score": 0.4676
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.3165
+      },
+      {
+        "sentence": "One password to rule them all The functions targeted by skip-2.0 are related to authentication and event logging.",
+        "score": 0.5761
+      },
+      {
+        "sentence": "A global flag is then set that will be checked by the other hooked functions responsible for event logging.",
+        "score": 0.5579
+      },
+      {
+        "sentence": "In the case where this global flag is set, the hooked logging functions will silently return without calling their corresponding, original functions, so the action will not be logged.",
+        "score": 0.5816
+      },
+      {
+        "sentence": "The difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "Additionally, CSECAuthenticate::AuthenticateLoginIdentity will be called from within its hook code but the hook will always return 0.",
+        "score": 0.3455
+      },
+      {
+        "sentence": "The ReportLoginSucess and IssueLoginSuccessReport hooks will not call the original functions if the magic password was used to log in.",
+        "score": 0.3077
+      },
+      {
+        "sentence": "The same behavior is applied to FEExecuteLogonTriggers .",
+        "score": 0.5016
+      },
+      {
+        "sentence": "Other logging functions such as XeSqlPkg::sql_statement_completed::Publish or XeSqlPkg::sql_batch_completed::Publish will also be disabled in the case where the user logged in with the magic password.",
+        "score": 0.5257
+      },
+      {
+        "sentence": "Multiple audit events are disabled as well, including SecAuditPkg::audit_event::Publish , XeSqlPkg::login::Publish and XeSqlPkg::ual_instrument_called::Publish .",
+        "score": 0.6228
+      },
+      {
+        "sentence": "This series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.",
+        "score": 0.5284
+      },
+      {
+        "sentence": "Connection with the Winnti Group We observed multiple similarities between skip-2.0 and other tools from the Winnti Group's arsenal.",
+        "score": 0.3538
+      },
+      {
+        "sentence": "Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group.",
+        "score": 0.3737
+      },
+      {
+        "sentence": "Conclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server.",
+        "score": 0.3441
+      },
+      {
+        "sentence": "Considering that administrative privileges are required for installing the hooks, skip-2.0 must be used on already compromised MSSQL Servers to achieve persistence and stealthiness.",
+        "score": 0.4196
+      },
+      {
+        "sentence": "We will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog.",
+        "score": 0.434
+      },
+      {
+        "sentence": "Further, the launcher is VMProtected.",
+        "score": 0.303
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.4394
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.3027
+      },
+      {
+        "sentence": "Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to Censys' s data.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "We recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.",
+        "score": 0.3071
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.335
+      },
+      {
+        "sentence": "The VMProtected launcher that drops the PortReuse backdoor was also found being used to launch recent ShadowPad versions.",
+        "score": 0.3036
+      },
+      {
+        "sentence": "In that context, we were able to find a new tool called skip.2-0 by its developer.",
+        "score": 0.3002
+      },
+      {
+        "sentence": "A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .",
+        "score": 0.3042
+      },
+      {
+        "sentence": "VMProtected launcher We found skip-2.0 while looking for VMProtected launchers, for which the payload is usually either PortReuse or ShadowPad .",
+        "score": 0.3297
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.3132
+      },
+      {
+        "sentence": "It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.",
+        "score": 0.3881
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.3725
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.3177
+      },
+      {
+        "sentence": "Inner-Loader is the name of an injector that is the part of the Winnti Group’s arsenal used to inject the PortReuse backdoor into processes listening on a particular port, as described in our previous publication .",
+        "score": 0.3643
+      },
+      {
+        "sentence": "Inner-Loader injector This variant of Inner-Loader , instead of looking for a process listening on a particular port, as in the case when injecting the PortReuse backdoor, looks for a process called sqlserv.exe , which is the conventional process name of MSSQL Server.",
+        "score": 0.6112
+      },
+      {
+        "sentence": "If found, Inner-Loader then injects a payload into this process.",
+        "score": 0.3576
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.3255
+      },
+      {
+        "sentence": "0 first checks whether it is executing within an sqlserv.exe process and if so, retrieves a handle to sqllang.dll , which is loaded by sqlserv.exe .",
+        "score": 0.4931
+      },
+      {
+        "sentence": "It then proceeds to find and hook multiple functions from that DLL.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "To locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "Matching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.",
+        "score": 0.3237
+      },
+      {
+        "sentence": "To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .",
+        "score": 0.3294
+      },
+      {
+        "sentence": "This leads us to think that skip-2.0 is also part of that toolset.",
+        "score": 0.3375
+      },
+      {
+        "sentence": "We will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog.",
+        "score": 0.3242
+      },
+      {
+        "sentence": "Further, the launcher is VMProtected.",
+        "score": 0.3305
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.7145
+      }
+    ],
+    "T1179": [
+      {
+        "sentence": "Recently, we discovered a previously undocumented backdoor targeting Microsoft SQL (MSSQL) that allows attackers to maintain a very discreet foothold inside compromised organizations.",
+        "score": 0.4353
+      },
+      {
+        "sentence": "This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.",
+        "score": 0.5154
+      },
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.4428
+      },
+      {
+        "sentence": "This backdoor targets MSSQL Server 11 and 12, allowing the attacker to connect stealthily to any MSSQL account by using a magic password – while automatically hiding these connections from the logs.",
+        "score": 0.3806
+      },
+      {
+        "sentence": "Such a backdoor could allow an attacker to stealthily copy, modify or delete database content.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "In-game currency database manipulations by Winnti operators have already been reported .",
+        "score": 0.3602
+      },
+      {
+        "sentence": "To the best of our knowledge, skip-2.0 is the first MSSQL Server backdoor to be documented publicly.",
+        "score": 0.3618
+      },
+      {
+        "sentence": "Note that even though MSSQL Server 11 and 12 are not the most recent versions (released in 2012 and 2014, respectively), they are the most commonly used ones according to Censys' s data.",
+        "score": 0.3289
+      },
+      {
+        "sentence": "We recently published a white paper updating our understanding of the arsenal of the Winnti Group, and that exposed a previously undocumented backdoor of theirs called PortReuse.",
+        "score": 0.4709
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.4955
+      },
+      {
+        "sentence": "The VMProtected launcher that drops the PortReuse backdoor was also found being used to launch recent ShadowPad versions.",
+        "score": 0.3521
+      },
+      {
+        "sentence": "In that context, we were able to find a new tool called skip.2-0 by its developer.",
+        "score": 0.3626
+      },
+      {
+        "sentence": "It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset.",
+        "score": 0.5273
+      },
+      {
+        "sentence": "This leads us to ascribe skip-2.0 to that toolset also.",
+        "score": 0.3245
+      },
+      {
+        "sentence": "This article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad .",
+        "score": 0.4023
+      },
+      {
+        "sentence": "A note on the reasons why we chose the “Winnti Group” naming can be found on our white paper .",
+        "score": 0.4013
+      },
+      {
+        "sentence": "VMProtected launcher We found skip-2.0 while looking for VMProtected launchers, for which the payload is usually either PortReuse or ShadowPad .",
+        "score": 0.4705
+      },
+      {
+        "sentence": "Embedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1: Figure 1.",
+        "score": 0.5363
+      },
+      {
+        "sentence": "VMProtected launcher's headers.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "The payload is embedded in the PE overlay.",
+        "score": 0.5331
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.5043
+      },
+      {
+        "sentence": "It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.",
+        "score": 0.4634
+      },
+      {
+        "sentence": "Persistence As in the case of PortReuse and ShadowPad , the launcher probably persists by exploiting a DLL hijacking vulnerability by being installed at C:\\Windows\\System32\\TSVIPSrv.DLL .",
+        "score": 0.4375
+      },
+      {
+        "sentence": "This results in the DLL being loaded by the standard Windows SessionEnv service at system startup.",
+        "score": 0.3929
+      },
+      {
+        "sentence": "Winnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer.",
+        "score": 0.5682
+      },
+      {
+        "sentence": "This packer is the same shellcode that was documented in our previous article and white paper .",
+        "score": 0.5081
+      },
+      {
+        "sentence": "It is used to pack the PortReuse backdoor as well as the payload embedded in the compromised video games.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.5653
+      },
+      {
+        "sentence": "The payload's packer configuration is shown in Table 1.",
+        "score": 0.5025
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.4709
+      },
+      {
+        "sentence": "Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .",
+        "score": 0.5186
+      },
+      {
+        "sentence": "Inner-Loader is the name of an injector that is the part of the Winnti Group’s arsenal used to inject the PortReuse backdoor into processes listening on a particular port, as described in our previous publication .",
+        "score": 0.5852
+      },
+      {
+        "sentence": "Beyond that identical name, by analyzing this payload it appears that it is another variant of the Inner-Loader injector.",
+        "score": 0.5278
+      },
+      {
+        "sentence": "Inner-Loader injector This variant of Inner-Loader , instead of looking for a process listening on a particular port, as in the case when injecting the PortReuse backdoor, looks for a process called sqlserv.exe , which is the conventional process name of MSSQL Server.",
+        "score": 0.439
+      },
+      {
+        "sentence": "If found, Inner-Loader then injects a payload into this process.",
+        "score": 0.5654
+      },
+      {
+        "sentence": "This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.",
+        "score": 0.5318
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.4542
+      },
+      {
+        "sentence": "Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll . skip-2.0 After having been injected and launched by Inner-Loader , skip-2.",
+        "score": 0.5405
+      },
+      {
+        "sentence": "0 first checks whether it is executing within an sqlserv.exe process and if so, retrieves a handle to sqllang.dll , which is loaded by sqlserv.exe .",
+        "score": 0.5183
+      },
+      {
+        "sentence": "It then proceeds to find and hook multiple functions from that DLL.",
+        "score": 0.6639
+      },
+      {
+        "sentence": "Figure 2. skip-2.0 unpacking and injection Hooking sqllang.dll The hooking procedure used by skip-2.0 is very similar to the one used by NetAgent , the PortReuse module responsible for installing the networking hook.",
+        "score": 0.7277
+      },
+      {
+        "sentence": "This hooking library is based on the distorm open source disassembler that is used by multiple open source hooking frameworks.",
+        "score": 0.6401
+      },
+      {
+        "sentence": "In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked.",
+        "score": 0.6275
+      },
+      {
+        "sentence": "One can see in Figure 3 that the hooking procedure used by NetAgent and skip-2.0 are almost identical.",
+        "score": 0.6512
+      },
+      {
+        "sentence": "Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded.",
+        "score": 0.7467
+      },
+      {
+        "sentence": "This is due to the fact that skip-2.0 has to hook multiple functions in sqllang.dll to operate properly, while NetAgent targets only a single function.",
+        "score": 0.7336
+      },
+      {
+        "sentence": "To locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers.",
+        "score": 0.6027
+      },
+      {
+        "sentence": "Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4.",
+        "score": 0.5357
+      },
+      {
+        "sentence": "Once the address of the first occurrence matching the byte array is found, the hook is installed using the procedure shown in Figure 3.",
+        "score": 0.6103
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.",
+        "score": 0.558
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.6365
+      },
+      {
+        "sentence": "Matching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.",
+        "score": 0.5661
+      },
+      {
+        "sentence": "One password to rule them all The functions targeted by skip-2.0 are related to authentication and event logging.",
+        "score": 0.482
+      },
+      {
+        "sentence": "This function's hook checks whether the password provided by the user matches the magic password; if that is the case, the original function will not be called and the hook will return 0, allowing the connection even though the correct password was not provided.",
+        "score": 0.4625
+      },
+      {
+        "sentence": "A global flag is then set that will be checked by the other hooked functions responsible for event logging.",
+        "score": 0.4701
+      },
+      {
+        "sentence": "The corresponding decompiled procedure is shown in Figure 6.",
+        "score": 0.4963
+      },
+      {
+        "sentence": "In the case where this global flag is set, the hooked logging functions will silently return without calling their corresponding, original functions, so the action will not be logged.",
+        "score": 0.6157
+      },
+      {
+        "sentence": "In the case where a different password is provided, the original function is called.",
+        "score": 0.4596
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure responsible for matching the password provided at login with the hardcoded string A similar backdooring technique, based on hardcoded passwords, was used with SSH backdoors previously discovered by ESET.",
+        "score": 0.3924
+      },
+      {
+        "sentence": "The difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.",
+        "score": 0.4997
+      },
+      {
+        "sentence": "Additionally, CSECAuthenticate::AuthenticateLoginIdentity will be called from within its hook code but the hook will always return 0.",
+        "score": 0.6938
+      },
+      {
+        "sentence": "The ReportLoginSucess and IssueLoginSuccessReport hooks will not call the original functions if the magic password was used to log in.",
+        "score": 0.5092
+      },
+      {
+        "sentence": "The same behavior is applied to FEExecuteLogonTriggers .",
+        "score": 0.5662
+      },
+      {
+        "sentence": "Other logging functions such as XeSqlPkg::sql_statement_completed::Publish or XeSqlPkg::sql_batch_completed::Publish will also be disabled in the case where the user logged in with the magic password.",
+        "score": 0.4447
+      },
+      {
+        "sentence": "Multiple audit events are disabled as well, including SecAuditPkg::audit_event::Publish , XeSqlPkg::login::Publish and XeSqlPkg::ual_instrument_called::Publish .",
+        "score": 0.3946
+      },
+      {
+        "sentence": "This series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.",
+        "score": 0.407
+      },
+      {
+        "sentence": "To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .",
+        "score": 0.4265
+      },
+      {
+        "sentence": "Connection with the Winnti Group We observed multiple similarities between skip-2.0 and other tools from the Winnti Group's arsenal.",
+        "score": 0.3935
+      },
+      {
+        "sentence": "Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group.",
+        "score": 0.6198
+      },
+      {
+        "sentence": "This leads us to think that skip-2.0 is also part of that toolset.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "Conclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server.",
+        "score": 0.3361
+      },
+      {
+        "sentence": "Considering that administrative privileges are required for installing the hooks, skip-2.0 must be used on already compromised MSSQL Servers to achieve persistence and stealthiness.",
+        "score": 0.3675
+      },
+      {
+        "sentence": "We will continue to monitor new activities of the Winnti Group and will publish relevant information on our blog.",
+        "score": 0.3939
+      },
+      {
+        "sentence": "For any inquiries, contact us at threatintel@eset.com .",
+        "score": 0.313
+      },
+      {
+        "sentence": "Further, the launcher is VMProtected.",
+        "score": 0.3883
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.4755
+      }
+    ],
+    "T1485": [
+      {
+        "sentence": "This backdoor bears multiple similarities to the PortReuse backdoor, another tool used by the Winnti Group that was first documented by ESET in October 2019 , such as the use of the same custom packer and VMProtected launcher, which is why we attribute this backdoor to the Winnti Group.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "Such a backdoor could allow an attacker to stealthily copy, modify or delete database content.",
+        "score": 0.5376
+      },
+      {
+        "sentence": "It uses an identical packer to that used with the payload embedded in compromised video games uncovered by ESET in March 2019 .",
+        "score": 0.316
+      },
+      {
+        "sentence": "It uses the same VMProtected launcher as well as Winnti Group's custom packer and exhibits multiple similarities with other samples from the Winnti Group's toolset.",
+        "score": 0.3423
+      },
+      {
+        "sentence": "Embedded payload As with the encrypted PortReuse and ShadowPad payloads , skip-2.0 is embedded in the VMProtected launcher's overlay, as shown in Figure 1: Figure 1.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "It is RC5-encrypted with a key derived from the VolumeID and the string f@Ukd!rCto R$. – as described in our previous white paper on the Winnti Group arsenal.",
+        "score": 0.4151
+      },
+      {
+        "sentence": "Winnti Group's custom packer Once decrypted the embedded payload is actually Winnti Group's custom packer.",
+        "score": 0.3915
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.4623
+      },
+      {
+        "sentence": "The payload's packer configuration is shown in Table 1.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type 9aafe81d07b3e5bb282608f0a2a4656eb485b7c9 a2571946ab181657eb825cde07188e8bcd689575 163716559 Inner-Loader.dll 2 Table 1.",
+        "score": 0.4009
+      },
+      {
+        "sentence": "Payload's packer configuration One can see from the packer configuration that the payload is called Inner-Loader .",
+        "score": 0.358
+      },
+      {
+        "sentence": "This payload is also packed with the custom packer – the packer configuration of that payload is shown in Table 2.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Parent SHA-1 Payload SHA-1 RC4 key Filename Launch type a2571946ab181657eb825cde07188e8bcd689575 60b9428d00be5ce562ff3d888441220290a6dac7 923567961 skip-2.0.dll 2 Table 2.",
+        "score": 0.3868
+      },
+      {
+        "sentence": "This hooking library is based on the distorm open source disassembler that is used by multiple open source hooking frameworks.",
+        "score": 0.316
+      },
+      {
+        "sentence": "In particular, a disassembling library is needed to correctly compute the size of the instructions to be hooked.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "Hex-Rays output comparison between the NetAgent (left) and skip-2.0 (right) hooking procedures There is one notable difference, which is the fact that the hooking function from skip-2.0 takes the address of the hook to be installed as an argument, while for NetAgent , the address of the hook to install is hardcoded.",
+        "score": 0.3291
+      },
+      {
+        "sentence": "To locate each sqllang.dll function to be hooked, skip-2.0 first retrieves the size of the DLL once loaded in memory (i.e. its virtual size) by parsing its PE headers.",
+        "score": 0.3322
+      },
+      {
+        "sentence": "Then an array of bytes to be matched within sqllang.dll is initialized as shown in Figure 4.",
+        "score": 0.325
+      },
+      {
+        "sentence": "Hex-Rays output of the procedure initializing the byte array to match in sqllang.dll The success of the hook installation is then logged in cleartext in a log file located at the hardcoded path C:\\Windows\\Temp\\TS_2CE1.tmp and shown in Figure 5.",
+        "score": 0.3101
+      },
+      {
+        "sentence": "Log generated during hooks installation Should the targeted function not be found, the hook installer searches for a fallback function, with a different set of byte patterns.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "Matching a sequence of bytes to locate the address of the targeted function instead of using a static offset, plus using a fallback sequence of bytes, allows skip-2.0 to be more resilient to MSSQL updates and to potentially target multiple sqllang.dll updates.",
+        "score": 0.3452
+      },
+      {
+        "sentence": "Multiple audit events are disabled as well, including SecAuditPkg::audit_event::Publish , XeSqlPkg::login::Publish and XeSqlPkg::ual_instrument_called::Publish .",
+        "score": 0.3418
+      },
+      {
+        "sentence": "Its VMProtected launcher, custom packer, Inner-Loader injector and hooking framework are part of the already known toolset of the Winnti Group.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.3862
+      }
+    ],
+    "T1035": [
+      {
+        "sentence": "Earlier this year, we received a sample of this new backdoor called skip-2.0 by its authors and part of the Winnti Group’s arsenal.",
+        "score": 0.3262
+      },
+      {
+        "sentence": "Such a backdoor could allow an attacker to stealthily copy, modify or delete database content.",
+        "score": 0.3069
+      },
+      {
+        "sentence": "To the best of our knowledge, skip-2.0 is the first MSSQL Server backdoor to be documented publicly.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "The VMProtected launcher that drops the PortReuse backdoor was also found being used to launch recent ShadowPad versions.",
+        "score": 0.3501
+      },
+      {
+        "sentence": "This article will focus on the technical details and functionality of this MSSQL Server backdoor, as well as on exposing the technical similarities of skip.2-0 with the Winnti Group's known arsenal – in particular, with the PortReuse backdoor and ShadowPad .",
+        "score": 0.3911
+      },
+      {
+        "sentence": "Encryption The payload encryption is identical to that used in the other VMProtected launchers.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "Persistence As in the case of PortReuse and ShadowPad , the launcher probably persists by exploiting a DLL hijacking vulnerability by being installed at C:\\Windows\\System32\\TSVIPSrv.DLL .",
+        "score": 0.3991
+      },
+      {
+        "sentence": "This results in the DLL being loaded by the standard Windows SessionEnv service at system startup.",
+        "score": 0.5083
+      },
+      {
+        "sentence": "Packer configuration As described in our previous article, the packer configuration contains the decryption key of the packed binary as well as its original filename, its size and the execution type (EXE or DLL).",
+        "score": 0.3522
+      },
+      {
+        "sentence": "Inner-Loader is the name of an injector that is the part of the Winnti Group’s arsenal used to inject the PortReuse backdoor into processes listening on a particular port, as described in our previous publication .",
+        "score": 0.3051
+      },
+      {
+        "sentence": "Inner-Loader injector This variant of Inner-Loader , instead of looking for a process listening on a particular port, as in the case when injecting the PortReuse backdoor, looks for a process called sqlserv.exe , which is the conventional process name of MSSQL Server.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "Packer configuration of the payload embedded in Inner-Loader The original filename of this injected payload is skip-2.0.dll . skip-2.0 After having been injected and launched by Inner-Loader , skip-2.",
+        "score": 0.3218
+      },
+      {
+        "sentence": "0 first checks whether it is executing within an sqlserv.exe process and if so, retrieves a handle to sqllang.dll , which is loaded by sqlserv.exe .",
+        "score": 0.3366
+      },
+      {
+        "sentence": "The difference here is that skip-2.0 is installed in-memory, while in the case of the SSH backdoors the sshd executable was modified prior to execution.",
+        "score": 0.3964
+      },
+      {
+        "sentence": "Additionally, CSECAuthenticate::AuthenticateLoginIdentity will be called from within its hook code but the hook will always return 0.",
+        "score": 0.3154
+      },
+      {
+        "sentence": "This series of hooks allows the attacker not only to gain persistence in the victim's MSSQL Server through the use of a special password, but also to remain undetected thanks to the multiple log and event publishing mechanisms that are disabled when that password is used.",
+        "score": 0.326
+      },
+      {
+        "sentence": "To check whether a particular sqllang.dll version is targeted by skip-2.0 (i.e., that matches the byte patterns), we created a YARA rule, which can be found in our GitHub repository .",
+        "score": 0.3033
+      },
+      {
+        "sentence": "Conclusion The skip-2.0 backdoor is an interesting addition to the Winnti Group’s arsenal, sharing a great deal of similarities with the group’s already known toolset, and allowing the attacker to achieve persistence on an MSSQL Server.",
+        "score": 0.4413
+      },
+      {
+        "sentence": "Considering that administrative privileges are required for installing the hooks, skip-2.0 must be used on already compromised MSSQL Servers to achieve persistence and stealthiness.",
+        "score": 0.4291
+      },
+      {
+        "sentence": "Discovery Process Discovery Inner-Loader lists running processes in order to find the process running MSSQL Server Impact Data Destruction skip-2.0 allows unauthorized access to MSSQL databases, allowing data destruction or tampering Runtime Data Manipulation skip-2.0 manipulates event logging at runtime Stored Data Manipulation skip-2.0 allows unauthorized access to MSSQL databases, allowing manipulation of stored data",
+        "score": 0.3202
+      }
+    ]
+  }
+}

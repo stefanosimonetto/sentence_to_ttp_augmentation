@@ -1,0 +1,286 @@
+{
+  "original_txt": "New zero-day vulnerability joins a chain of recently discovered vulnerabilities capable of operating an end-to-end attack on ESXi. Organizations should evaluate risk and apply vCenter client patches immediately.\nPentera Labs’ Senior Security Researcher, Yuval Lazar, discovered an Information Disclosure vulnerability impacting more than 500,000 appliances running default vCenter Server deployments.\nThis finding is critical given its potential global impact. According to VMware – more than 80 percent of virtualized workloads are running on VMware technology, including 100 percent of Fortune 500 and Fortune Global 100 companies. The ease and convenience that vCenter offers for managing virtualized hosts in enterprise environments provides cybercriminals with centralized access and the potential to inflict widespread damage on organizations.\nIn the full attack vector, threat actors can completely take over an organization’s ESXi’s deployed in a hybrid infrastructure and virtual machines hosted and managed by the hypervisor from just endpoint access to a host with a vCenter client.\nVMware has issued a patch for the vulnerability that can be found here.\nInstalled in hundreds of thousands of organizations worldwide and used to manage some of their most critical asset and core systems, VMware vCenter Server is a high-priority target for cybercriminals. Once compromised, the ease and convenience that vCenter offers for managing virtualized hosts in enterprise environments will play into the adversary’s hands, providing centralized access and widespread damage.\nSpurred by previously reported vulnerabilities, increasing demand from our customers, and threats observed in the wild, most notably recent reports of a python ransomware strain targeting ESXi, Pentera Labs has doubled down on exploring new vCenter attack vectors. The result of these explorations was the discovery of a new Information Disclosure vulnerability. The findings were proactively reported to VMware and later released under CVE-2022-22948.\nThe vulnerability described in this paper is part of a critical kill chain that leads to an ESXi takeover. In the full attack vector, which is a subject for a future article, we can see that initial endpoint access to a host with a vCenter client lends itself to a complete takeover of the organization’s ESXis. The devil and his merry band of demons are in the details of the chained vulnerabilities exploited as part of this attack vector.\nFrom initial access to complete server takeover\nImage 1 – Chaining multiple vulnerabilities for a complete view of cybersecurity risk\nPentera Labs firmly believes security readiness is not measured by a single vulnerability or the security team’s ability to discover or patch it. Rather, an organization’s security posture is determined by whether that vulnerability can be exploited directly or chained to preceding vulnerabilities across the complete attack operation.\nIn the case of VMware vCenter vulnerabilities, the adversary can take over the host where the vCenter application is running and all of its ESXi servers deployed in a hybrid infrastructure and virtual machines hosted and managed by the hypervisor.\nRecent reports of ransomware gangs encrypting large amounts of virtual machines highlight the criticality of ransomware strains adding this vector to their arsenal of TTPs.\nWith our customers’ increased focus on virtualization infrastructure, Pentera Labs researchers set out on a mission to further enhance its existing attack frameworks used to identify, elevate, exploit and progress attack operations. As always, Pentera’s methods are to assume the attacker’s view and identify ways in which the adversary can take advantage of critical weaknesses – those known and those yet to be discovered.\nAs our starting point, we gained shell access to a fresh instance of a VMware vCenter using a low-privileged user named ‘vpshere-ui’, a member of the “cis” group. So far, so good.\nDuring our research on the vCenter client, we located a file containing plaintext login credentials for the client’s postgresDB: “/etc/vmware-vpx/vcdb.properties”. This file is accessible to any of the users that are part of the “cis” group.\nIn other words, any user that is a member of the “cis” group can connect to the vCenter’s Postgres database.\nCredentials to PostgresDB in vcdb.properties\nArmed with the PostgresDB credentials, we proceeded to conduct an examination of the PostgresDB. We used the following command to connect to the DB, placing the credentials found in vcdb.properties to good use:\n/opt/vmware/vpostgres/current/bin/psql -d VCDB -U vc -w <Password>\nHere we discovered that it contains a wealth of information about the ESXi and vCenter, including information about the datacenters and virtual machines that are stored on them. For example:\nVCDB query for information about virtual machines located on the ESXi\nAnother table is the table ‘vpx_host’ containing details for a user called ‘vpxuser’ and its password phrase. The vpx_host table holds a record for each managed ESXi, each containing a user called “vpxuser” and a unique password phrase.\nSo we retrieved the password phrase, using the command:\n/opt/vmware/vpostgres/current/bin/psql -d VCDB -U vc -w <Password> -c 'SELECT user_name, password FROM vc.vpx_host;'\nThe vpxuser password phrase\nNext, we dived in to investigate the “vpxuser”.\nTurns out that “vpxuser” is a high-privileged user automatically created on the first connection between the ESXi to the vCenter.\nThe “vpxuser” user is created on the ESXi by default and is designed according to the principle of least-privilege, so it can be managed by the vCenter without the use of root. The user is created through a process called “vpxd” which is responsible for communication between the ESXi and the vCenter.\nThere isn’t a lot of information about this user, but we found a comment about it on the “passwd” file on the ESXi. The “passwd” file is usually used to keep track of users that have access to a system and it contains information about the user accounts. We were able to gather a lot of information about the user “vpxuser” from the file. Eventually, it was the description that led us to our next finding – “VMware VirtualCenter administration account”.\nWe started investigating the “vpxd” process using IDA in an effort to better understand how the “vpxuser” and its password are created and recorded in the PostgresDB that began this journey.\nOur first step was to search for the string “VMware VirtualCenter administration account” using IDA’s Strings tab to see where else this string is referenced. This search led to the function related to the creation of the user on the ESXi. From there, we could identify the function where the password is created as the figure below shows.\nPassword creation function call\nDiving into the “create_random_password” function, we identified the use of Random_Crypto (open-vm-tools), which suggests that the password for this user is randomly created.\nRandom_Crypto function in “create_random_password”\nWe knew that the password must be saved to the vCenter’s PostgresDB since it is randomly generated upon the first connection and is required for further communication. Yet, as we previously saw in the DB, the password is not saved in plaintext. We immediately noticed that the password phrase is encoded in base64, yet the encoded phrase was not readable, so we assumed it is also encrypted.\nThe vpxuser password phrase\nWe started exploring the processes the password goes through, as it is created, encrypted, encoded and finally, saved in the DB.\nEventually, we found the encryption function – only to discover that it uses OpenSSL Symmetric EVP common encryption method.\nA call to the function that encrypts the password\nSymmetric encryption uses the same secret key both to encrypt and decrypt the information. By using symmetric encryption algorithms, data is converted to a form that cannot be understood by anyone who does not possess the secret key.\nThe EVP functions provide a high level interface to OpenSSL cryptographic functions. In order to perform symmetric encryption or decryption using EVP you will need to know:\nSo now that we know what a symmetric encryption looks like, let’s go back and identify the password creation method. Since the IV is randomized, we deduced that it’s probably also saved to the DB. And it is! Once we found the function where the IV is created, this led the road to the decryption function!\nThe call to the OpenSSL decryption function\nWe were ready to proceed, having found all 3 prerequisites needed to decrypt a symmetric encryption:\nThere was still one missing piece to this puzzle. The “/etc/vmware-vpx/ssl/symkey.dat” file is only accessible to high-privileged users, so we needed a method that would give us root privileges to read it. Luckily, we had a method ready on stand-by thanks to our previous research and discovery of CVE-2021-22015, a privilege escalation vulnerability.\nOnce we extracted the key, we had all the ingredients necessary to decrypt the password. We wrote a python script to extract the cleartext password and got ourselves high-privilege credentials to ESXi!\nTo remediate CVE-2022-22948, apply the updates listed in VMware’s Advisory site. There is no known workaround.\nExploitation for Credential Access (T1212)\nExploitation for Privilege Escalation (T1068)\nI wanted to say thanks to everyone at VMware involved with the patch for this vulnerability. They were kind, prompt in their responses, and very easy to work with.\nWe were ready to verify that we had enough to decrypt the password. Using a script we created for this purpose, we entered the encoded-encrypted vpxuser password phrase and the key as arguments. This is the result we received:\nOur Python script decrypted the password!\nWe used the vpxuser credentials to connect via SSH to the managed ESXi with high privileges and gained full control of the ESXi. We could control the ESXi as we wish – extract the memory of virtual machines, list inventory, get sensitive files, access sensitive information, you name it.\nWatch Yuval’s 20-minute online session covering this vulnerability or read the PDF version of this article.\nBegin your journey in security validation and see why leading companies trust us with their cybersecurity validation.",
+  "sanitized_txt": "New zero-day vulnerability joins a chain of recently discovered vulnerabilities capable of operating an end-to-end attack on ESXi. Organizations should evaluate risk and apply vCenter client patches immediately.\nPentera Labs’ Senior Security Researcher, Yuval Lazar, discovered an Information Disclosure vulnerability impacting more than 500,000 appliances running default vCenter Server deployments.\nThis finding is critical given its potential global impact. According to VMware – more than 80 percent of virtualized workloads are running on VMware technology, including 100 percent of Fortune 500 and Fortune Global 100 companies. The ease and convenience that vCenter offers for managing virtualized hosts in enterprise environments provides cybercriminals with centralized access and the potential to inflict widespread damage on organizations.\nIn the full attack vector, threat actors can completely take over an organization’s ESXi’s deployed in a hybrid infrastructure and virtual machines hosted and managed by the hypervisor from just endpoint access to a host with a vCenter client.\nVMware has issued a patch for the vulnerability that can be found here.\nInstalled in hundreds of thousands of organizations worldwide and used to manage some of their most critical asset and core systems, VMware vCenter Server is a high-priority target for cybercriminals. Once compromised, the ease and convenience that vCenter offers for managing virtualized hosts in enterprise environments will play into the adversary’s hands, providing centralized access and widespread damage.\nSpurred by previously reported vulnerabilities, increasing demand from our customers, and threats observed in the wild, most notably recent reports of a python ransomware strain targeting ESXi, Pentera Labs has doubled down on exploring new vCenter attack vectors. The result of these explorations was the discovery of a new Information Disclosure vulnerability. The findings were proactively reported to VMware and later released under CVE-2022-22948.\nThe vulnerability described in this paper is part of a critical kill chain that leads to an ESXi takeover. In the full attack vector, which is a subject for a future article, we can see that initial endpoint access to a host with a vCenter client lends itself to a complete takeover of the organization’s ESXis. The devil and his merry band of demons are in the details of the chained vulnerabilities exploited as part of this attack vector.\nFrom initial access to complete server takeover Image 1 – Chaining multiple vulnerabilities for a complete view of cybersecurity risk Pentera Labs firmly believes security readiness is not measured by a single vulnerability or the security team’s ability to discover or patch it. Rather, an organization’s security posture is determined by whether that vulnerability can be exploited directly or chained to preceding vulnerabilities across the complete attack operation.\nIn the case of VMware vCenter vulnerabilities, the adversary can take over the host where the vCenter application is running and all of its ESXi servers deployed in a hybrid infrastructure and virtual machines hosted and managed by the hypervisor.\nRecent reports of ransomware gangs encrypting large amounts of virtual machines highlight the criticality of ransomware strains adding this vector to their arsenal of TTPs.\nWith our customers’ increased focus on virtualization infrastructure, Pentera Labs researchers set out on a mission to further enhance its existing attack frameworks used to identify, elevate, exploit and progress attack operations. As always, Pentera’s methods are to assume the attacker’s view and identify ways in which the adversary can take advantage of critical weaknesses – those known and those yet to be discovered.\nAs our starting point, we gained shell access to a fresh instance of a VMware vCenter using a low-privileged user named ‘vpshere-ui’, a member of the “cis” group. So far, so good.\nDuring our research on the vCenter client, we located a file containing plaintext login credentials for the client’s postgresDB: “/etc/vmware-vpx/vcdb.properties”. This file is accessible to any of the users that are part of the “cis” group.\nIn other words, any user that is a member of the “cis” group can connect to the vCenter’s Postgres database.\nCredentials to PostgresDB in vcdb.properties Armed with the PostgresDB credentials, we proceeded to conduct an examination of the PostgresDB. We used the following command to connect to the DB, placing the credentials found in vcdb.properties to good use:\n/opt/vmware/vpostgres/current/bin/psql -d VCDB -U vc -w <Password> Here we discovered that it contains a wealth of information about the ESXi and vCenter, including information about the datacenters and virtual machines that are stored on them. For example:\nVCDB query for information about virtual machines located on the ESXi Another table is the table ‘vpx_host’ containing details for a user called ‘vpxuser’ and its password phrase. The vpx_host table holds a record for each managed ESXi, each containing a user called “vpxuser” and a unique password phrase.\nSo we retrieved the password phrase, using the command:\n/opt/vmware/vpostgres/current/bin/psql -d VCDB -U vc -w <Password> -c 'SELECT user_name, password FROM vc.vpx_host;' The vpxuser password phrase Next, we dived in to investigate the “vpxuser”.\nTurns out that “vpxuser” is a high-privileged user automatically created on the first connection between the ESXi to the vCenter.\nThe “vpxuser” user is created on the ESXi by default and is designed according to the principle of least-privilege, so it can be managed by the vCenter without the use of root. The user is created through a process called “vpxd” which is responsible for communication between the ESXi and the vCenter.\nThere isn’t a lot of information about this user, but we found a comment about it on the “passwd” file on the ESXi. The “passwd” file is usually used to keep track of users that have access to a system and it contains information about the user accounts. We were able to gather a lot of information about the user “vpxuser” from the file. Eventually, it was the description that led us to our next finding – “VMware VirtualCenter administration account”.\nWe started investigating the “vpxd” process using IDA in an effort to better understand how the “vpxuser” and its password are created and recorded in the PostgresDB that began this journey.\nOur first step was to search for the string “VMware VirtualCenter administration account” using IDA’s Strings tab to see where else this string is referenced. This search led to the function related to the creation of the user on the ESXi. From there, we could identify the function where the password is created as the figure below shows.\nPassword creation function call Diving into the “create_random_password” function, we identified the use of Random_Crypto (open-vm-tools), which suggests that the password for this user is randomly created.\nRandom_Crypto function in “create_random_password” We knew that the password must be saved to the vCenter’s PostgresDB since it is randomly generated upon the first connection and is required for further communication. Yet, as we previously saw in the DB, the password is not saved in plaintext. We immediately noticed that the password phrase is encoded in base64, yet the encoded phrase was not readable, so we assumed it is also encrypted.\nThe vpxuser password phrase We started exploring the processes the password goes through, as it is created, encrypted, encoded and finally, saved in the DB.\nEventually, we found the encryption function – only to discover that it uses OpenSSL Symmetric EVP common encryption method.\nA call to the function that encrypts the password Symmetric encryption uses the same secret key both to encrypt and decrypt the information. By using symmetric encryption algorithms, data is converted to a form that cannot be understood by anyone who does not possess the secret key.\nThe EVP functions provide a high level interface to OpenSSL cryptographic functions. In order to perform symmetric encryption or decryption using EVP you will need to know:\nSo now that we know what a symmetric encryption looks like, let’s go back and identify the password creation method. Since the IV is randomized, we deduced that it’s probably also saved to the DB. And it is! Once we found the function where the IV is created, this led the road to the decryption function!\nThe call to the OpenSSL decryption function We were ready to proceed, having found all 3 prerequisites needed to decrypt a symmetric encryption:\nThere was still one missing piece to this puzzle. The “/etc/vmware-vpx/ssl/symkey.dat” file is only accessible to high-privileged users, so we needed a method that would give us root privileges to read it. Luckily, we had a method ready on stand-by thanks to our previous research and discovery of CVE-2021-22015, a privilege escalation vulnerability.\nOnce we extracted the key, we had all the ingredients necessary to decrypt the password. We wrote a python script to extract the cleartext password and got ourselves high-privilege credentials to ESXi!\nTo remediate CVE-2022-22948, apply the updates listed in VMware’s Advisory site. There is no known workaround.\nWe were ready to verify that we had enough to decrypt the password. Using a script we created for this purpose, we entered the encoded-encrypted vpxuser password phrase and the key as arguments. This is the result we received:\nOur Python script decrypted the password!\nWe used the vpxuser credentials to connect via SSH to the managed ESXi with high privileges and gained full control of the ESXi. We could control the ESXi as we wish – extract the memory of virtual machines, list inventory, get sensitive files, access sensitive information, you name it.\nWatch Yuval’s 20-minute online session covering this vulnerability or read the PDF version of this article.\nBegin your journey in security validation and see why leading companies trust us with their cybersecurity validation.",
+  "ID_list": [
+    "T1078.001"
+  ],
+  "Name_list": [
+    "Discovery",
+    "Hypervisor",
+    "Impact",
+    "Initial Access",
+    "Privilege Escalation"
+  ],
+  "TTP_sentences": {
+    "T1078.001": [
+      {
+        "sentence": "New zero-day vulnerability joins a chain of recently discovered vulnerabilities capable of operating an end-to-end attack on ESXi.",
+        "score": 0.4186
+      },
+      {
+        "sentence": "Organizations should evaluate risk and apply vCenter client patches immediately.",
+        "score": 0.3622
+      },
+      {
+        "sentence": "Pentera Labs’ Senior Security Researcher, Yuval Lazar, discovered an Information Disclosure vulnerability impacting more than 500,000 appliances running default vCenter Server deployments.",
+        "score": 0.5373
+      },
+      {
+        "sentence": "According to VMware – more than 80 percent of virtualized workloads are running on VMware technology, including 100 percent of Fortune 500 and Fortune Global 100 companies.",
+        "score": 0.3857
+      },
+      {
+        "sentence": "The ease and convenience that vCenter offers for managing virtualized hosts in enterprise environments provides cybercriminals with centralized access and the potential to inflict widespread damage on organizations.",
+        "score": 0.332
+      },
+      {
+        "sentence": "In the full attack vector, threat actors can completely take over an organization’s ESXi’s deployed in a hybrid infrastructure and virtual machines hosted and managed by the hypervisor from just endpoint access to a host with a vCenter client.",
+        "score": 0.4846
+      },
+      {
+        "sentence": "VMware has issued a patch for the vulnerability that can be found here.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "Installed in hundreds of thousands of organizations worldwide and used to manage some of their most critical asset and core systems, VMware vCenter Server is a high-priority target for cybercriminals.",
+        "score": 0.4279
+      },
+      {
+        "sentence": "Once compromised, the ease and convenience that vCenter offers for managing virtualized hosts in enterprise environments will play into the adversary’s hands, providing centralized access and widespread damage.",
+        "score": 0.4507
+      },
+      {
+        "sentence": "Spurred by previously reported vulnerabilities, increasing demand from our customers, and threats observed in the wild, most notably recent reports of a python ransomware strain targeting ESXi, Pentera Labs has doubled down on exploring new vCenter attack vectors.",
+        "score": 0.4071
+      },
+      {
+        "sentence": "The result of these explorations was the discovery of a new Information Disclosure vulnerability.",
+        "score": 0.4191
+      },
+      {
+        "sentence": "The findings were proactively reported to VMware and later released under CVE-2022-22948.",
+        "score": 0.3669
+      },
+      {
+        "sentence": "The vulnerability described in this paper is part of a critical kill chain that leads to an ESXi takeover.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "In the full attack vector, which is a subject for a future article, we can see that initial endpoint access to a host with a vCenter client lends itself to a complete takeover of the organization’s ESXis.",
+        "score": 0.5266
+      },
+      {
+        "sentence": "The devil and his merry band of demons are in the details of the chained vulnerabilities exploited as part of this attack vector.",
+        "score": 0.4164
+      },
+      {
+        "sentence": "From initial access to complete server takeover Image 1 – Chaining multiple vulnerabilities for a complete view of cybersecurity risk Pentera Labs firmly believes security readiness is not measured by a single vulnerability or the security team’s ability to discover or patch it.",
+        "score": 0.4583
+      },
+      {
+        "sentence": "Rather, an organization’s security posture is determined by whether that vulnerability can be exploited directly or chained to preceding vulnerabilities across the complete attack operation.",
+        "score": 0.4274
+      },
+      {
+        "sentence": "In the case of VMware vCenter vulnerabilities, the adversary can take over the host where the vCenter application is running and all of its ESXi servers deployed in a hybrid infrastructure and virtual machines hosted and managed by the hypervisor.",
+        "score": 0.462
+      },
+      {
+        "sentence": "Recent reports of ransomware gangs encrypting large amounts of virtual machines highlight the criticality of ransomware strains adding this vector to their arsenal of TTPs.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "With our customers’ increased focus on virtualization infrastructure, Pentera Labs researchers set out on a mission to further enhance its existing attack frameworks used to identify, elevate, exploit and progress attack operations.",
+        "score": 0.4712
+      },
+      {
+        "sentence": "As always, Pentera’s methods are to assume the attacker’s view and identify ways in which the adversary can take advantage of critical weaknesses – those known and those yet to be discovered.",
+        "score": 0.4739
+      },
+      {
+        "sentence": "As our starting point, we gained shell access to a fresh instance of a VMware vCenter using a low-privileged user named ‘vpshere-ui’, a member of the “cis” group.",
+        "score": 0.6444
+      },
+      {
+        "sentence": "During our research on the vCenter client, we located a file containing plaintext login credentials for the client’s postgresDB: “/etc/vmware-vpx/vcdb.properties”.",
+        "score": 0.6834
+      },
+      {
+        "sentence": "This file is accessible to any of the users that are part of the “cis” group.",
+        "score": 0.5033
+      },
+      {
+        "sentence": "In other words, any user that is a member of the “cis” group can connect to the vCenter’s Postgres database.",
+        "score": 0.5772
+      },
+      {
+        "sentence": "Credentials to PostgresDB in vcdb.properties Armed with the PostgresDB credentials, we proceeded to conduct an examination of the PostgresDB.",
+        "score": 0.6039
+      },
+      {
+        "sentence": "We used the following command to connect to the DB, placing the credentials found in vcdb.properties to good use: /opt/vmware/vpostgres/current/bin/psql -d VCDB -U vc -w <Password> Here we discovered that it contains a wealth of information about the ESXi and vCenter, including information about the datacenters and virtual machines that are stored on them.",
+        "score": 0.5424
+      },
+      {
+        "sentence": "For example: VCDB query for information about virtual machines located on the ESXi Another table is the table ‘vpx_host’ containing details for a user called ‘vpxuser’ and its password phrase.",
+        "score": 0.438
+      },
+      {
+        "sentence": "The vpx_host table holds a record for each managed ESXi, each containing a user called “vpxuser” and a unique password phrase.",
+        "score": 0.584
+      },
+      {
+        "sentence": "So we retrieved the password phrase, using the command: /opt/vmware/vpostgres/current/bin/psql -d VCDB -U vc -w <Password> -c 'SELECT user_name, password FROM vc.vpx_host;' The vpxuser password phrase Next, we dived in to investigate the “vpxuser”.",
+        "score": 0.5488
+      },
+      {
+        "sentence": "Turns out that “vpxuser” is a high-privileged user automatically created on the first connection between the ESXi to the vCenter.",
+        "score": 0.5915
+      },
+      {
+        "sentence": "The “vpxuser” user is created on the ESXi by default and is designed according to the principle of least-privilege, so it can be managed by the vCenter without the use of root.",
+        "score": 0.585
+      },
+      {
+        "sentence": "The user is created through a process called “vpxd” which is responsible for communication between the ESXi and the vCenter.",
+        "score": 0.4228
+      },
+      {
+        "sentence": "There isn’t a lot of information about this user, but we found a comment about it on the “passwd” file on the ESXi.",
+        "score": 0.5305
+      },
+      {
+        "sentence": "The “passwd” file is usually used to keep track of users that have access to a system and it contains information about the user accounts.",
+        "score": 0.5732
+      },
+      {
+        "sentence": "We were able to gather a lot of information about the user “vpxuser” from the file.",
+        "score": 0.5236
+      },
+      {
+        "sentence": "Eventually, it was the description that led us to our next finding – “VMware VirtualCenter administration account”.",
+        "score": 0.6495
+      },
+      {
+        "sentence": "We started investigating the “vpxd” process using IDA in an effort to better understand how the “vpxuser” and its password are created and recorded in the PostgresDB that began this journey.",
+        "score": 0.5721
+      },
+      {
+        "sentence": "Our first step was to search for the string “VMware VirtualCenter administration account” using IDA’s Strings tab to see where else this string is referenced.",
+        "score": 0.4403
+      },
+      {
+        "sentence": "This search led to the function related to the creation of the user on the ESXi.",
+        "score": 0.5222
+      },
+      {
+        "sentence": "From there, we could identify the function where the password is created as the figure below shows.",
+        "score": 0.5108
+      },
+      {
+        "sentence": "Password creation function call Diving into the “create_random_password” function, we identified the use of Random_Crypto (open-vm-tools), which suggests that the password for this user is randomly created.",
+        "score": 0.5231
+      },
+      {
+        "sentence": "Random_Crypto function in “create_random_password” We knew that the password must be saved to the vCenter’s PostgresDB since it is randomly generated upon the first connection and is required for further communication.",
+        "score": 0.4931
+      },
+      {
+        "sentence": "Yet, as we previously saw in the DB, the password is not saved in plaintext.",
+        "score": 0.496
+      },
+      {
+        "sentence": "We immediately noticed that the password phrase is encoded in base64, yet the encoded phrase was not readable, so we assumed it is also encrypted.",
+        "score": 0.4062
+      },
+      {
+        "sentence": "The vpxuser password phrase We started exploring the processes the password goes through, as it is created, encrypted, encoded and finally, saved in the DB.",
+        "score": 0.5146
+      },
+      {
+        "sentence": "Eventually, we found the encryption function – only to discover that it uses OpenSSL Symmetric EVP common encryption method.",
+        "score": 0.3997
+      },
+      {
+        "sentence": "A call to the function that encrypts the password Symmetric encryption uses the same secret key both to encrypt and decrypt the information.",
+        "score": 0.4433
+      },
+      {
+        "sentence": "By using symmetric encryption algorithms, data is converted to a form that cannot be understood by anyone who does not possess the secret key.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "The EVP functions provide a high level interface to OpenSSL cryptographic functions.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "In order to perform symmetric encryption or decryption using EVP you will need to know: So now that we know what a symmetric encryption looks like, let’s go back and identify the password creation method.",
+        "score": 0.4709
+      },
+      {
+        "sentence": "Since the IV is randomized, we deduced that it’s probably also saved to the DB.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "Once we found the function where the IV is created, this led the road to the decryption function!",
+        "score": 0.3932
+      },
+      {
+        "sentence": "The call to the OpenSSL decryption function We were ready to proceed, having found all 3 prerequisites needed to decrypt a symmetric encryption: There was still one missing piece to this puzzle.",
+        "score": 0.3808
+      },
+      {
+        "sentence": "The “/etc/vmware-vpx/ssl/symkey.dat” file is only accessible to high-privileged users, so we needed a method that would give us root privileges to read it.",
+        "score": 0.5525
+      },
+      {
+        "sentence": "Luckily, we had a method ready on stand-by thanks to our previous research and discovery of CVE-2021-22015, a privilege escalation vulnerability.",
+        "score": 0.4384
+      },
+      {
+        "sentence": "Once we extracted the key, we had all the ingredients necessary to decrypt the password.",
+        "score": 0.4678
+      },
+      {
+        "sentence": "We wrote a python script to extract the cleartext password and got ourselves high-privilege credentials to ESXi!",
+        "score": 0.6592
+      },
+      {
+        "sentence": "To remediate CVE-2022-22948, apply the updates listed in VMware’s Advisory site.",
+        "score": 0.3285
+      },
+      {
+        "sentence": "Exploitation for Credential Access () Exploitation for Privilege Escalation () I wanted to say thanks to everyone at VMware involved with the patch for this vulnerability.",
+        "score": 0.55
+      },
+      {
+        "sentence": "We were ready to verify that we had enough to decrypt the password.",
+        "score": 0.4085
+      },
+      {
+        "sentence": "Using a script we created for this purpose, we entered the encoded-encrypted vpxuser password phrase and the key as arguments.",
+        "score": 0.5056
+      },
+      {
+        "sentence": "This is the result we received: Our Python script decrypted the password!",
+        "score": 0.3194
+      },
+      {
+        "sentence": "We used the vpxuser credentials to connect via SSH to the managed ESXi with high privileges and gained full control of the ESXi.",
+        "score": 0.6682
+      },
+      {
+        "sentence": "We could control the ESXi as we wish – extract the memory of virtual machines, list inventory, get sensitive files, access sensitive information, you name it.",
+        "score": 0.3983
+      },
+      {
+        "sentence": "Watch Yuval’s 20-minute online session covering this vulnerability or read the PDF version of this article.",
+        "score": 0.383
+      },
+      {
+        "sentence": "Begin your journey in security validation and see why leading companies trust us with their cybersecurity validation.",
+        "score": 0.31
+      }
+    ]
+  }
+}

@@ -1,0 +1,286 @@
+{
+  "original_txt": "Published by Digital Forensics and Incident Response on 15 September 2023\nThe CyberCX DFIR team has been engaged to assist in multiple investigations related to the Akira ransomware group, which has been seen affecting victims since April 2023. One novel technique that we’ve observed leverages deployment of ransomware onto Windows Hyper-V hypervisor systems, causing major damage to attached virtual machines (VMs). Even when Windows-based hypervisor and target virtual machines are running prominent Endpoint Detection & Response (EDR) tooling, the threat actor has been observed circumventing this by creating new, unmonitored, VMs on the hypervisor, from which they can navigate directories on the hypervisor and execute their ransomware.\nWhile Akira leverages many known attack techniques, this article focuses on some standout methods that we’ve observed.\nInitial Access\nCyberCX is aware of several Akira ransomware attacks which leveraged VPN access with no multi-factor authentication (MFA) applied on the initial access point. This was emphasised by Cisco in a recent blog post. In our experience, when conducting a thorough review to ascertain where compromised credentials have been obtained, no obvious locations have been identified. [1] Based on similar activity in previous ransomware cases by other threat actors, we believe that Akira typically obtains access through info stealers and credential marketplaces.\nIntrusion Activities\nCyberCX has observed Akira conducting typical cyber-extortion activity post-initial access which includes but is not limited to:\n- Scanning the network using SoftPerfect Network Scanner (netscan.exe)\n- Enumeration of data available in the Active Directory through AdFind (AdFind.exe)\n- Identifying sensitive information on file shares and servers to exfiltrate by uploading it over SFTP using FileZilla\n- Installing SystemBC and creating a scheduled task to remain persistent.\nDefence Evasion & Impact\nWe have observed this threat actor maintain access to compromised environments for several weeks before they achieve their objectives of deploying ransomware. While we expect they intend to encrypt an entire network, we’ve also observed EDR tooling slowing down their progress to their final objectives. One of our more interesting observations has been the threat actor initially attempting to disable EDR using a vulnerable driver.\nTerminator\nIt was reported by CrowdStrike that in May 2023, a user on a dark web forum, Spyboy, promoted a tool they called Terminator, that was used to stop actively running EDR tools in an effort to circumvent detection. This tool was for sale for US$3,000 at the time and reverse engineers confirmed that it utilised a signed kernel driver file taken from the Zemana Anti-Malware program to perform privileged operations, which is commonly referred to as a Bring Your Own Vulnerable Driver (BYOVD) attack.\nIn early June, a GitHub user ZeroMemoryEx created a tool also named Terminator with the same functionality and published their source code on GitHub.\nWithin 3-5 days of the open-source release of Terminator, we observed Akira attempt to use this tool (as confirmed with a hash match to the tool on GitHub) to evade detection. We have also seen one prominent EDR agent and Windows Defender detect this program execution as malicious, with no apparent impact to the operation of the EDR agent.\nAttacking the Hypervisor Layer\nDuring other investigations we have typically seen threat actors execute their ransomware directly on the hypervisor, which will encrypt all of the files including virtual disk images stored in the various datastores. However, in other situations we believe the threat actor has seen an EDR tool in place, that is clearly capable of preventing their malicious program executions and even their EDR evasion has been successfully stopped. As a result, we’ve observed them deviating from their standard playbook and using a privileged account to launch a new, clean VM within the hypervisor.\nFrom the threat actor’s perspective, the benefit is that the VM they created has all the access needed to the network, and none of the security controls of another typical host on the same network.\nAfter accessing the VM, the threat actor would disable Windows Defender, mount the data storage drives on the hypervisor, stop (shut down) VMs to release locked disk image files, and then execute the ransomware. While EDR tooling can detect that encryption has commenced, it is generally unable to block it as the process is executing on the VM, which would impact VMs in a shutdown state. As the attacker VMs are still running, they are not encrypted, which allowed forensic analysis to piece together the investigation.\nThe technique of using custom VMs is not new, and CyberCX has seen multiple investigations where a threat actor has built their own VM to conduct their malicious activities. Discussed at the end of this blog, you can find forensic artefacts and detection opportunities that may arise if you are running hypervisors in your environment or investigating a breach across hypervisors.\nVulnerable Ransomware\nAnalysts across the cybersecurity community have recently confirmed that a vulnerability existed within the Akira ransomware implementation. The decryption vulnerability relates to the use of a stream cipher (ChaCha20) that produces a fixed keystream per execution, which is then used for all files to be encrypted. This allows for the possibility of decryption without paying the ransom, however there are a few limitations. CyberCX confirmed the vulnerability and developed a working capability to decrypt encrypted data under certain circumstances shortly before the public release of the flaw by Avast.\nExploiting the vulnerability requires a file pair before and after encryption (plaintext and ciphertext), however you could only decrypt files smaller than the file pair. The first issue is identifying a valid pair, which can be difficult in cases where all backup data has also been encrypted.\nOne way to partially navigate this challenge is by identifying a file pair that could be sourced independently. In one case, we used several encrypted ISO files containing default installations of operating systems which were stored on a hypervisor (which is reasonably common in hypervisor datastores). Unencrypted versions of these are often available from their official sources on the internet and can be used to generate the data needed. This solution has proven adequate for successfully decrypting small files on encrypted servers (specifically smaller than the ISO files). Unfortunately though, it may not be helpful in recovering what is often the most critical files on a hypervisor; large virtual hard disks.\nHowever, as is common in ransomware encryption routines, threat actors rarely encrypt entire disks, each of which could be several hundred gigabytes in size, as this would be too slow. Instead, they often rely on intermittent encryption which only encrypts portions of large files, rendering them unreadable by tools, unable to be mounted cleanly, difficult to recover data from, and practically unusable. Another technique is to target file headers, being metadata stored at the beginning of most files. In these cases, we’ve seen ransomware actors only encrypting the first few MB of files targeting these file headers, but usually they also intermittently encrypt other portions of the file as well, to make recovery difficult to impossible, depending on the format of the file. SentinelOne produced an excellent article listing intermittent encryption options used by several ransomware variants.\nIn such cases, relying on available backups is the primary method of data restoration, and carving files and forensic artefacts from the non-encrypted portions of the affected virtual hard disks is the last resort.\n“Just because files are encrypted doesn’t mean that they’re completely unrecoverable!“\nCyberCX has significant experience investigating partially encrypted virtual hard disks – in some cases completely recovering the underlying data. Phill Moore recently presented a case study at the 2023 Magnet Virtual Summit on an investigation involving recovering data from an encrypted virtual disk that allowed CyberCX to confirm the initial infection vector during a ransomware attack. Yogesh Khatri wrote an open-source tool – JARP that allows recovery of data from partially encrypted registry hives.\nPatched in 3 Days\nOn 29 June 2023, Avast published a decryptor for Akira which utilised the same vulnerability identified above. By releasing the decryptor to the public, it also informed the owners of the ransomware.\nAn Akira ransomware sample that did not contain the vulnerability was uploaded to VirusTotal on 7 July 2023. The PE metadata recorded that it was compiled on 2 July 2023. This confirmed that within three days, Akira had patched the vulnerability and newer samples did not have the vulnerable code.[2]\nAs such, we anticipate that any new or recent Akira ransomware attack should be expected to use a newer ransomware variant which is not vulnerable to this weakness. However, any organisation who suffered an Akira ransomware attack prior to around 7 July 2023 and still has their encrypted data, may be able to use this weakness to decrypt their data.\nWhat about ESXi?\nCyberCX has also observed vSphere/ESXi environments being affected by ransomware in a way that would impact recovery. In some cases, threat actors apply different approaches to different ESXi hosts, even within the same network, including encryption through ransomware, changing the root password, or in some cases doing nothing to the hypervisor.\nIn cases where the threat actor did not (or perhaps could not) shut down the virtual machines, their disks were locked and would not be encrypted, however binaries on the ESXi host would still be encrypted. In these cases, the remediation team has the opportunity to save the underlying VMs, but forensic analysis of the hypervisor would be impacted.\nWe also note that public reporting on a Linux variant of the Akira ransomware has recently been published.\nRecommended Detection and Hunting Opportunities\n1. Hyper-V Hypervisor Logging and Activities\nCyberCX has compiled the following table of hypervisor event logs based on some validation testing that was performed on Windows Server 2022. It’s worth noting that no logs are generated after creating a “checkpoint (snapshot)” for a VM and when attempting to “connect” to a VM.\nAction Performed |\nEvent ID |\nChannel |\nProvider |\n| Created VM (Creation started) | 18304 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS |\n| Created VM (Successfully Created) | 13002 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS |\n| Started VM | 12148 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-SynthStor |\n| Started VM | 18500 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Saved VM | 18510 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Restoring VM | 18596 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Exporting VM | 18303 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS |\n| Pause VM | 18516 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Resume VM | 18518 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Turn Off VM | 18502 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Reset VM (Using Hyper-V Manager) | 18512 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Reset VM (Using Guest Operating System) | 18514 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Shut Down VM (Using The Shutdown Integration Component) | 18504 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Shut Down VM (Using Guest Operating System) | 18508 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker |\n| Moved VM’s Storage Location | 20927 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS |\n| Deleted VM | 13003 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS |\n2. VMware ESXi / vSphere Logging and Activities\nVirtual Machine Audit activity can be reviewed by logging onto the ESXi host utilising an administrator/root account. Activity is recorded in the “hostd.log” file found here:\n- /var/log/hostd.log\n- /var/run/log/hostd.log\nBelow is an extract from our test instance demonstrating the creation of a new virtual machine.\n2023-07-25T07:29:57.870Z info hostd[2098947] [Originator@6876 sub=Vmsvc opID=esxui-46f0-93b4 user=EvilUser] Create VM initiated [54]: /vmfs/volumes/<VOLUME_ID>/MySecretVM/MySecretVM.vmx 2023-07-25T07:29:57.871Z info hostd[2098947] [Originator@6876 sub=Vimsvc.ha-eventmgr opID=esxui-46f0-93b4 user=EvilUser] Event 838 : Creating MySecretVM on host <ESXi_INSTANCE> in <LOCATION>\nOnce the VM was created there was a state change from VM_STATE_INITIALIZING to VM_STATE_OFF.\n2023-07-25T07:30:00.126Z info hostd[2098947] [Originator@6876 sub=Vmsvc.vm:/vmfs/volumes/<VOLUME_ID>/MySecretVM/MySecretVM.vmx opID=esxui-46f0-93b4 user=EvilUser] State Transition (VM_STATE_INITIALIZING -> VM_STATE_OFF) 2023-07-25T07:30:00.127Z info hostd[2098947] [Originator@6876 sub=Vmsvc.vm:/vmfs/volumes/<VOLUME_ID>/MySecretVM/MySecretVM.vmx opID=esxui-46f0-93b4 user=EvilUser] Initialized virtual machine /vmfs/volumes/<VOLUME_ID>/MySecretVM MySecretVM.vmx\nWhen conducting forensics or incident response, you can collect these logs either through direct SSH access to the host or through generating a “support bundle” which includes the necessary logs from /var/log on the host.\nBlue teams should also consider enabling syslog to automatically forward these events to a SIEM or log aggregation platform.\nAdditional log locations can be found here.\n3. Standard or Default Windows Workstation names leaked in Windows authentication logs\nWhen a new Windows endpoint is setup, the hostname, if not manually assigned by the organisation will start with “WIN-“ or “DESKTOP-“ or “PC-“ or “WORKSTATION-“. Most ransomware actors we’ve seen use these defaults, which subsequently end up in event logs. A review of the Security authentication logs on Windows (Event ID 4624/4625) may show attempted or successful accesses. Furthermore, if these authentication attempts have an IP address from your VPN address pool, it may indicate that an unmanaged device is connected.\nThis may also be observed in Remote Desktop and SMB File share related event logs as well.\n4. Audit infrastructure and ensure you have coverage of your security tooling\nThe CyberCX DFIR team commonly identifies initial access vectors or hives of threat actor activity around unmanaged hosts. Whether it is a test VM in Azure left open to the Internet, or an old “decommissioned” host that is left unpatched, ensuring you have proper visibility of these hosts will enable you to assess your risk.\nAuthors: Phill Moore and Zach Stanford with contributions from Suyash Tripathi and Yogesh Khatri\nCyberCX Security, Testing and Assurance and Managed Security Services\n[1] CyberCX assesses with medium confidence these credentials were obtained outside of the affected network.\n[2] Akira has also made recent changes to their binary again, now going by “Megazord” – VirusTotal – File – c9c94ac5e1991a7db42c7973e328fceeb6f163d9f644031bdfd4123c7b3898b0",
+  "sanitized_txt": "Published by Digital Forensics and Incident Response on 15 September 2023 The CyberCX DFIR team has been engaged to assist in multiple investigations related to the Akira ransomware group, which has been seen affecting victims since April 2023. One novel technique that we’ve observed leverages deployment of ransomware onto Windows Hyper-V hypervisor systems, causing major damage to attached virtual machines (VMs). Even when Windows-based hypervisor and target virtual machines are running prominent Endpoint Detection & Response (EDR) tooling, the threat actor has been observed circumventing this by creating new, unmonitored, VMs on the hypervisor, from which they can navigate directories on the hypervisor and execute their ransomware.\nWhile Akira leverages many known attack techniques, this article focuses on some standout methods that we’ve observed.\nInitial Access CyberCX is aware of several Akira ransomware attacks which leveraged VPN access with no multi-factor authentication (MFA) applied on the initial access point. This was emphasised by Cisco in a recent blog post. In our experience, when conducting a thorough review to ascertain where compromised credentials have been obtained, no obvious locations have been identified. [1] Based on similar activity in previous ransomware cases by other threat actors, we believe that Akira typically obtains access through info stealers and credential marketplaces.\nIntrusion Activities CyberCX has observed Akira conducting typical cyber-extortion activity post-initial access which includes but is not limited to:\n- Scanning the network using SoftPerfect Network Scanner (netscan.exe) - Enumeration of data available in the Active Directory through AdFind (AdFind.exe) - Identifying sensitive information on file shares and servers to exfiltrate by uploading it over SFTP using FileZilla - Installing SystemBC and creating a scheduled task to remain persistent.\nDefence Evasion & Impact We have observed this threat actor maintain access to compromised environments for several weeks before they achieve their objectives of deploying ransomware. While we expect they intend to encrypt an entire network, we’ve also observed EDR tooling slowing down their progress to their final objectives. One of our more interesting observations has been the threat actor initially attempting to disable EDR using a vulnerable driver.\nTerminator It was reported by CrowdStrike that in May 2023, a user on a dark web forum, Spyboy, promoted a tool they called Terminator, that was used to stop actively running EDR tools in an effort to circumvent detection. This tool was for sale for US$3,000 at the time and reverse engineers confirmed that it utilised a signed kernel driver file taken from the Zemana Anti-Malware program to perform privileged operations, which is commonly referred to as a Bring Your Own Vulnerable Driver (BYOVD) attack.\nIn early June, a GitHub user ZeroMemoryEx created a tool also named Terminator with the same functionality and published their source code on GitHub.\nWithin 3-5 days of the open-source release of Terminator, we observed Akira attempt to use this tool (as confirmed with a hash match to the tool on GitHub) to evade detection. We have also seen one prominent EDR agent and Windows Defender detect this program execution as malicious, with no apparent impact to the operation of the EDR agent.\nAttacking the Hypervisor Layer During other investigations we have typically seen threat actors execute their ransomware directly on the hypervisor, which will encrypt all of the files including virtual disk images stored in the various datastores. However, in other situations we believe the threat actor has seen an EDR tool in place, that is clearly capable of preventing their malicious program executions and even their EDR evasion has been successfully stopped. As a result, we’ve observed them deviating from their standard playbook and using a privileged account to launch a new, clean VM within the hypervisor.\nFrom the threat actor’s perspective, the benefit is that the VM they created has all the access needed to the network, and none of the security controls of another typical host on the same network.\nAfter accessing the VM, the threat actor would disable Windows Defender, mount the data storage drives on the hypervisor, stop (shut down) VMs to release locked disk image files, and then execute the ransomware. While EDR tooling can detect that encryption has commenced, it is generally unable to block it as the process is executing on the VM, which would impact VMs in a shutdown state. As the attacker VMs are still running, they are not encrypted, which allowed forensic analysis to piece together the investigation.\nThe technique of using custom VMs is not new, and CyberCX has seen multiple investigations where a threat actor has built their own VM to conduct their malicious activities. Discussed at the end of this blog, you can find forensic artefacts and detection opportunities that may arise if you are running hypervisors in your environment or investigating a breach across hypervisors.\nVulnerable Ransomware Analysts across the cybersecurity community have recently confirmed that a vulnerability existed within the Akira ransomware implementation. The decryption vulnerability relates to the use of a stream cipher (ChaCha20) that produces a fixed keystream per execution, which is then used for all files to be encrypted. This allows for the possibility of decryption without paying the ransom, however there are a few limitations. CyberCX confirmed the vulnerability and developed a working capability to decrypt encrypted data under certain circumstances shortly before the public release of the flaw by Avast.\nExploiting the vulnerability requires a file pair before and after encryption (plaintext and ciphertext), however you could only decrypt files smaller than the file pair. The first issue is identifying a valid pair, which can be difficult in cases where all backup data has also been encrypted.\nOne way to partially navigate this challenge is by identifying a file pair that could be sourced independently. In one case, we used several encrypted ISO files containing default installations of operating systems which were stored on a hypervisor (which is reasonably common in hypervisor datastores). Unencrypted versions of these are often available from their official sources on the internet and can be used to generate the data needed. This solution has proven adequate for successfully decrypting small files on encrypted servers (specifically smaller than the ISO files). Unfortunately though, it may not be helpful in recovering what is often the most critical files on a hypervisor; large virtual hard disks.\nHowever, as is common in ransomware encryption routines, threat actors rarely encrypt entire disks, each of which could be several hundred gigabytes in size, as this would be too slow. Instead, they often rely on intermittent encryption which only encrypts portions of large files, rendering them unreadable by tools, unable to be mounted cleanly, difficult to recover data from, and practically unusable. Another technique is to target file headers, being metadata stored at the beginning of most files. In these cases, we’ve seen ransomware actors only encrypting the first few MB of files targeting these file headers, but usually they also intermittently encrypt other portions of the file as well, to make recovery difficult to impossible, depending on the format of the file. SentinelOne produced an excellent article listing intermittent encryption options used by several ransomware variants.\nIn such cases, relying on available backups is the primary method of data restoration, and carving files and forensic artefacts from the non-encrypted portions of the affected virtual hard disks is the last resort.\n“Just because files are encrypted doesn’t mean that they’re completely unrecoverable!“ CyberCX has significant experience investigating partially encrypted virtual hard disks – in some cases completely recovering the underlying data. Phill Moore recently presented a case study at the 2023 Magnet Virtual Summit on an investigation involving recovering data from an encrypted virtual disk that allowed CyberCX to confirm the initial infection vector during a ransomware attack. Yogesh Khatri wrote an open-source tool – JARP that allows recovery of data from partially encrypted registry hives.\nPatched in 3 Days On 29 June 2023, Avast published a decryptor for Akira which utilised the same vulnerability identified above. By releasing the decryptor to the public, it also informed the owners of the ransomware.\nAn Akira ransomware sample that did not contain the vulnerability was uploaded to VirusTotal on 7 July 2023. The PE metadata recorded that it was compiled on 2 July 2023. This confirmed that within three days, Akira had patched the vulnerability and newer samples did not have the vulnerable code.[2] As such, we anticipate that any new or recent Akira ransomware attack should be expected to use a newer ransomware variant which is not vulnerable to this weakness. However, any organisation who suffered an Akira ransomware attack prior to around 7 July 2023 and still has their encrypted data, may be able to use this weakness to decrypt their data.\nWhat about ESXi?\nCyberCX has also observed vSphere/ESXi environments being affected by ransomware in a way that would impact recovery. In some cases, threat actors apply different approaches to different ESXi hosts, even within the same network, including encryption through ransomware, changing the root password, or in some cases doing nothing to the hypervisor.\nIn cases where the threat actor did not (or perhaps could not) shut down the virtual machines, their disks were locked and would not be encrypted, however binaries on the ESXi host would still be encrypted. In these cases, the remediation team has the opportunity to save the underlying VMs, but forensic analysis of the hypervisor would be impacted.\nWe also note that public reporting on a Linux variant of the Akira ransomware has recently been published.\nRecommended Detection and Hunting Opportunities 1. Hyper-V Hypervisor Logging and Activities CyberCX has compiled the following table of hypervisor event logs based on some validation testing that was performed on Windows Server 2022. It’s worth noting that no logs are generated after creating a “checkpoint (snapshot)” for a VM and when attempting to “connect” to a VM.\nAction Performed | Event ID | Channel | Provider | | Created VM (Creation started) | 18304 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS | | Created VM (Successfully Created) | 13002 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS | | Started VM | 12148 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-SynthStor | | Started VM | 18500 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Saved VM | 18510 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Restoring VM | 18596 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Exporting VM | 18303 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS | | Pause VM | 18516 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Resume VM | 18518 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Turn Off VM | 18502 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Reset VM (Using Hyper-V Manager) | 18512 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Reset VM (Using Guest Operating System) | 18514 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Shut Down VM (Using The Shutdown Integration Component) | 18504 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Shut Down VM (Using Guest Operating System) | 18508 | Microsoft-Windows-Hyper-V-Worker-Admin | Microsoft-Windows-Hyper-V-Worker | | Moved VM’s Storage Location | 20927 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS | | Deleted VM | 13003 | Microsoft-Windows-Hyper-V-VMMS-Admin | Microsoft-Windows-Hyper-V-VMMS | 2. VMware ESXi / vSphere Logging and Activities Virtual Machine Audit activity can be reviewed by logging onto the ESXi host utilising an administrator/root account. Activity is recorded in the “hostd.log” file found here:\n- /var/log/hostd.log - /var/run/log/hostd.log Below is an extract from our test instance demonstrating the creation of a new virtual machine.\n2023-07-25T07:29:57.870Z info hostd[2098947] [Originator@6876 sub=Vmsvc opID=esxui-46f0-93b4 user=EvilUser] Create VM initiated [54]: /vmfs/volumes/<VOLUME_ID>/MySecretVM/MySecretVM.vmx 2023-07-25T07:29:57.871Z info hostd[2098947] [Originator@6876 sub=Vimsvc.ha-eventmgr opID=esxui-46f0-93b4 user=EvilUser] Event 838 : Creating MySecretVM on host <ESXi_INSTANCE> in <LOCATION> Once the VM was created there was a state change from VM_STATE_INITIALIZING to VM_STATE_OFF.\n2023-07-25T07:30:00.126Z info hostd[2098947] [Originator@6876 sub=Vmsvc.vm:/vmfs/volumes/<VOLUME_ID>/MySecretVM/MySecretVM.vmx opID=esxui-46f0-93b4 user=EvilUser] State Transition (VM_STATE_INITIALIZING -> VM_STATE_OFF) 2023-07-25T07:30:00.127Z info hostd[2098947] [Originator@6876 sub=Vmsvc.vm:/vmfs/volumes/<VOLUME_ID>/MySecretVM/MySecretVM.vmx opID=esxui-46f0-93b4 user=EvilUser] Initialized virtual machine /vmfs/volumes/<VOLUME_ID>/MySecretVM MySecretVM.vmx When conducting forensics or incident response, you can collect these logs either through direct SSH access to the host or through generating a “support bundle” which includes the necessary logs from /var/log on the host.\nBlue teams should also consider enabling syslog to automatically forward these events to a SIEM or log aggregation platform.\nAdditional log locations can be found here.\n3. Standard or Default Windows Workstation names leaked in Windows authentication logs When a new Windows endpoint is setup, the hostname, if not manually assigned by the organisation will start with “WIN-“ or “DESKTOP-“ or “PC-“ or “WORKSTATION-“. Most ransomware actors we’ve seen use these defaults, which subsequently end up in event logs. A review of the Security authentication logs on Windows (Event ID 4624/4625) may show attempted or successful accesses. Furthermore, if these authentication attempts have an IP address from your VPN address pool, it may indicate that an unmanaged device is connected.\nThis may also be observed in Remote Desktop and SMB File share related event logs as well.\n4. Audit infrastructure and ensure you have coverage of your security tooling The CyberCX DFIR team commonly identifies initial access vectors or hives of threat actor activity around unmanaged hosts. Whether it is a test VM in Azure left open to the Internet, or an old “decommissioned” host that is left unpatched, ensuring you have proper visibility of these hosts will enable you to assess your risk.\nAuthors: Phill Moore and Zach Stanford with contributions from Suyash Tripathi and Yogesh Khatri CyberCX Security, Testing and Assurance and Managed Security Services [1] CyberCX assesses with medium confidence these credentials were obtained outside of the affected network.\n[2] Akira has also made recent changes to their binary again, now going by “Megazord” – VirusTotal – File – c9c94ac5e1991a7db42c7973e328fceeb6f163d9f644031bdfd4123c7b3898b0",
+  "ID_list": [
+    "T1564.006"
+  ],
+  "Name_list": [
+    "Execution",
+    "Hypervisor",
+    "Impact",
+    "Initial Access",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1564.006": [
+      {
+        "sentence": "Published by Digital Forensics and Incident Response on 15 September 2023 The CyberCX DFIR team has been engaged to assist in multiple investigations related to the Akira ransomware group, which has been seen affecting victims since April 2023.",
+        "score": 0.4075
+      },
+      {
+        "sentence": "One novel technique that we’ve observed leverages deployment of ransomware onto Windows Hyper-V hypervisor systems, causing major damage to attached virtual machines (VMs).",
+        "score": 0.6225
+      },
+      {
+        "sentence": "Even when Windows-based hypervisor and target virtual machines are running prominent Endpoint Detection & Response (EDR) tooling, the threat actor has been observed circumventing this by creating new, unmonitored, VMs on the hypervisor, from which they can navigate directories on the hypervisor and execute their ransomware.",
+        "score": 0.6911
+      },
+      {
+        "sentence": "While Akira leverages many known attack techniques, this article focuses on some standout methods that we’ve observed.",
+        "score": 0.3217
+      },
+      {
+        "sentence": "Initial Access CyberCX is aware of several Akira ransomware attacks which leveraged VPN access with no multi-factor authentication (MFA) applied on the initial access point.",
+        "score": 0.3564
+      },
+      {
+        "sentence": "This was emphasised by Cisco in a recent blog post.",
+        "score": 0.3262
+      },
+      {
+        "sentence": "In our experience, when conducting a thorough review to ascertain where compromised credentials have been obtained, no obvious locations have been identified. [1] Based on similar activity in previous ransomware cases by other threat actors, we believe that Akira typically obtains access through info stealers and credential marketplaces.",
+        "score": 0.3612
+      },
+      {
+        "sentence": "Intrusion Activities CyberCX has observed Akira conducting typical cyber-extortion activity post-initial access which includes but is not limited to: - Scanning the network using SoftPerfect Network Scanner (netscan.exe) - Enumeration of data available in the Active Directory through AdFind (AdFind.exe) - Identifying sensitive information on file shares and servers to exfiltrate by uploading it over SFTP using FileZilla - Installing SystemBC and creating a scheduled task to remain persistent.",
+        "score": 0.4637
+      },
+      {
+        "sentence": "Defence Evasion & Impact We have observed this threat actor maintain access to compromised environments for several weeks before they achieve their objectives of deploying ransomware.",
+        "score": 0.4564
+      },
+      {
+        "sentence": "While we expect they intend to encrypt an entire network, we’ve also observed EDR tooling slowing down their progress to their final objectives.",
+        "score": 0.445
+      },
+      {
+        "sentence": "One of our more interesting observations has been the threat actor initially attempting to disable EDR using a vulnerable driver.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "Terminator It was reported by CrowdStrike that in May 2023, a user on a dark web forum, Spyboy, promoted a tool they called Terminator, that was used to stop actively running EDR tools in an effort to circumvent detection.",
+        "score": 0.4844
+      },
+      {
+        "sentence": "This tool was for sale for US$3,000 at the time and reverse engineers confirmed that it utilised a signed kernel driver file taken from the Zemana Anti-Malware program to perform privileged operations, which is commonly referred to as a Bring Your Own Vulnerable Driver (BYOVD) attack.",
+        "score": 0.4904
+      },
+      {
+        "sentence": "In early June, a GitHub user ZeroMemoryEx created a tool also named Terminator with the same functionality and published their source code on GitHub.",
+        "score": 0.4697
+      },
+      {
+        "sentence": "Within 3-5 days of the open-source release of Terminator, we observed Akira attempt to use this tool (as confirmed with a hash match to the tool on GitHub) to evade detection.",
+        "score": 0.5655
+      },
+      {
+        "sentence": "We have also seen one prominent EDR agent and Windows Defender detect this program execution as malicious, with no apparent impact to the operation of the EDR agent.",
+        "score": 0.4527
+      },
+      {
+        "sentence": "Attacking the Hypervisor Layer During other investigations we have typically seen threat actors execute their ransomware directly on the hypervisor, which will encrypt all of the files including virtual disk images stored in the various datastores.",
+        "score": 0.6159
+      },
+      {
+        "sentence": "However, in other situations we believe the threat actor has seen an EDR tool in place, that is clearly capable of preventing their malicious program executions and even their EDR evasion has been successfully stopped.",
+        "score": 0.4843
+      },
+      {
+        "sentence": "As a result, we’ve observed them deviating from their standard playbook and using a privileged account to launch a new, clean VM within the hypervisor.",
+        "score": 0.6324
+      },
+      {
+        "sentence": "From the threat actor’s perspective, the benefit is that the VM they created has all the access needed to the network, and none of the security controls of another typical host on the same network.",
+        "score": 0.6035
+      },
+      {
+        "sentence": "After accessing the VM, the threat actor would disable Windows Defender, mount the data storage drives on the hypervisor, stop (shut down) VMs to release locked disk image files, and then execute the ransomware.",
+        "score": 0.5224
+      },
+      {
+        "sentence": "While EDR tooling can detect that encryption has commenced, it is generally unable to block it as the process is executing on the VM, which would impact VMs in a shutdown state.",
+        "score": 0.5421
+      },
+      {
+        "sentence": "As the attacker VMs are still running, they are not encrypted, which allowed forensic analysis to piece together the investigation.",
+        "score": 0.6285
+      },
+      {
+        "sentence": "The technique of using custom VMs is not new, and CyberCX has seen multiple investigations where a threat actor has built their own VM to conduct their malicious activities.",
+        "score": 0.7145
+      },
+      {
+        "sentence": "Discussed at the end of this blog, you can find forensic artefacts and detection opportunities that may arise if you are running hypervisors in your environment or investigating a breach across hypervisors.",
+        "score": 0.6014
+      },
+      {
+        "sentence": "Vulnerable Ransomware Analysts across the cybersecurity community have recently confirmed that a vulnerability existed within the Akira ransomware implementation.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "The decryption vulnerability relates to the use of a stream cipher (ChaCha20) that produces a fixed keystream per execution, which is then used for all files to be encrypted.",
+        "score": 0.3725
+      },
+      {
+        "sentence": "This allows for the possibility of decryption without paying the ransom, however there are a few limitations.",
+        "score": 0.3389
+      },
+      {
+        "sentence": "CyberCX confirmed the vulnerability and developed a working capability to decrypt encrypted data under certain circumstances shortly before the public release of the flaw by Avast.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "Exploiting the vulnerability requires a file pair before and after encryption (plaintext and ciphertext), however you could only decrypt files smaller than the file pair.",
+        "score": 0.3692
+      },
+      {
+        "sentence": "The first issue is identifying a valid pair, which can be difficult in cases where all backup data has also been encrypted.",
+        "score": 0.4361
+      },
+      {
+        "sentence": "One way to partially navigate this challenge is by identifying a file pair that could be sourced independently.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "In one case, we used several encrypted ISO files containing default installations of operating systems which were stored on a hypervisor (which is reasonably common in hypervisor datastores).",
+        "score": 0.5339
+      },
+      {
+        "sentence": "Unencrypted versions of these are often available from their official sources on the internet and can be used to generate the data needed.",
+        "score": 0.4439
+      },
+      {
+        "sentence": "This solution has proven adequate for successfully decrypting small files on encrypted servers (specifically smaller than the ISO files).",
+        "score": 0.4004
+      },
+      {
+        "sentence": "Unfortunately though, it may not be helpful in recovering what is often the most critical files on a hypervisor; large virtual hard disks.",
+        "score": 0.5012
+      },
+      {
+        "sentence": "However, as is common in ransomware encryption routines, threat actors rarely encrypt entire disks, each of which could be several hundred gigabytes in size, as this would be too slow.",
+        "score": 0.4683
+      },
+      {
+        "sentence": "Instead, they often rely on intermittent encryption which only encrypts portions of large files, rendering them unreadable by tools, unable to be mounted cleanly, difficult to recover data from, and practically unusable.",
+        "score": 0.5175
+      },
+      {
+        "sentence": "Another technique is to target file headers, being metadata stored at the beginning of most files.",
+        "score": 0.3884
+      },
+      {
+        "sentence": "In these cases, we’ve seen ransomware actors only encrypting the first few MB of files targeting these file headers, but usually they also intermittently encrypt other portions of the file as well, to make recovery difficult to impossible, depending on the format of the file.",
+        "score": 0.4949
+      },
+      {
+        "sentence": "SentinelOne produced an excellent article listing intermittent encryption options used by several ransomware variants.",
+        "score": 0.3993
+      },
+      {
+        "sentence": "In such cases, relying on available backups is the primary method of data restoration, and carving files and forensic artefacts from the non-encrypted portions of the affected virtual hard disks is the last resort. “Just because files are encrypted doesn’t mean that they’re completely unrecoverable!“ CyberCX has significant experience investigating partially encrypted virtual hard disks – in some cases completely recovering the underlying data.",
+        "score": 0.5062
+      },
+      {
+        "sentence": "Phill Moore recently presented a case study at the 2023 Magnet Virtual Summit on an investigation involving recovering data from an encrypted virtual disk that allowed CyberCX to confirm the initial infection vector during a ransomware attack.",
+        "score": 0.5048
+      },
+      {
+        "sentence": "By releasing the decryptor to the public, it also informed the owners of the ransomware.",
+        "score": 0.3057
+      },
+      {
+        "sentence": "An Akira ransomware sample that did not contain the vulnerability was uploaded to VirusTotal on 7 July 2023.",
+        "score": 0.3853
+      },
+      {
+        "sentence": "The PE metadata recorded that it was compiled on 2 July 2023.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "However, any organisation who suffered an Akira ransomware attack prior to around 7 July 2023 and still has their encrypted data, may be able to use this weakness to decrypt their data.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "What about ESXi?",
+        "score": 0.3349
+      },
+      {
+        "sentence": "CyberCX has also observed vSphere/ESXi environments being affected by ransomware in a way that would impact recovery.",
+        "score": 0.4693
+      },
+      {
+        "sentence": "In some cases, threat actors apply different approaches to different ESXi hosts, even within the same network, including encryption through ransomware, changing the root password, or in some cases doing nothing to the hypervisor.",
+        "score": 0.5495
+      },
+      {
+        "sentence": "In cases where the threat actor did not (or perhaps could not) shut down the virtual machines, their disks were locked and would not be encrypted, however binaries on the ESXi host would still be encrypted.",
+        "score": 0.6641
+      },
+      {
+        "sentence": "In these cases, the remediation team has the opportunity to save the underlying VMs, but forensic analysis of the hypervisor would be impacted.",
+        "score": 0.6051
+      },
+      {
+        "sentence": "We also note that public reporting on a Linux variant of the Akira ransomware has recently been published.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Recommended Detection and Hunting Opportunities 1.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "Hyper-V Hypervisor Logging and Activities CyberCX has compiled the following table of hypervisor event logs based on some validation testing that was performed on Windows Server 2022.",
+        "score": 0.4923
+      },
+      {
+        "sentence": "It’s worth noting that no logs are generated after creating a “checkpoint (snapshot)” for a VM and when attempting to “connect” to a VM.",
+        "score": 0.5066
+      },
+      {
+        "sentence": "VMware ESXi / vSphere Logging and Activities Virtual Machine Audit activity can be reviewed by logging onto the ESXi host utilising an administrator/root account.",
+        "score": 0.4712
+      },
+      {
+        "sentence": "Activity is recorded in the “hostd.log” file found here: - /var/log/hostd.log - /var/run/log/hostd.log Below is an extract from our test instance demonstrating the creation of a new virtual machine.",
+        "score": 0.6329
+      },
+      {
+        "sentence": "2023-07-25T07:29:57.870Z info hostd[2098947] [Originator@6876 sub=Vmsvc opID=esxui-46f0-93b4 user=EvilUser] Create VM initiated [54]: /vmfs/volumes/<VOLUME_ID>/MySecretVM/MySecretVM.vmx 2023-07-25T07:29:57.871Z info hostd[2098947] [Originator@6876 sub=Vimsvc.ha-eventmgr opID=esxui-46f0-93b4 user=EvilUser] Event 838 : Creating MySecretVM on host <ESXi_INSTANCE> in <LOCATION> Once the VM was created there was a state change from VM_STATE_INITIALIZING to VM_STATE_OFF.",
+        "score": 0.6341
+      },
+      {
+        "sentence": "Blue teams should also consider enabling syslog to automatically forward these events to a SIEM or log aggregation platform.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "Additional log locations can be found here.",
+        "score": 0.3679
+      },
+      {
+        "sentence": "Standard or Default Windows Workstation names leaked in Windows authentication logs When a new Windows endpoint is setup, the hostname, if not manually assigned by the organisation will start with “WIN-“ or “DESKTOP-“ or “PC-“ or “WORKSTATION-“.",
+        "score": 0.4381
+      },
+      {
+        "sentence": "Most ransomware actors we’ve seen use these defaults, which subsequently end up in event logs.",
+        "score": 0.3528
+      },
+      {
+        "sentence": "This may also be observed in Remote Desktop and SMB File share related event logs as well.",
+        "score": 0.4698
+      },
+      {
+        "sentence": "Audit infrastructure and ensure you have coverage of your security tooling The CyberCX DFIR team commonly identifies initial access vectors or hives of threat actor activity around unmanaged hosts.",
+        "score": 0.4632
+      },
+      {
+        "sentence": "Whether it is a test VM in Azure left open to the Internet, or an old “decommissioned” host that is left unpatched, ensuring you have proper visibility of these hosts will enable you to assess your risk.",
+        "score": 0.435
+      },
+      {
+        "sentence": "Authors: Phill Moore and Zach Stanford with contributions from Suyash Tripathi and Yogesh Khatri CyberCX Security, Testing and Assurance and Managed Security Services [1] CyberCX assesses with medium confidence these credentials were obtained outside of the affected network. [2] Akira has also made recent changes to their binary again, now going by “Megazord” – VirusTotal – File – c9c94ac5e1991a7db42c7973e328fceeb6f163d9f644031bdfd4123c7b3898b0",
+        "score": 0.4285
+      }
+    ]
+  }
+}

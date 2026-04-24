@@ -1,0 +1,575 @@
+{
+  "original_txt": "This blog was written by Kiran Raj & Kishan N.\nIntroduction\nIn the last few years, Microsoft Office macro malware using social engineering as a means for malware infection has been a dominant part of the threat landscape. Malware authors continue to evolve their techniques to evade detection. These techniques involve utilizing macro obfuscation, DDE, living off the land tools (LOLBAS), and even utilizing legacy supported XLS formats.\nMcAfee Labs has discovered a new technique that downloads and executes malicious DLLs (Zloader) without any malicious code present in the initial spammed attachment macro. The objective of this blog is to cover the technical aspect of the newly observed technique.\nInfection map\nThreat Summary\n- The initial attack vector is a phishing email with a Microsoft Word document attachment.\n- Upon opening the document, a password-protected Microsoft Excel file is downloaded from a remote server.\n- The Word document Visual Basic for Applications (VBA) reads the cell contents of the downloaded XLS file and writes into the XLS VBA as macros.\n- Once the macros are written to the downloaded XLS file, the Word document sets the policy in the registry to Disable Excel Macro Warning and calls the malicious macro function dynamically from the Excel file,\n- This results in the downloading of the Zloader payload. The Zloader payload is then executed by rundll32.exe.\nThe section below contains the detailed technical analysis of this technique.\nDetailed Technical Analysis\nInfection Chain\nThe malware arrives through a phishing email containing a Microsoft Word document as an attachment. When the document is opened and macros are enabled, the Word document, in turn, downloads and opens another password-protected Microsoft Excel document.\nAfter downloading the XLS file, the Word VBA reads the cell contents from XLS and creates a new macro for the same XLS file and writes the cell contents to XLS VBA macros as functions.\nOnce the macros are written and ready, the Word document sets the policy in the registry to Disable Excel Macro Warning and invokes the malicious macro function from the Excel file. The Excel file now downloads the Zloader payload. The Zloader payload is then executed using rundll32.exe.\nFigure-1: flowchart of the Infection chain\nWord Analysis\nHere is how the face of the document looks when we open the document (figure 2). Normally, the macros are disabled to run by default by Microsoft Office. The malware authors are aware of this and hence present a lure image to trick the victims guiding them into enabling the macros.\nFigure-2: Image of Word Document Face\nThe userform combo-box components present in the Word document stores all the content required to connect to the remote Excel document including the Excel object, URL, and the password required to open the Excel document. The URL is stored in the Combobox in the form of broken strings which will be later concatenated to form a complete clear string.\nFigure-3: URL components (right side) and the password to open downloaded Excel document (“i5x0wbqe81s”) present in user-form components.\nVBA Macro Analysis of Word Document\nFigure-4: Image of the VBA editor\nIn the above image of macros (figure 4), the code is attempting to download and open the Excel file stored in the malicious domain. Firstly, it creates an Excel application object by using CreateObject() function and reading the string from Combobox-1 (ref figure-2) of Userform-1 which has the string “excel. Application” stored in it. After creating the object, it uses the same object to open the Excel file directly from the malicious URL along with the password without saving the file on the disk by using Workbooks.Open() function.\nFigure-5: Word Macro code that reads strings present in random cells in Excel sheet.\nThe above snippet (figure 5) shows part of the macro code that is reading the strings from the Excel cells.\nFor Example:\nIxbq = ifk.sheets(3).Cells(44,42).Value\nThe code is storing the string present in sheet number 3 and the cell location (44,42) into the variable “ixbq”. The Excel.Application object that is assigned to variable “ifk” is used to access sheets and cells from the Excel file that is opened from the malicious domain.\nIn the below snippet (figure 6), we can observe the strings stored in the variables after being read from the cells. We can observe that it has string related to the registry entry “HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM” that is used to disable trust access for VBA into Excel and the string “Auto_Open3” that is going to be the entry point of the Excel macro execution.\nWe can also see the strings “ThisWorkbook”, “REG_DWORD”, “Version”, “ActiveVBProject” and few random functions as well like “Function c4r40() c4r40=1 End Function”. These macro codes cannot be detected using static detection since the content is formed dynamically on run time.\nFigure-6: Value of variables after reading Excel cells.\nAfter extracting the contents from the Excel cells, the parent Word file creates a new VBA module in the downloaded Excel file by writing the retrieved contents. Basically, the parent Word document is retrieving the cell contents and writing them to XLS macros.\nOnce the macro is formed and ready, it modifies the below RegKey to disable trust access for VBA on the victim machine to execute the function seamlessly without any Microsoft Office Warnings.\nHKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM\nAfter writing macro contents to Excel file and disabling the trust access, function ’Auto_Open3()’ from newly written excel VBA will be called which downloads zloader dll from the ‘hxxp://heavenlygem.com/22.php?5PH8Z’ with extension .cpl\nFigure-7: Image of ’Auto_Open3()’ function\nThe downloaded dll is saved in %temp% folder and executed by invoking rundll32.exe.\nFigure-8: Image of zloader dll invoked by rundll32.exe\nCommand-line parameter:\nRundll32.exe shell32.dll,Control_RunDLL “<path downloaded dll>”\nWindows Rundll32 commands loads and runs 32-bit DLLs that can be used for directly invoking specified functions or used to create shortcuts. In the above command line, the malware uses “Rundll32.exe shell32.dll,Control_RunDLL” function to invoke control.exe (control panel) and passes the DLL path as a parameter, therefore the downloaded DLL is executed by control.exe.\nExcel Document Analysis:\nThe below image (figure 9) is the face of the password-protected Excel file that is hosted on the server. We can observe random cells storing chunks of strings like “RegDelete”, “ThisWorkbook”, “DeleteLines”, etc.\nThese strings present in worksheet cells are formed as VBA macro in the later stage.\nFigure-9: Image of Remote Excel file.\nCoverage and prevention guidance:\nMcAfee’s Endpoint products detect this variant of malware and files dropped during the infection process.\nThe main malicious document with SHA256 (210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf) is detected with V3 package version – 4328.0 as “W97M/Downloader.djx”. The final Zloader payload with SHA-256 (c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2)which is a DLL is detected by signature “Zloader-FCVP” with V3 package version – 4327.0\nAdditionally, with the help of McAfee’s Expert rule feature, customers can strengthen the security by adding custom Expert rules based on the behavior patterns of the malware. The below EP rule is specific to this infection pattern.\nMcAfee advises all users to avoid opening any email attachments or clicking any links present in the mail without verifying the identity of the sender. Always disable the macro execution for Office files. We advise everyone to read our blog on this new variant of Zloader and its infection cycle to understand more about the threat.\nDifferent techniques & tactics are used by the malware to propagate and we mapped these with the MITRE ATT&CK platform.\n- E-mail Spear Phishing (T1566.001): Phishing acts as the main entry point into the victim’s system where the document comes as an attachment and the user enables the document to execute the malicious macro and cause infection. This mechanism is seen in most of the malware like Emotet, Drixed, Trickbot, Agenttesla, etc.\n- Execution (T1059.005): This is a very common behavior observed when a malicious document is opened. The document contains embedded malicious VBA macros which execute code when the document is opened/closed.\n- Defense Evasion (T1218.011): Execution of signed binary to abuse Rundll32.exe and to proxy execute the malicious code is observed in this Zloader variant. This tactic is now also part of many others like Emotet, Hancitor, Icedid, etc.\n- Defense Evasion (T1562.001): In this tactic, it Disables or Modifies security features in Microsoft Office document by changing the registry keys.\nIOC\n| Type | Value | Scanner | Detection Name | Detection Package Version (V3) |\n| Main Word Document | 210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf | ENS | W97M/Downloader.djx | 4328 |\n| Downloaded dll | c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2 | ENS | Zloader-FCVP | 4327 |\n| URL to download XLS | hxxp://heavenlygem.com/11.php | WebAdvisor\n|\nBlocked | N/A |\n| URL to download dll | hxxp://heavenlygem.com/22.php?5PH8Z | WebAdvisor\n|\nBlocked | N/A |\nConclusion\nMalicious documents have been an entry point for most malware families and these attacks have been evolving their infection techniques and obfuscation, not just limiting to direct downloads of payload from VBA, but creating agents dynamically to download payload as we discussed in this blog. Usage of such agents in the infection chain is not only limited to Word or Excel, but further threats may use other living off the land tools to download its payloads.\nDue to security concerns, macros are disabled by default in Microsoft Office applications. We suggest it is safe to enable them only when the document received is from a trusted source.",
+  "sanitized_txt": "This blog was written by Kiran Raj & Kishan N.\nIntroduction In the last few years, Microsoft Office macro malware using social engineering as a means for malware infection has been a dominant part of the threat landscape. Malware authors continue to evolve their techniques to evade detection. These techniques involve utilizing macro obfuscation, DDE, living off the land tools (LOLBAS), and even utilizing legacy supported XLS formats.\nMcAfee Labs has discovered a new technique that downloads and executes malicious DLLs (Zloader) without any malicious code present in the initial spammed attachment macro. The objective of this blog is to cover the technical aspect of the newly observed technique.\nInfection map Threat Summary - The initial attack vector is a phishing email with a Microsoft Word document attachment.\n- Upon opening the document, a password-protected Microsoft Excel file is downloaded from a remote server.\n- The Word document Visual Basic for Applications (VBA) reads the cell contents of the downloaded XLS file and writes into the XLS VBA as macros.\n- Once the macros are written to the downloaded XLS file, the Word document sets the policy in the registry to Disable Excel Macro Warning and calls the malicious macro function dynamically from the Excel file, - This results in the downloading of the Zloader payload. The Zloader payload is then executed by rundll32.exe.\nThe section below contains the detailed technical analysis of this technique.\nDetailed Technical Analysis Infection Chain The malware arrives through a phishing email containing a Microsoft Word document as an attachment. When the document is opened and macros are enabled, the Word document, in turn, downloads and opens another password-protected Microsoft Excel document.\nAfter downloading the XLS file, the Word VBA reads the cell contents from XLS and creates a new macro for the same XLS file and writes the cell contents to XLS VBA macros as functions.\nOnce the macros are written and ready, the Word document sets the policy in the registry to Disable Excel Macro Warning and invokes the malicious macro function from the Excel file. The Excel file now downloads the Zloader payload. The Zloader payload is then executed using rundll32.exe.\nFigure-1: flowchart of the Infection chain Word Analysis Here is how the face of the document looks when we open the document (figure 2). Normally, the macros are disabled to run by default by Microsoft Office. The malware authors are aware of this and hence present a lure image to trick the victims guiding them into enabling the macros.\nFigure-2: Image of Word Document Face The userform combo-box components present in the Word document stores all the content required to connect to the remote Excel document including the Excel object, URL, and the password required to open the Excel document. The URL is stored in the Combobox in the form of broken strings which will be later concatenated to form a complete clear string.\nFigure-3: URL components (right side) and the password to open downloaded Excel document (“i5x0wbqe81s”) present in user-form components.\nVBA Macro Analysis of Word Document Figure-4: Image of the VBA editor In the above image of macros (figure 4), the code is attempting to download and open the Excel file stored in the malicious domain. Firstly, it creates an Excel application object by using CreateObject() function and reading the string from Combobox-1 (ref figure-2) of Userform-1 which has the string “excel. Application” stored in it. After creating the object, it uses the same object to open the Excel file directly from the malicious URL along with the password without saving the file on the disk by using Workbooks.Open() function.\nFigure-5: Word Macro code that reads strings present in random cells in Excel sheet.\nThe above snippet (figure 5) shows part of the macro code that is reading the strings from the Excel cells.\nFor Example:\nIxbq = ifk.sheets(3).Cells(44,42).Value The code is storing the string present in sheet number 3 and the cell location (44,42) into the variable “ixbq”. The Excel.Application object that is assigned to variable “ifk” is used to access sheets and cells from the Excel file that is opened from the malicious domain.\nIn the below snippet (figure 6), we can observe the strings stored in the variables after being read from the cells. We can observe that it has string related to the registry entry “HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM” that is used to disable trust access for VBA into Excel and the string “Auto_Open3” that is going to be the entry point of the Excel macro execution.\nWe can also see the strings “ThisWorkbook”, “REG_DWORD”, “Version”, “ActiveVBProject” and few random functions as well like “Function c4r40() c4r40=1 End Function”. These macro codes cannot be detected using static detection since the content is formed dynamically on run time.\nFigure-6: Value of variables after reading Excel cells.\nAfter extracting the contents from the Excel cells, the parent Word file creates a new VBA module in the downloaded Excel file by writing the retrieved contents. Basically, the parent Word document is retrieving the cell contents and writing them to XLS macros.\nOnce the macro is formed and ready, it modifies the below RegKey to disable trust access for VBA on the victim machine to execute the function seamlessly without any Microsoft Office Warnings.\nHKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM After writing macro contents to Excel file and disabling the trust access, function ’Auto_Open3()’ from newly written excel VBA will be called which downloads zloader dll from the ‘hxxp://heavenlygem.com/22.php?5PH8Z’ with extension .cpl Figure-7: Image of ’Auto_Open3()’ function The downloaded dll is saved in %temp% folder and executed by invoking rundll32.exe.\nFigure-8: Image of zloader dll invoked by rundll32.exe Command-line parameter:\nRundll32.exe shell32.dll,Control_RunDLL “<path downloaded dll>” Windows Rundll32 commands loads and runs 32-bit DLLs that can be used for directly invoking specified functions or used to create shortcuts. In the above command line, the malware uses “Rundll32.exe shell32.dll,Control_RunDLL” function to invoke control.exe (control panel) and passes the DLL path as a parameter, therefore the downloaded DLL is executed by control.exe.\nExcel Document Analysis:\nThe below image (figure 9) is the face of the password-protected Excel file that is hosted on the server. We can observe random cells storing chunks of strings like “RegDelete”, “ThisWorkbook”, “DeleteLines”, etc.\nThese strings present in worksheet cells are formed as VBA macro in the later stage.\nFigure-9: Image of Remote Excel file.\nCoverage and prevention guidance:\nMcAfee’s Endpoint products detect this variant of malware and files dropped during the infection process.\nThe main malicious document with SHA256 (210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf) is detected with V3 package version – 4328.0 as “W97M/Downloader.djx”. The final Zloader payload with SHA-256 (c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2)which is a DLL is detected by signature “Zloader-FCVP” with V3 package version – 4327.0 Additionally, with the help of McAfee’s Expert rule feature, customers can strengthen the security by adding custom Expert rules based on the behavior patterns of the malware. The below EP rule is specific to this infection pattern.\nMcAfee advises all users to avoid opening any email attachments or clicking any links present in the mail without verifying the identity of the sender. Always disable the macro execution for Office files. We advise everyone to read our blog on this new variant of Zloader and its infection cycle to understand more about the threat.\nDifferent techniques & tactics are used by the malware to propagate and we mapped these with the MITRE ATT&CK platform.\nIOC | Type | Value | Scanner | Detection Name | Detection Package Version (V3) | | Main Word Document | 210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf | ENS | W97M/Downloader.djx | 4328 | | Downloaded dll | c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2 | ENS | Zloader-FCVP | 4327 | | URL to download XLS | hxxp://heavenlygem.com/11.php | WebAdvisor | Blocked | N/A | | URL to download dll | hxxp://heavenlygem.com/22.php?5PH8Z | WebAdvisor | Blocked | N/A | Conclusion Malicious documents have been an entry point for most malware families and these attacks have been evolving their infection techniques and obfuscation, not just limiting to direct downloads of payload from VBA, but creating agents dynamically to download payload as we discussed in this blog. Usage of such agents in the infection chain is not only limited to Word or Excel, but further threats may use other living off the land tools to download its payloads.\nDue to security concerns, macros are disabled by default in Microsoft Office applications. We suggest it is safe to enable them only when the document received is from a trusted source.",
+  "ID_list": [
+    "T1059.005",
+    "T1218.011",
+    "T1562.001",
+    "T1566.001"
+  ],
+  "Name_list": [
+    "Execution",
+    "Phishing",
+    "Proxy",
+    "Rundll32",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1059.005": [
+      {
+        "sentence": "This blog was written by Kiran Raj & Kishan N.",
+        "score": 0.3887
+      },
+      {
+        "sentence": "Introduction In the last few years, Microsoft Office macro malware using social engineering as a means for malware infection has been a dominant part of the threat landscape.",
+        "score": 0.4968
+      },
+      {
+        "sentence": "Malware authors continue to evolve their techniques to evade detection.",
+        "score": 0.3558
+      },
+      {
+        "sentence": "These techniques involve utilizing macro obfuscation, DDE, living off the land tools (LOLBAS), and even utilizing legacy supported XLS formats.",
+        "score": 0.5884
+      },
+      {
+        "sentence": "McAfee Labs has discovered a new technique that downloads and executes malicious DLLs (Zloader) without any malicious code present in the initial spammed attachment macro.",
+        "score": 0.4461
+      },
+      {
+        "sentence": "The objective of this blog is to cover the technical aspect of the newly observed technique.",
+        "score": 0.4116
+      },
+      {
+        "sentence": "The section below contains the detailed technical analysis of this technique.",
+        "score": 0.3733
+      },
+      {
+        "sentence": "Detailed Technical Analysis Infection Chain The malware arrives through a phishing email containing a Microsoft Word document as an attachment.",
+        "score": 0.3866
+      },
+      {
+        "sentence": "When the document is opened and macros are enabled, the Word document, in turn, downloads and opens another password-protected Microsoft Excel document.",
+        "score": 0.4917
+      },
+      {
+        "sentence": "After downloading the XLS file, the Word VBA reads the cell contents from XLS and creates a new macro for the same XLS file and writes the cell contents to XLS VBA macros as functions.",
+        "score": 0.5958
+      },
+      {
+        "sentence": "Once the macros are written and ready, the Word document sets the policy in the registry to Disable Excel Macro Warning and invokes the malicious macro function from the Excel file.",
+        "score": 0.5158
+      },
+      {
+        "sentence": "The Excel file now downloads the Zloader payload.",
+        "score": 0.3758
+      },
+      {
+        "sentence": "Figure-1: flowchart of the Infection chain Word Analysis Here is how the face of the document looks when we open the document (figure 2).",
+        "score": 0.522
+      },
+      {
+        "sentence": "Normally, the macros are disabled to run by default by Microsoft Office.",
+        "score": 0.5601
+      },
+      {
+        "sentence": "The malware authors are aware of this and hence present a lure image to trick the victims guiding them into enabling the macros.",
+        "score": 0.432
+      },
+      {
+        "sentence": "Figure-2: Image of Word Document Face The userform combo-box components present in the Word document stores all the content required to connect to the remote Excel document including the Excel object, URL, and the password required to open the Excel document.",
+        "score": 0.4838
+      },
+      {
+        "sentence": "The URL is stored in the Combobox in the form of broken strings which will be later concatenated to form a complete clear string.",
+        "score": 0.4854
+      },
+      {
+        "sentence": "Figure-3: URL components (right side) and the password to open downloaded Excel document (“i5x0wbqe81s”) present in user-form components.",
+        "score": 0.4265
+      },
+      {
+        "sentence": "VBA Macro Analysis of Word Document Figure-4: Image of the VBA editor In the above image of macros (figure 4), the code is attempting to download and open the Excel file stored in the malicious domain.",
+        "score": 0.5615
+      },
+      {
+        "sentence": "Firstly, it creates an Excel application object by using CreateObject() function and reading the string from Combobox-1 (ref figure-2) of Userform-1 which has the string “excel.",
+        "score": 0.5845
+      },
+      {
+        "sentence": "Application” stored in it.",
+        "score": 0.429
+      },
+      {
+        "sentence": "After creating the object, it uses the same object to open the Excel file directly from the malicious URL along with the password without saving the file on the disk by using Workbooks.Open() function.",
+        "score": 0.4682
+      },
+      {
+        "sentence": "Figure-5: Word Macro code that reads strings present in random cells in Excel sheet.",
+        "score": 0.48
+      },
+      {
+        "sentence": "The above snippet (figure 5) shows part of the macro code that is reading the strings from the Excel cells.",
+        "score": 0.5378
+      },
+      {
+        "sentence": "For Example: Ixbq = ifk.sheets(3).Cells(44,42).Value The code is storing the string present in sheet number 3 and the cell location (44,42) into the variable “ixbq”.",
+        "score": 0.4342
+      },
+      {
+        "sentence": "The Excel.Application object that is assigned to variable “ifk” is used to access sheets and cells from the Excel file that is opened from the malicious domain.",
+        "score": 0.4975
+      },
+      {
+        "sentence": "In the below snippet (figure 6), we can observe the strings stored in the variables after being read from the cells.",
+        "score": 0.456
+      },
+      {
+        "sentence": "We can observe that it has string related to the registry entry “HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM” that is used to disable trust access for VBA into Excel and the string “Auto_Open3” that is going to be the entry point of the Excel macro execution.",
+        "score": 0.5287
+      },
+      {
+        "sentence": "We can also see the strings “ThisWorkbook”, “REG_DWORD”, “Version”, “ActiveVBProject” and few random functions as well like “Function c4r40() c4r40=1 End Function”.",
+        "score": 0.5346
+      },
+      {
+        "sentence": "These macro codes cannot be detected using static detection since the content is formed dynamically on run time.",
+        "score": 0.697
+      },
+      {
+        "sentence": "Figure-6: Value of variables after reading Excel cells.",
+        "score": 0.431
+      },
+      {
+        "sentence": "After extracting the contents from the Excel cells, the parent Word file creates a new VBA module in the downloaded Excel file by writing the retrieved contents.",
+        "score": 0.5577
+      },
+      {
+        "sentence": "Basically, the parent Word document is retrieving the cell contents and writing them to XLS macros.",
+        "score": 0.4825
+      },
+      {
+        "sentence": "Once the macro is formed and ready, it modifies the below RegKey to disable trust access for VBA on the victim machine to execute the function seamlessly without any Microsoft Office Warnings.",
+        "score": 0.5314
+      },
+      {
+        "sentence": "HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM After writing macro contents to Excel file and disabling the trust access, function ’Auto_Open3()’ from newly written excel VBA will be called which downloads zloader dll from the ‘hxxp://heavenlygem.com/22.php?5PH8Z’ with extension .cpl Figure-7: Image of ’Auto_Open3()’ function The downloaded dll is saved in %temp% folder and executed by invoking rundll32.exe.",
+        "score": 0.5971
+      },
+      {
+        "sentence": "Figure-8: Image of zloader dll invoked by rundll32.exe Command-line parameter: Rundll32.exe shell32.dll,Control_RunDLL “<path downloaded dll>” Windows Rundll32 commands loads and runs 32-bit DLLs that can be used for directly invoking specified functions or used to create shortcuts.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "In the above command line, the malware uses “Rundll32.exe shell32.dll,Control_RunDLL” function to invoke control.exe (control panel) and passes the DLL path as a parameter, therefore the downloaded DLL is executed by control.exe.",
+        "score": 0.4037
+      },
+      {
+        "sentence": "Excel Document Analysis: The below image (figure 9) is the face of the password-protected Excel file that is hosted on the server.",
+        "score": 0.516
+      },
+      {
+        "sentence": "We can observe random cells storing chunks of strings like “RegDelete”, “ThisWorkbook”, “DeleteLines”, etc.",
+        "score": 0.4299
+      },
+      {
+        "sentence": "These strings present in worksheet cells are formed as VBA macro in the later stage.",
+        "score": 0.6054
+      },
+      {
+        "sentence": "Figure-9: Image of Remote Excel file.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "Coverage and prevention guidance: McAfee’s Endpoint products detect this variant of malware and files dropped during the infection process.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "The main malicious document with SHA256 (210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf) is detected with V3 package version – 4328.0 as “W97M/Downloader.djx”.",
+        "score": 0.4805
+      },
+      {
+        "sentence": "The final Zloader payload with SHA-256 (c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2)which is a DLL is detected by signature “Zloader-FCVP” with V3 package version – 4327.0 Additionally, with the help of McAfee’s Expert rule feature, customers can strengthen the security by adding custom Expert rules based on the behavior patterns of the malware.",
+        "score": 0.5334
+      },
+      {
+        "sentence": "The below EP rule is specific to this infection pattern.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "McAfee advises all users to avoid opening any email attachments or clicking any links present in the mail without verifying the identity of the sender.",
+        "score": 0.3267
+      },
+      {
+        "sentence": "Always disable the macro execution for Office files.",
+        "score": 0.646
+      },
+      {
+        "sentence": "We advise everyone to read our blog on this new variant of Zloader and its infection cycle to understand more about the threat.",
+        "score": 0.4582
+      },
+      {
+        "sentence": "Different techniques & tactics are used by the malware to propagate and we mapped these with the MITRE ATT&CK platform. - E-mail Spear Phishing (): Phishing acts as the main entry point into the victim’s system where the document comes as an attachment and the user enables the document to execute the malicious macro and cause infection.",
+        "score": 0.5095
+      },
+      {
+        "sentence": "This mechanism is seen in most of the malware like Emotet, Drixed, Trickbot, Agenttesla, etc. - Execution (): This is a very common behavior observed when a malicious document is opened.",
+        "score": 0.5428
+      },
+      {
+        "sentence": "The document contains embedded malicious VBA macros which execute code when the document is opened/closed. - Defense Evasion (): Execution of signed binary to abuse Rundll32.exe and to proxy execute the malicious code is observed in this Zloader variant.",
+        "score": 0.4113
+      },
+      {
+        "sentence": "This tactic is now also part of many others like Emotet, Hancitor, Icedid, etc. - Defense Evasion (): In this tactic, it Disables or Modifies security features in Microsoft Office document by changing the registry keys.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "Usage of such agents in the infection chain is not only limited to Word or Excel, but further threats may use other living off the land tools to download its payloads.",
+        "score": 0.4268
+      },
+      {
+        "sentence": "Due to security concerns, macros are disabled by default in Microsoft Office applications.",
+        "score": 0.6225
+      },
+      {
+        "sentence": "We suggest it is safe to enable them only when the document received is from a trusted source.",
+        "score": 0.4093
+      }
+    ],
+    "T1566.001": [
+      {
+        "sentence": "This blog was written by Kiran Raj & Kishan N.",
+        "score": 0.329
+      },
+      {
+        "sentence": "Introduction In the last few years, Microsoft Office macro malware using social engineering as a means for malware infection has been a dominant part of the threat landscape.",
+        "score": 0.69
+      },
+      {
+        "sentence": "Malware authors continue to evolve their techniques to evade detection.",
+        "score": 0.3116
+      },
+      {
+        "sentence": "These techniques involve utilizing macro obfuscation, DDE, living off the land tools (LOLBAS), and even utilizing legacy supported XLS formats.",
+        "score": 0.4482
+      },
+      {
+        "sentence": "McAfee Labs has discovered a new technique that downloads and executes malicious DLLs (Zloader) without any malicious code present in the initial spammed attachment macro.",
+        "score": 0.5727
+      },
+      {
+        "sentence": "The objective of this blog is to cover the technical aspect of the newly observed technique.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "The section below contains the detailed technical analysis of this technique.",
+        "score": 0.3889
+      },
+      {
+        "sentence": "Detailed Technical Analysis Infection Chain The malware arrives through a phishing email containing a Microsoft Word document as an attachment.",
+        "score": 0.9019
+      },
+      {
+        "sentence": "When the document is opened and macros are enabled, the Word document, in turn, downloads and opens another password-protected Microsoft Excel document.",
+        "score": 0.4745
+      },
+      {
+        "sentence": "After downloading the XLS file, the Word VBA reads the cell contents from XLS and creates a new macro for the same XLS file and writes the cell contents to XLS VBA macros as functions.",
+        "score": 0.4152
+      },
+      {
+        "sentence": "Once the macros are written and ready, the Word document sets the policy in the registry to Disable Excel Macro Warning and invokes the malicious macro function from the Excel file.",
+        "score": 0.328
+      },
+      {
+        "sentence": "The Excel file now downloads the Zloader payload.",
+        "score": 0.4451
+      },
+      {
+        "sentence": "Figure-1: flowchart of the Infection chain Word Analysis Here is how the face of the document looks when we open the document (figure 2).",
+        "score": 0.6523
+      },
+      {
+        "sentence": "The malware authors are aware of this and hence present a lure image to trick the victims guiding them into enabling the macros.",
+        "score": 0.4876
+      },
+      {
+        "sentence": "Figure-2: Image of Word Document Face The userform combo-box components present in the Word document stores all the content required to connect to the remote Excel document including the Excel object, URL, and the password required to open the Excel document.",
+        "score": 0.4526
+      },
+      {
+        "sentence": "Figure-3: URL components (right side) and the password to open downloaded Excel document (“i5x0wbqe81s”) present in user-form components.",
+        "score": 0.5024
+      },
+      {
+        "sentence": "VBA Macro Analysis of Word Document Figure-4: Image of the VBA editor In the above image of macros (figure 4), the code is attempting to download and open the Excel file stored in the malicious domain.",
+        "score": 0.4878
+      },
+      {
+        "sentence": "Firstly, it creates an Excel application object by using CreateObject() function and reading the string from Combobox-1 (ref figure-2) of Userform-1 which has the string “excel.",
+        "score": 0.3531
+      },
+      {
+        "sentence": "After creating the object, it uses the same object to open the Excel file directly from the malicious URL along with the password without saving the file on the disk by using Workbooks.Open() function.",
+        "score": 0.434
+      },
+      {
+        "sentence": "Figure-5: Word Macro code that reads strings present in random cells in Excel sheet.",
+        "score": 0.4029
+      },
+      {
+        "sentence": "The above snippet (figure 5) shows part of the macro code that is reading the strings from the Excel cells.",
+        "score": 0.4232
+      },
+      {
+        "sentence": "The Excel.Application object that is assigned to variable “ifk” is used to access sheets and cells from the Excel file that is opened from the malicious domain.",
+        "score": 0.3849
+      },
+      {
+        "sentence": "We can observe that it has string related to the registry entry “HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM” that is used to disable trust access for VBA into Excel and the string “Auto_Open3” that is going to be the entry point of the Excel macro execution.",
+        "score": 0.3022
+      },
+      {
+        "sentence": "These macro codes cannot be detected using static detection since the content is formed dynamically on run time.",
+        "score": 0.3787
+      },
+      {
+        "sentence": "Figure-6: Value of variables after reading Excel cells.",
+        "score": 0.3466
+      },
+      {
+        "sentence": "After extracting the contents from the Excel cells, the parent Word file creates a new VBA module in the downloaded Excel file by writing the retrieved contents.",
+        "score": 0.3553
+      },
+      {
+        "sentence": "Basically, the parent Word document is retrieving the cell contents and writing them to XLS macros.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM After writing macro contents to Excel file and disabling the trust access, function ’Auto_Open3()’ from newly written excel VBA will be called which downloads zloader dll from the ‘hxxp://heavenlygem.com/22.php?5PH8Z’ with extension .cpl Figure-7: Image of ’Auto_Open3()’ function The downloaded dll is saved in %temp% folder and executed by invoking rundll32.exe.",
+        "score": 0.4174
+      },
+      {
+        "sentence": "Excel Document Analysis: The below image (figure 9) is the face of the password-protected Excel file that is hosted on the server.",
+        "score": 0.5102
+      },
+      {
+        "sentence": "These strings present in worksheet cells are formed as VBA macro in the later stage.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "Figure-9: Image of Remote Excel file.",
+        "score": 0.3816
+      },
+      {
+        "sentence": "Coverage and prevention guidance: McAfee’s Endpoint products detect this variant of malware and files dropped during the infection process.",
+        "score": 0.5427
+      },
+      {
+        "sentence": "The main malicious document with SHA256 (210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf) is detected with V3 package version – 4328.0 as “W97M/Downloader.djx”.",
+        "score": 0.5531
+      },
+      {
+        "sentence": "The final Zloader payload with SHA-256 (c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2)which is a DLL is detected by signature “Zloader-FCVP” with V3 package version – 4327.0 Additionally, with the help of McAfee’s Expert rule feature, customers can strengthen the security by adding custom Expert rules based on the behavior patterns of the malware.",
+        "score": 0.4577
+      },
+      {
+        "sentence": "The below EP rule is specific to this infection pattern.",
+        "score": 0.3167
+      },
+      {
+        "sentence": "McAfee advises all users to avoid opening any email attachments or clicking any links present in the mail without verifying the identity of the sender.",
+        "score": 0.7642
+      },
+      {
+        "sentence": "Always disable the macro execution for Office files.",
+        "score": 0.4054
+      },
+      {
+        "sentence": "We advise everyone to read our blog on this new variant of Zloader and its infection cycle to understand more about the threat.",
+        "score": 0.5342
+      },
+      {
+        "sentence": "Different techniques & tactics are used by the malware to propagate and we mapped these with the MITRE ATT&CK platform. - E-mail Spear Phishing (): Phishing acts as the main entry point into the victim’s system where the document comes as an attachment and the user enables the document to execute the malicious macro and cause infection.",
+        "score": 0.8181
+      },
+      {
+        "sentence": "This mechanism is seen in most of the malware like Emotet, Drixed, Trickbot, Agenttesla, etc. - Execution (): This is a very common behavior observed when a malicious document is opened.",
+        "score": 0.7134
+      },
+      {
+        "sentence": "The document contains embedded malicious VBA macros which execute code when the document is opened/closed. - Defense Evasion (): Execution of signed binary to abuse Rundll32.exe and to proxy execute the malicious code is observed in this Zloader variant.",
+        "score": 0.3779
+      },
+      {
+        "sentence": "Usage of such agents in the infection chain is not only limited to Word or Excel, but further threats may use other living off the land tools to download its payloads.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "Due to security concerns, macros are disabled by default in Microsoft Office applications.",
+        "score": 0.3674
+      },
+      {
+        "sentence": "We suggest it is safe to enable them only when the document received is from a trusted source.",
+        "score": 0.6621
+      }
+    ],
+    "T1562.001": [
+      {
+        "sentence": "Malware authors continue to evolve their techniques to evade detection.",
+        "score": 0.5534
+      },
+      {
+        "sentence": "When the document is opened and macros are enabled, the Word document, in turn, downloads and opens another password-protected Microsoft Excel document.",
+        "score": 0.3712
+      },
+      {
+        "sentence": "After downloading the XLS file, the Word VBA reads the cell contents from XLS and creates a new macro for the same XLS file and writes the cell contents to XLS VBA macros as functions.",
+        "score": 0.3495
+      },
+      {
+        "sentence": "Once the macros are written and ready, the Word document sets the policy in the registry to Disable Excel Macro Warning and invokes the malicious macro function from the Excel file.",
+        "score": 0.5699
+      },
+      {
+        "sentence": "Normally, the macros are disabled to run by default by Microsoft Office.",
+        "score": 0.5604
+      },
+      {
+        "sentence": "Figure-3: URL components (right side) and the password to open downloaded Excel document (“i5x0wbqe81s”) present in user-form components.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "VBA Macro Analysis of Word Document Figure-4: Image of the VBA editor In the above image of macros (figure 4), the code is attempting to download and open the Excel file stored in the malicious domain.",
+        "score": 0.3228
+      },
+      {
+        "sentence": "Firstly, it creates an Excel application object by using CreateObject() function and reading the string from Combobox-1 (ref figure-2) of Userform-1 which has the string “excel.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "After creating the object, it uses the same object to open the Excel file directly from the malicious URL along with the password without saving the file on the disk by using Workbooks.Open() function.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "The above snippet (figure 5) shows part of the macro code that is reading the strings from the Excel cells.",
+        "score": 0.3327
+      },
+      {
+        "sentence": "We can observe that it has string related to the registry entry “HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM” that is used to disable trust access for VBA into Excel and the string “Auto_Open3” that is going to be the entry point of the Excel macro execution.",
+        "score": 0.4903
+      },
+      {
+        "sentence": "After extracting the contents from the Excel cells, the parent Word file creates a new VBA module in the downloaded Excel file by writing the retrieved contents.",
+        "score": 0.3269
+      },
+      {
+        "sentence": "Once the macro is formed and ready, it modifies the below RegKey to disable trust access for VBA on the victim machine to execute the function seamlessly without any Microsoft Office Warnings.",
+        "score": 0.6072
+      },
+      {
+        "sentence": "HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM After writing macro contents to Excel file and disabling the trust access, function ’Auto_Open3()’ from newly written excel VBA will be called which downloads zloader dll from the ‘hxxp://heavenlygem.com/22.php?5PH8Z’ with extension .cpl Figure-7: Image of ’Auto_Open3()’ function The downloaded dll is saved in %temp% folder and executed by invoking rundll32.exe.",
+        "score": 0.4944
+      },
+      {
+        "sentence": "Excel Document Analysis: The below image (figure 9) is the face of the password-protected Excel file that is hosted on the server.",
+        "score": 0.3278
+      },
+      {
+        "sentence": "Coverage and prevention guidance: McAfee’s Endpoint products detect this variant of malware and files dropped during the infection process.",
+        "score": 0.4125
+      },
+      {
+        "sentence": "The main malicious document with SHA256 (210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf) is detected with V3 package version – 4328.0 as “W97M/Downloader.djx”.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "The final Zloader payload with SHA-256 (c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2)which is a DLL is detected by signature “Zloader-FCVP” with V3 package version – 4327.0 Additionally, with the help of McAfee’s Expert rule feature, customers can strengthen the security by adding custom Expert rules based on the behavior patterns of the malware.",
+        "score": 0.4711
+      },
+      {
+        "sentence": "The below EP rule is specific to this infection pattern.",
+        "score": 0.3121
+      },
+      {
+        "sentence": "Always disable the macro execution for Office files.",
+        "score": 0.4693
+      },
+      {
+        "sentence": "The document contains embedded malicious VBA macros which execute code when the document is opened/closed. - Defense Evasion (): Execution of signed binary to abuse Rundll32.exe and to proxy execute the malicious code is observed in this Zloader variant.",
+        "score": 0.4237
+      },
+      {
+        "sentence": "This tactic is now also part of many others like Emotet, Hancitor, Icedid, etc. - Defense Evasion (): In this tactic, it Disables or Modifies security features in Microsoft Office document by changing the registry keys.",
+        "score": 0.6706
+      },
+      {
+        "sentence": "Due to security concerns, macros are disabled by default in Microsoft Office applications.",
+        "score": 0.4817
+      },
+      {
+        "sentence": "We suggest it is safe to enable them only when the document received is from a trusted source.",
+        "score": 0.3158
+      }
+    ],
+    "T1218.011": [
+      {
+        "sentence": "McAfee Labs has discovered a new technique that downloads and executes malicious DLLs (Zloader) without any malicious code present in the initial spammed attachment macro.",
+        "score": 0.3738
+      },
+      {
+        "sentence": "The Zloader payload is then executed by rundll32.exe.",
+        "score": 0.8447
+      },
+      {
+        "sentence": "Once the macros are written and ready, the Word document sets the policy in the registry to Disable Excel Macro Warning and invokes the malicious macro function from the Excel file.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "The Excel file now downloads the Zloader payload.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "The Zloader payload is then executed using rundll32.exe.",
+        "score": 0.8497
+      },
+      {
+        "sentence": "These macro codes cannot be detected using static detection since the content is formed dynamically on run time.",
+        "score": 0.3339
+      },
+      {
+        "sentence": "Once the macro is formed and ready, it modifies the below RegKey to disable trust access for VBA on the victim machine to execute the function seamlessly without any Microsoft Office Warnings.",
+        "score": 0.3367
+      },
+      {
+        "sentence": "HKEY_CURRENT_USER\\Software\\Microsoft\\Office\\12.0\\Excel\\Security\\AccessVBOM After writing macro contents to Excel file and disabling the trust access, function ’Auto_Open3()’ from newly written excel VBA will be called which downloads zloader dll from the ‘hxxp://heavenlygem.com/22.php?5PH8Z’ with extension .cpl Figure-7: Image of ’Auto_Open3()’ function The downloaded dll is saved in %temp% folder and executed by invoking rundll32.exe.",
+        "score": 0.574
+      },
+      {
+        "sentence": "Figure-8: Image of zloader dll invoked by rundll32.exe Command-line parameter: Rundll32.exe shell32.dll,Control_RunDLL “<path downloaded dll>” Windows Rundll32 commands loads and runs 32-bit DLLs that can be used for directly invoking specified functions or used to create shortcuts.",
+        "score": 0.8854
+      },
+      {
+        "sentence": "In the above command line, the malware uses “Rundll32.exe shell32.dll,Control_RunDLL” function to invoke control.exe (control panel) and passes the DLL path as a parameter, therefore the downloaded DLL is executed by control.exe.",
+        "score": 0.7482
+      },
+      {
+        "sentence": "Figure-9: Image of Remote Excel file.",
+        "score": 0.3947
+      },
+      {
+        "sentence": "The main malicious document with SHA256 (210f12d1282e90aadb532e7e891cbe4f089ef4f3ec0568dc459fb5d546c95eaf) is detected with V3 package version – 4328.0 as “W97M/Downloader.djx”.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "The final Zloader payload with SHA-256 (c55a25514c0d860980e5f13b138ae846b36a783a0fdb52041e3a8c6a22c6f5e2)which is a DLL is detected by signature “Zloader-FCVP” with V3 package version – 4327.0 Additionally, with the help of McAfee’s Expert rule feature, customers can strengthen the security by adding custom Expert rules based on the behavior patterns of the malware.",
+        "score": 0.3175
+      },
+      {
+        "sentence": "The document contains embedded malicious VBA macros which execute code when the document is opened/closed. - Defense Evasion (): Execution of signed binary to abuse Rundll32.exe and to proxy execute the malicious code is observed in this Zloader variant.",
+        "score": 0.7758
+      }
+    ]
+  }
+}

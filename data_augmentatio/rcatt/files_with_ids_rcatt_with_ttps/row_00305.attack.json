@@ -1,0 +1,1529 @@
+{
+  "original_txt": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China. KeyBoy has been most recently reported on by CitizenLab in 2016, and now appears to have returned. Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa. Curiously, the Word document does not contain any macros, or even an exploit. Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol. DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa. In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example. Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest. In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export. Figure 2 shows the relevant part in our XML file. Figure 2 - Download and payload execution This debug.dll is a PE32 binary file with the following properties: md5 hash: 64b2ac701a0d67da134e13b2efc46900 sha1 hash: 1bb516d70591a5a0eb55ee71f9f38597f3640b14 sha256 hash: f3f55c3df39b85d934121355bed439b53501f996e9b39d4abed14c7fe8081d92 size: 531,456 bytes internal DLL name: InstallClient.dll compiler: Microsoft linker: Microsoft Linker(14.0)[DLL32] compilation time: 2017-07-06 08:50:10 This DLL serves as a dropper for the actual payload, and as such the internal name of \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cInstallClient\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2 is an apt choice by the threat actor. Developing a Yara rule for the simple dropper DLL, yielded several new binaries: 1dbbdd99cb8d7089ab31efb5dcf09706 5708e0320879de6f9ac928046b1e4f4e a6903d93f9d6f328bcfe3e196fd8c78b cf6f333f99ee6342d6735ac2f6a37c1e ac9b8c82651eafff9a3bbe7c69d69447 d6ddecdb823de235dd650c0f7a2f3d8f We have analysed d6ddecdb823de235dd650c0f7a2f3d8f, which also has InstallClient.dll as its internal name, as it seems to be the earliest dropper DLL used in this campaign, and does not appear to be very different from any of the other DLLs so far uncovered. The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function. A substantial amount of actions will follow according to what\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s defined in the SSSS function, as follows: Prepare target DLL, in this case rasauto.dll, for replacement in C:\\\\Windows\\\\System32; Stop the service belonging to the target DLL, and use the takeown and icacls commands to gain full permissions for the system service DLL; Disable Windows File Protection, which normally prevents software or users from replacing critical Windows files; Suppress any error messages from Windows from popping up on boot; Copy the target DLL, rasauto.dll, to a new file named rasauto32.dll; Replace the target DLL with the malware\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s DLL, which is time-stomped in order to evade detection; Start the now malicious service using net.exe and net1.exe; and, Create configuration and keylogs in C:\\\\Windows\\\\system32, using an uncommon extension, in this case .tsp, and additionally create a folder in C:\\\\Programdata for the purpose of screen captures. The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop. In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown. Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary. Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details. As the malware also disables Windows File Protection and thus any pop-ups, it may not be immediately obvious to system administrators that a legitimate DLL was actually replaced. The following commands are issued in order to achieve persistence: reg add \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon\" /v SFCDisable /t REG_DWORD /d 4 /f reg add \"HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Windows\" /v NoPopUpsOnBoot /t REG_DWORD /d 1 /f Taking a look at the Windows registry for our service, RasAuto, short for Remote Access Auto Connection Manager and historically used for connecting dial-up modems to the internet for example, reveals no specific additional modifications. Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443. Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity. Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data. Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target. Figure 8 - ASCII dump The malware leveraged by KeyBoy has a plethora of functionality, including, but not limited to: Screen grabbing/taking screenshots; Determine public or WAN IP address (using a public IP service), likely for determining a suited target; Gather extended system information, such as information about the operating system, disks, memory and so on; A \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cfile browser\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2 or explorer; Shutdown and reboot commands (in addition to the point below); Launching interactive shells for communicating with the victim machine; Download and upload functionality; and Usage of custom SSL libraries for masquerading C2 traffic. Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login! Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2. While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B. Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com. These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2. Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL. In Table 1 below, you may find other payloads, with their related and fake, or replaced Windows DLL or service. Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China. Related samples Hunting further, we have discovered similar samples to the ones described above, with additional interesting debug paths: Hash Debug path 7d39cef34bdc751e9cf9d46d2f0bef95 D:\\\\work\\\\vs\\\\UsbFerry_v2\\\\bin\\\\UsbFerry.pdb 29e44cfa7bcde079e9c7afb23ca8ef86 E:\\\\Work\\\\VS Project\\\\cyassl-3.3.0\\\\out\\\\SSLClient_x64.pdb Table 2 - Other debug paths Both samples include references to a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93work\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd folder, and a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93VS\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd or \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93VS Project\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd. The latter likely points to a Visual Studio project short name, or VS. While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd. The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727. Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25. This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction. All samples (hashes) and other indicators are provided in Appendix A. Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9. Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com. This email address does not appear to have been observed before. One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers. Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign). All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A. Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how. Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers. While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes. Organisations can refer to Appendix A, in order to search of any possible indicators of compromise. Additionally, organisations may wish to disable default administrator credentials, which will prevent unauthorised services to be installed. Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign. If you would like more information on any of the threats discussed in this alert, or you suspect you may be compromised, please feel free to get in touch, by emailing threatintelligence@uk.pwc.com. Appendix Appendix A Appendix B Appendix A Indicators Indicator Type 101.200.135.85 IP address 103.215.81.196 IP address 103.215.83.193 IP address 103.86.86.177 IP address 118.163.165.20 IP address 142.4.34.92 IP address 144.48.8.68 IP address 174.139.29.6 IP address 180.101.75.169 IP address 213.183.51.187 IP address 23.234.27.100 IP address 27.126.186.74 IP address 47.89.58.141 IP address http://213.183.51[.]187/debug.dll URI dumblamb.zzux.com Domain foxsay.mefound.com Domain greentree.yourtrap.com Domain kawayi.zzux.com Domain mianliu.party Domain mianliu.video Domain mir2dun.cn Domain weblogic.ddns.mobi Domain weblogic.xxuz.com Domain weblogic1709.justdied.com Domain weblogic1709.my03.com Domain weblogic1709.zzux.com Domain weblogic727.2waky.com Domain weblogic727.dumb1.com Domain www.yierzhi.com Domain xiaomayun.online Domain yunmian.loan Domain yunmian.party Domain yunmian.video Domain yunnian.online Domain yunnian.top Domain 657603405@qq.com Email address sensr9.dat Filename sensr3.dat Filename netis9.tsp Filename netis3.tsp Filename 52d11a0a5142f0b37aa2d288321ba099 Hash (MD5) 581ddf0208038a90f8bc2cdc75833425 Hash (MD5) 64b2ac701a0d67da134e13b2efc46900 Hash (MD5) 1dbbdd99cb8d7089ab31efb5dcf09706 Hash (MD5) 7aea7486e3a7a839f49ebc61f1680ba3 Hash (MD5) a55b0c98ac3965067d0270a95e60e87e Hash (MD5) 7d39cef34bdc751e9cf9d46d2f0bef95 Hash (MD5) 5708e0320879de6f9ac928046b1e4f4e Hash (MD5) a6903d93f9d6f328bcfe3e196fd8c78b Hash (MD5) 292843976600e8ad2130224d70356bfc Hash (MD5) 2e04cdf98aead9dd9a5210d7e601cca7 Hash (MD5) cf6f333f99ee6342d6735ac2f6a37c1e Hash (MD5) ac9b8c82651eafff9a3bbe7c69d69447 Hash (MD5) 29e44cfa7bcde079e9c7afb23ca8ef86 Hash (MD5) d6ddecdb823de235dd650c0f7a2f3d8f Hash (MD5) 42c63de7dac16366dfea14fa9ddac3cd Hash (MD5) f21e3b927d269b0622d94c55db9d2808758379aa413c10971fa745cd6e0503c0 Hash (SHA-256) f15d2e9deaeb495fe8a62c05993b9f69bf07331910ed2483e1bab7d31d30231b Hash (SHA-256) f3f55c3df39b85d934121355bed439b53501f996e9b39d4abed14c7fe8081d92 Hash (SHA-256) 750f4a9ae44438bf053ffb344b959000ea624d1964306e4b3806250f4de94bc8 Hash (SHA-256) 12dfb83a3866c93cd1c08652ed0a16a492777355985a973ef50973896795eb34 Hash (SHA-256) 5d0aef905c9f8f74bb82eba89c11ec5b27d35e560b5cacf81087fca0775a8bfa Hash (SHA-256) b4535aa71da630992392c3c202d59274ce49a3fe4f1ac01d7434f1dceeda47e5 Hash (SHA-256) 34f740e5d845710ede1d942560f503e117600bcc7c5c17e03c09bfc66556196c Hash (SHA-256) a6e9951583073ab2598680b17b8b99bab280d6dca86906243bafaf3febdf1565 Hash (SHA-256) d5c27308f50a9c6d8ccd01269ca09a7a13e1615945b8047c4e55c610718e317e Hash (SHA-256) b5782f67054df36c49d9394c12c8bbbca69bfd0f9ccdcf934bc402c6881eca66 Hash (SHA-256) 1d716cee0f318ee14d7c3b946a4626a1afe6bb47f69668065e00e099be362e22 Hash (SHA-256) 0f9a7efcd3a2b1441834dae7b43cd8d48b4fc1daeb2c081f908ac5a1369de753 Hash (SHA-256) 97fa07a035f7b9ad9cc5c7fd3a5df4b8692e748ca5c40067446632f9a3c25952 Hash (SHA-256) fc84856814307a475300d2a44e8d15635dedd02dc09a088a47d1db03bc309925 Hash (SHA-256) 842cb2bed58459445cd4c6f22acf4b6f77f8b93c9ce202aa54539c1d2b0d45c1 Hash (SHA-256) Appendix B Embedded SSL certificate -----BEGIN CERTIFICATE----- MIID0TCCArmgAwIBAgIJALFGobpzN5MdMA0GCSqGSIb3DQEBCwUAMH8xCzAJBgNV BAYTAkNOMQswCQYDVQQIDAJHRDELMAkGA1UEBwwCR1oxDDAKBgNVBAoMA1NTVDEP MA0GA1UECwwGSmVzc01BMRcwFQYDVQQDDA53d3cuamVzc21hLm9yZzEeMBwGCSqG SIb3DQEJARYPbGRjc2FhQDIxY24uY29tMB4XDTE2MDQwMTE1MDIwMFoXDTI0MDYx ODE1MDIwMFowfzELMAkGA1UEBhMCQ04xCzAJBgNVBAgMAkdEMQswCQYDVQQHDAJH WjEMMAoGA1UECgwDU1NUMQ8wDQYDVQQLDAZKZXNzTUExFzAVBgNVBAMMDnd3dy5q ZXNzbWEub3JnMR4wHAYJKoZIhvcNAQkBFg9sZGNzYWFAMjFjbi5jb20wggEiMA0G CSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDht6llexLtFkV8ijjdJGaHXXQysWOJ UM/YQFYP52nviurJSpMbWSXnuaDlfidk76B66Np5mlnN5BiHqbBj34GCVKz5VQtx 3kMY1y30YWyiHAEZiV3PLQc8/A9MnJM/q/mHaulmTuJi8A85TWadqUNXgiaIMkqz bKaauR1/GCxXuEVroqtyR99RCWhfakTz04KfIbt83QR0imWC6uhmvD/DXJ03XFzd XkK5aNp+ef1sBQgFKjeXV6EMuq+UgEDPXlCDUJAqsZt6W/ohrCAHWQYZ/RSvvaMJ O7aWROGAC/lh6ATOIbFlGVppw6zUGdIDkB5FVF1MC7CyDndncFrY+OJzAgMBAAGj UDBOMB0GA1UdDgQWBBT8fu6QFIfxlQvMWjl5pmfBjL6ciDAfBgNVHSMEGDAWgBT8 fu6QFIfxlQvMWjl5pmfBjL6ciDAMBgNVHRMEBTADAQH/MA0GCSqGSIb3DQEBCwUA A4IBAQDI+f6GMBJxRJNKrgbUYLD1U6LWEQJQ50g2NxGy0j+TL6oypoo/kyME3tOR EmXEDzytGcSaQ78xYcg97UQd8OhXYQr0qwZ/JLarmhCVK/bfbGTIn4Mk4ZgDqcOU 46jsJeEZwUSrrq7svKO5d7+wV0VGPO+Ww4yzRCPwm2puXFY1+KpTxYX31+wwMB8p 7GuJEDgV08qzLfcBAfSFFYiOHL3tJ+XNKFNRqigjeYrWuAMphOhpYfYnU0d0upe8 wWx9Unm8qSkc7hiS/vvs1v7Pv1sqMFRBoaKOTqZ7Wz/5AySGPQjeMV/atmArDEkx z58OEgTzg1J/Keztxwj7I2KnYHyH -----END CERTIFICATE----- Contact us Bart Parys Threat Intelligence Analyst, PwC United Kingdom Email Follow us Audit Consulting Deals Risk Assurance Tax Industries About us Offices Media centre Careers Alumni Sitemap \\xc2\\xa9\\xc2 2015 - 2019 PwC. All rights reserved. PwC refers to the PwC network and/or one or more of its member firms, each of which is a separate legal entity. Please see www.pwc.com/structure for further details. Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+  "sanitized_txt": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China. KeyBoy has been most recently reported on by CitizenLab in 2016, and now appears to have returned. Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa. Curiously, the Word document does not contain any macros, or even an exploit. Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol. DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa. In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example. Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest. In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export. Figure 2 shows the relevant part in our XML file. Figure 2 - Download and payload execution This debug.dll is a PE32 binary file with the following properties: md5 hash: 64b2ac701a0d67da134e13b2efc46900 sha1 hash: 1bb516d70591a5a0eb55ee71f9f38597f3640b14 sha256 hash: f3f55c3df39b85d934121355bed439b53501f996e9b39d4abed14c7fe8081d92 size: 531,456 bytes internal DLL name: InstallClient.dll compiler: Microsoft linker: Microsoft Linker(14.0)[DLL32] compilation time: 2017-07-06 08:50:10 This DLL serves as a dropper for the actual payload, and as such the internal name of \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cInstallClient\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2 is an apt choice by the threat actor. Developing a Yara rule for the simple dropper DLL, yielded several new binaries: 1dbbdd99cb8d7089ab31efb5dcf09706 5708e0320879de6f9ac928046b1e4f4e a6903d93f9d6f328bcfe3e196fd8c78b cf6f333f99ee6342d6735ac2f6a37c1e ac9b8c82651eafff9a3bbe7c69d69447 d6ddecdb823de235dd650c0f7a2f3d8f We have analysed d6ddecdb823de235dd650c0f7a2f3d8f, which also has InstallClient.dll as its internal name, as it seems to be the earliest dropper DLL used in this campaign, and does not appear to be very different from any of the other DLLs so far uncovered. The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function. A substantial amount of actions will follow according to what\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s defined in the SSSS function, as follows: Prepare target DLL, in this case rasauto.dll, for replacement in C:\\\\Windows\\\\System32; Stop the service belonging to the target DLL, and use the takeown and icacls commands to gain full permissions for the system service DLL; Disable Windows File Protection, which normally prevents software or users from replacing critical Windows files; Suppress any error messages from Windows from popping up on boot; Copy the target DLL, rasauto.dll, to a new file named rasauto32.dll; Replace the target DLL with the malware\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s DLL, which is time-stomped in order to evade detection; Start the now malicious service using net.exe and net1.exe; and, Create configuration and keylogs in C:\\\\Windows\\\\system32, using an uncommon extension, in this case .tsp, and additionally create a folder in C:\\\\Programdata for the purpose of screen captures. The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop. In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown. Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary. Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details. As the malware also disables Windows File Protection and thus any pop-ups, it may not be immediately obvious to system administrators that a legitimate DLL was actually replaced. The following commands are issued in order to achieve persistence: reg add \"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon\" /v SFCDisable /t REG_DWORD /d 4 /f reg add \"HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Windows\" /v NoPopUpsOnBoot /t REG_DWORD /d 1 /f Taking a look at the Windows registry for our service, RasAuto, short for Remote Access Auto Connection Manager and historically used for connecting dial-up modems to the internet for example, reveals no specific additional modifications. Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443. Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity. Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data. Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target. Figure 8 - ASCII dump The malware leveraged by KeyBoy has a plethora of functionality, including, but not limited to: Screen grabbing/taking screenshots; Determine public or WAN IP address (using a public IP service), likely for determining a suited target; Gather extended system information, such as information about the operating system, disks, memory and so on; A \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cfile browser\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2 or explorer; Shutdown and reboot commands (in addition to the point below); Launching interactive shells for communicating with the victim machine; Download and upload functionality; and Usage of custom SSL libraries for masquerading C2 traffic. Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login! Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2. While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B. Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com. These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2. Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL. In Table 1 below, you may find other payloads, with their related and fake, or replaced Windows DLL or service. Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China. Related samples Hunting further, we have discovered similar samples to the ones described above, with additional interesting debug paths: Hash Debug path 7d39cef34bdc751e9cf9d46d2f0bef95 D:\\\\work\\\\vs\\\\UsbFerry_v2\\\\bin\\\\UsbFerry.pdb 29e44cfa7bcde079e9c7afb23ca8ef86 E:\\\\Work\\\\VS Project\\\\cyassl-3.3.0\\\\out\\\\SSLClient_x64.pdb Table 2 - Other debug paths Both samples include references to a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93work\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd folder, and a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93VS\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd or \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93VS Project\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd. The latter likely points to a Visual Studio project short name, or VS. While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd. The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727. Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25. This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction. All samples (hashes) and other indicators are provided in Appendix A. Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9. Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com. This email address does not appear to have been observed before. One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers. Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign). All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A. Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how. Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers. While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes. Organisations can refer to Appendix A, in order to search of any possible indicators of compromise. Additionally, organisations may wish to disable default administrator credentials, which will prevent unauthorised services to be installed. Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign. If you would like more information on any of the threats discussed in this alert, or you suspect you may be compromised, please feel free to get in touch, by emailing threatintelligence@uk.pwc.com. Appendix Appendix A Appendix B Appendix A Indicators Indicator Type 101.200.135.85 IP address 103.215.81.196 IP address 103.215.83.193 IP address 103.86.86.177 IP address 118.163.165.20 IP address 142.4.34.92 IP address 144.48.8.68 IP address 174.139.29.6 IP address 180.101.75.169 IP address 213.183.51.187 IP address 23.234.27.100 IP address 27.126.186.74 IP address 47.89.58.141 IP address http://213.183.51[.]187/debug.dll URI dumblamb.zzux.com Domain foxsay.mefound.com Domain greentree.yourtrap.com Domain kawayi.zzux.com Domain mianliu.party Domain mianliu.video Domain mir2dun.cn Domain weblogic.ddns.mobi Domain weblogic.xxuz.com Domain weblogic1709.justdied.com Domain weblogic1709.my03.com Domain weblogic1709.zzux.com Domain weblogic727.2waky.com Domain weblogic727.dumb1.com Domain www.yierzhi.com Domain xiaomayun.online Domain yunmian.loan Domain yunmian.party Domain yunmian.video Domain yunnian.online Domain yunnian.top Domain 657603405@qq.com Email address sensr9.dat Filename sensr3.dat Filename netis9.tsp Filename netis3.tsp Filename 52d11a0a5142f0b37aa2d288321ba099 Hash (MD5) 581ddf0208038a90f8bc2cdc75833425 Hash (MD5) 64b2ac701a0d67da134e13b2efc46900 Hash (MD5) 1dbbdd99cb8d7089ab31efb5dcf09706 Hash (MD5) 7aea7486e3a7a839f49ebc61f1680ba3 Hash (MD5) a55b0c98ac3965067d0270a95e60e87e Hash (MD5) 7d39cef34bdc751e9cf9d46d2f0bef95 Hash (MD5) 5708e0320879de6f9ac928046b1e4f4e Hash (MD5) a6903d93f9d6f328bcfe3e196fd8c78b Hash (MD5) 292843976600e8ad2130224d70356bfc Hash (MD5) 2e04cdf98aead9dd9a5210d7e601cca7 Hash (MD5) cf6f333f99ee6342d6735ac2f6a37c1e Hash (MD5) ac9b8c82651eafff9a3bbe7c69d69447 Hash (MD5) 29e44cfa7bcde079e9c7afb23ca8ef86 Hash (MD5) d6ddecdb823de235dd650c0f7a2f3d8f Hash (MD5) 42c63de7dac16366dfea14fa9ddac3cd Hash (MD5) f21e3b927d269b0622d94c55db9d2808758379aa413c10971fa745cd6e0503c0 Hash (SHA-256) f15d2e9deaeb495fe8a62c05993b9f69bf07331910ed2483e1bab7d31d30231b Hash (SHA-256) f3f55c3df39b85d934121355bed439b53501f996e9b39d4abed14c7fe8081d92 Hash (SHA-256) 750f4a9ae44438bf053ffb344b959000ea624d1964306e4b3806250f4de94bc8 Hash (SHA-256) 12dfb83a3866c93cd1c08652ed0a16a492777355985a973ef50973896795eb34 Hash (SHA-256) 5d0aef905c9f8f74bb82eba89c11ec5b27d35e560b5cacf81087fca0775a8bfa Hash (SHA-256) b4535aa71da630992392c3c202d59274ce49a3fe4f1ac01d7434f1dceeda47e5 Hash (SHA-256) 34f740e5d845710ede1d942560f503e117600bcc7c5c17e03c09bfc66556196c Hash (SHA-256) a6e9951583073ab2598680b17b8b99bab280d6dca86906243bafaf3febdf1565 Hash (SHA-256) d5c27308f50a9c6d8ccd01269ca09a7a13e1615945b8047c4e55c610718e317e Hash (SHA-256) b5782f67054df36c49d9394c12c8bbbca69bfd0f9ccdcf934bc402c6881eca66 Hash (SHA-256) 1d716cee0f318ee14d7c3b946a4626a1afe6bb47f69668065e00e099be362e22 Hash (SHA-256) 0f9a7efcd3a2b1441834dae7b43cd8d48b4fc1daeb2c081f908ac5a1369de753 Hash (SHA-256) 97fa07a035f7b9ad9cc5c7fd3a5df4b8692e748ca5c40067446632f9a3c25952 Hash (SHA-256) fc84856814307a475300d2a44e8d15635dedd02dc09a088a47d1db03bc309925 Hash (SHA-256) 842cb2bed58459445cd4c6f22acf4b6f77f8b93c9ce202aa54539c1d2b0d45c1 Hash (SHA-256) Appendix B Embedded SSL certificate -----BEGIN CERTIFICATE----- MIID0TCCArmgAwIBAgIJALFGobpzN5MdMA0GCSqGSIb3DQEBCwUAMH8xCzAJBgNV BAYTAkNOMQswCQYDVQQIDAJHRDELMAkGA1UEBwwCR1oxDDAKBgNVBAoMA1NTVDEP MA0GA1UECwwGSmVzc01BMRcwFQYDVQQDDA53d3cuamVzc21hLm9yZzEeMBwGCSqG SIb3DQEJARYPbGRjc2FhQDIxY24uY29tMB4XDTE2MDQwMTE1MDIwMFoXDTI0MDYx ODE1MDIwMFowfzELMAkGA1UEBhMCQ04xCzAJBgNVBAgMAkdEMQswCQYDVQQHDAJH WjEMMAoGA1UECgwDU1NUMQ8wDQYDVQQLDAZKZXNzTUExFzAVBgNVBAMMDnd3dy5q ZXNzbWEub3JnMR4wHAYJKoZIhvcNAQkBFg9sZGNzYWFAMjFjbi5jb20wggEiMA0G CSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDht6llexLtFkV8ijjdJGaHXXQysWOJ UM/YQFYP52nviurJSpMbWSXnuaDlfidk76B66Np5mlnN5BiHqbBj34GCVKz5VQtx 3kMY1y30YWyiHAEZiV3PLQc8/A9MnJM/q/mHaulmTuJi8A85TWadqUNXgiaIMkqz bKaauR1/GCxXuEVroqtyR99RCWhfakTz04KfIbt83QR0imWC6uhmvD/DXJ03XFzd XkK5aNp+ef1sBQgFKjeXV6EMuq+UgEDPXlCDUJAqsZt6W/ohrCAHWQYZ/RSvvaMJ O7aWROGAC/lh6ATOIbFlGVppw6zUGdIDkB5FVF1MC7CyDndncFrY+OJzAgMBAAGj UDBOMB0GA1UdDgQWBBT8fu6QFIfxlQvMWjl5pmfBjL6ciDAfBgNVHSMEGDAWgBT8 fu6QFIfxlQvMWjl5pmfBjL6ciDAMBgNVHRMEBTADAQH/MA0GCSqGSIb3DQEBCwUA A4IBAQDI+f6GMBJxRJNKrgbUYLD1U6LWEQJQ50g2NxGy0j+TL6oypoo/kyME3tOR EmXEDzytGcSaQ78xYcg97UQd8OhXYQr0qwZ/JLarmhCVK/bfbGTIn4Mk4ZgDqcOU 46jsJeEZwUSrrq7svKO5d7+wV0VGPO+Ww4yzRCPwm2puXFY1+KpTxYX31+wwMB8p 7GuJEDgV08qzLfcBAfSFFYiOHL3tJ+XNKFNRqigjeYrWuAMphOhpYfYnU0d0upe8 wWx9Unm8qSkc7hiS/vvs1v7Pv1sqMFRBoaKOTqZ7Wz/5AySGPQjeMV/atmArDEkx z58OEgTzg1J/Keztxwj7I2KnYHyH -----END CERTIFICATE----- Contact us Bart Parys Threat Intelligence Analyst, PwC United Kingdom Email Follow us Audit Consulting Deals Risk Assurance Tax Industries About us Offices Media centre Careers Alumni Sitemap \\xc2\\xa9\\xc2 2015 - 2019 PwC. All rights reserved. PwC refers to the PwC network and/or one or more of its member firms, each of which is a separate legal entity. Please see www.pwc.com/structure for further details. Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+  "ID_list": [
+    "T1004",
+    "T1016",
+    "T1024",
+    "T1043",
+    "T1050",
+    "T1059",
+    "T1082",
+    "T1083",
+    "T1086",
+    "T1099",
+    "T1105",
+    "T1113",
+    "T1173",
+    "TA0002",
+    "TA0003",
+    "TA0004",
+    "TA0005",
+    "TA0007",
+    "TA0008",
+    "TA0009",
+    "TA0011"
+  ],
+  "Name_list": [
+    "At",
+    "Credentials",
+    "DNS",
+    "Domains",
+    "Malware",
+    "Masquerading",
+    "Rundll32",
+    "Screen Capture",
+    "Server",
+    "Software",
+    "Tool",
+    "Trap"
+  ],
+  "TTP_sentences": {
+    "T1004": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.3604
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.5105
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.3599
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown.",
+        "score": 0.3806
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.4657
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.3172
+      },
+      {
+        "sentence": "As the malware also disables Windows File Protection and thus any pop-ups, it may not be immediately obvious to system administrators that a legitimate DLL was actually replaced.",
+        "score": 0.4988
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.3524
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.4024
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.3542
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.3683
+      },
+      {
+        "sentence": "Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.4324
+      },
+      {
+        "sentence": "In Table 1 below, you may find other payloads, with their related and fake, or replaced Windows DLL or service.",
+        "score": 0.3579
+      },
+      {
+        "sentence": "Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.3476
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.3185
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.4559
+      },
+      {
+        "sentence": "Additionally, organisations may wish to disable default administrator credentials, which will prevent unauthorised services to be installed.",
+        "score": 0.438
+      }
+    ],
+    "T1024": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.4592
+      },
+      {
+        "sentence": "KeyBoy has been most recently reported on by CitizenLab in 2016, and now appears to have returned.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.4112
+      },
+      {
+        "sentence": "Curiously, the Word document does not contain any macros, or even an exploit.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol.",
+        "score": 0.4377
+      },
+      {
+        "sentence": "DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.3436
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.4383
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.3669
+      },
+      {
+        "sentence": "Figure 2 shows the relevant part in our XML file.",
+        "score": 0.3781
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.3217
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.4684
+      },
+      {
+        "sentence": "In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown.",
+        "score": 0.4288
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.4904
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.4231
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.5057
+      },
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.3775
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.5756
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.3165
+      },
+      {
+        "sentence": "Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2.",
+        "score": 0.6278
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.4711
+      },
+      {
+        "sentence": "Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com.",
+        "score": 0.5098
+      },
+      {
+        "sentence": "These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2.",
+        "score": 0.4934
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.4265
+      },
+      {
+        "sentence": "Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China.",
+        "score": 0.5268
+      },
+      {
+        "sentence": "The latter likely points to a Visual Studio project short name, or VS.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.6066
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.5379
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.4316
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.6767
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.5084
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.5156
+      },
+      {
+        "sentence": "This email address does not appear to have been observed before.",
+        "score": 0.3452
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.5486
+      },
+      {
+        "sentence": "Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign).",
+        "score": 0.4043
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.5887
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.5121
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.5714
+      },
+      {
+        "sentence": "While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes.",
+        "score": 0.377
+      },
+      {
+        "sentence": "Organisations can refer to Appendix A, in order to search of any possible indicators of compromise.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.4894
+      },
+      {
+        "sentence": "If you would like more information on any of the threats discussed in this alert, or you suspect you may be compromised, please feel free to get in touch, by emailing threatintelligence@uk.pwc.com.",
+        "score": 0.4606
+      },
+      {
+        "sentence": "Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+        "score": 0.3112
+      }
+    ],
+    "T1043": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.3383
+      },
+      {
+        "sentence": "Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol.",
+        "score": 0.37
+      },
+      {
+        "sentence": "DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa.",
+        "score": 0.3752
+      },
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.305
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.3472
+      },
+      {
+        "sentence": "In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown.",
+        "score": 0.4054
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.695
+      },
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.6103
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.4136
+      },
+      {
+        "sentence": "Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2.",
+        "score": 0.5901
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.3711
+      },
+      {
+        "sentence": "Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2.",
+        "score": 0.708
+      },
+      {
+        "sentence": "Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China.",
+        "score": 0.408
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.5818
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.312
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.3884
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.3126
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.4299
+      },
+      {
+        "sentence": "This email address does not appear to have been observed before.",
+        "score": 0.307
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign).",
+        "score": 0.374
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.3279
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.4202
+      },
+      {
+        "sentence": "While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes.",
+        "score": 0.3211
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "If you would like more information on any of the threats discussed in this alert, or you suspect you may be compromised, please feel free to get in touch, by emailing threatintelligence@uk.pwc.com.",
+        "score": 0.3449
+      },
+      {
+        "sentence": "Please see www.pwc.com/structure for further details.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+        "score": 0.309
+      }
+    ],
+    "T1059": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.3835
+      },
+      {
+        "sentence": "KeyBoy has been most recently reported on by CitizenLab in 2016, and now appears to have returned.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.4228
+      },
+      {
+        "sentence": "Curiously, the Word document does not contain any macros, or even an exploit.",
+        "score": 0.4692
+      },
+      {
+        "sentence": "Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol.",
+        "score": 0.3904
+      },
+      {
+        "sentence": "DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.4925
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.4827
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.5002
+      },
+      {
+        "sentence": "Figure 2 shows the relevant part in our XML file.",
+        "score": 0.4042
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.3932
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.5877
+      },
+      {
+        "sentence": "In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown.",
+        "score": 0.4076
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.4085
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.3467
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.4192
+      },
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.3673
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.4606
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.5093
+      },
+      {
+        "sentence": "Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2.",
+        "score": 0.3953
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.4009
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.3719
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.5107
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.3862
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.3425
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.3702
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.378
+      },
+      {
+        "sentence": "Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign).",
+        "score": 0.3731
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.4442
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.4386
+      },
+      {
+        "sentence": "While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes.",
+        "score": 0.3325
+      },
+      {
+        "sentence": "Organisations can refer to Appendix A, in order to search of any possible indicators of compromise.",
+        "score": 0.3187
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.3983
+      },
+      {
+        "sentence": "If you would like more information on any of the threats discussed in this alert, or you suspect you may be compromised, please feel free to get in touch, by emailing threatintelligence@uk.pwc.com.",
+        "score": 0.3124
+      },
+      {
+        "sentence": "Please see www.pwc.com/structure for further details.",
+        "score": 0.3104
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.3245
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.4555
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.3644
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.4154
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.469
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.3035
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.3961
+      },
+      {
+        "sentence": "The latter likely points to a Visual Studio project short name, or VS.",
+        "score": 0.3066
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.5427
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.312
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.4487
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.4542
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.4633
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.4805
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.3644
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.3926
+      },
+      {
+        "sentence": "While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "Organisations can refer to Appendix A, in order to search of any possible indicators of compromise.",
+        "score": 0.3823
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.4741
+      },
+      {
+        "sentence": "If you would like more information on any of the threats discussed in this alert, or you suspect you may be compromised, please feel free to get in touch, by emailing threatintelligence@uk.pwc.com.",
+        "score": 0.3004
+      },
+      {
+        "sentence": "Please see www.pwc.com/structure for further details.",
+        "score": 0.3234
+      },
+      {
+        "sentence": "Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+        "score": 0.38
+      }
+    ],
+    "T1086": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.4174
+      },
+      {
+        "sentence": "KeyBoy has been most recently reported on by CitizenLab in 2016, and now appears to have returned.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.4294
+      },
+      {
+        "sentence": "Curiously, the Word document does not contain any macros, or even an exploit.",
+        "score": 0.4842
+      },
+      {
+        "sentence": "Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol.",
+        "score": 0.3852
+      },
+      {
+        "sentence": "DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa.",
+        "score": 0.3351
+      },
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.6609
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.4396
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.6234
+      },
+      {
+        "sentence": "Figure 2 shows the relevant part in our XML file.",
+        "score": 0.368
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.4319
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.5052
+      },
+      {
+        "sentence": "In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown.",
+        "score": 0.3943
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.377
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.3409
+      },
+      {
+        "sentence": "As the malware also disables Windows File Protection and thus any pop-ups, it may not be immediately obvious to system administrators that a legitimate DLL was actually replaced.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.3558
+      },
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.4407
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.311
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.3916
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.4677
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.364
+      },
+      {
+        "sentence": "These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2.",
+        "score": 0.3366
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "In Table 1 below, you may find other payloads, with their related and fake, or replaced Windows DLL or service.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.33
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.4506
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.4927
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.3784
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.4136
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.3806
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.3355
+      },
+      {
+        "sentence": "Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign).",
+        "score": 0.3409
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.4517
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.4515
+      },
+      {
+        "sentence": "While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes.",
+        "score": 0.3871
+      },
+      {
+        "sentence": "Additionally, organisations may wish to disable default administrator credentials, which will prevent unauthorised services to be installed.",
+        "score": 0.3998
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.4541
+      },
+      {
+        "sentence": "Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+        "score": 0.3049
+      }
+    ],
+    "T1099": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.345
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.4931
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.5139
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.402
+      },
+      {
+        "sentence": "Figure 2 shows the relevant part in our XML file.",
+        "score": 0.3875
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.4932
+      },
+      {
+        "sentence": "In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown.",
+        "score": 0.3688
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.6932
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.5847
+      },
+      {
+        "sentence": "As the malware also disables Windows File Protection and thus any pop-ups, it may not be immediately obvious to system administrators that a legitimate DLL was actually replaced.",
+        "score": 0.5423
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.4154
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com.",
+        "score": 0.354
+      },
+      {
+        "sentence": "These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.4951
+      },
+      {
+        "sentence": "In Table 1 below, you may find other payloads, with their related and fake, or replaced Windows DLL or service.",
+        "score": 0.4016
+      },
+      {
+        "sentence": "Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China.",
+        "score": 0.3174
+      },
+      {
+        "sentence": "The latter likely points to a Visual Studio project short name, or VS.",
+        "score": 0.4706
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.3759
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.4881
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.331
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.4357
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.4799
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.334
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.3607
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.3802
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.4672
+      },
+      {
+        "sentence": "Organisations can refer to Appendix A, in order to search of any possible indicators of compromise.",
+        "score": 0.3335
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.3673
+      }
+    ],
+    "T1105": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.4615
+      },
+      {
+        "sentence": "KeyBoy has been most recently reported on by CitizenLab in 2016, and now appears to have returned.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.3566
+      },
+      {
+        "sentence": "Curiously, the Word document does not contain any macros, or even an exploit.",
+        "score": 0.3624
+      },
+      {
+        "sentence": "Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol.",
+        "score": 0.3498
+      },
+      {
+        "sentence": "DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa.",
+        "score": 0.3339
+      },
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.761
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.3713
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.6319
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.3554
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.404
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.3638
+      },
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.4017
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.3453
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.3764
+      },
+      {
+        "sentence": "Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2.",
+        "score": 0.3729
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.3721
+      },
+      {
+        "sentence": "Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com.",
+        "score": 0.3383
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.3821
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.3602
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.3883
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.3715
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.4222
+      },
+      {
+        "sentence": "Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign).",
+        "score": 0.329
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.4458
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.3618
+      }
+    ],
+    "T1113": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.3945
+      },
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.3237
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.3204
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.5882
+      },
+      {
+        "sentence": "Interestingly enough, the malware developers left several unique debug messages, for example: GetScreenCmd from file:%s Take Screen Error,May no user login!",
+        "score": 0.5273
+      },
+      {
+        "sentence": "Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.3714
+      }
+    ],
+    "T1173": [
+      {
+        "sentence": "The KeyBoys are back in town PwC | UK Search Search Share Skip to content Skip to footer Menu Welcome to PwC Sign in or Register Sign in or register to Access premium insights and content Download full reports Watch exclusive videos Share this page The KeyBoys are back in town 02/11/17 In this blog post, we detail our analysis of a recent campaign that we attribute, with high confidence, to KeyBoy, a threat actor believed to be based in or operating from China.",
+        "score": 0.4497
+      },
+      {
+        "sentence": "KeyBoy has been most recently reported on by CitizenLab in 2016, and now appears to have returned.",
+        "score": 0.337
+      },
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.4808
+      },
+      {
+        "sentence": "Curiously, the Word document does not contain any macros, or even an exploit.",
+        "score": 0.463
+      },
+      {
+        "sentence": "Rather, it uses a technique recently reported on by SensePost, which allows an attacker to craft a specifically created Microsoft Word document, which uses the Dynamic Data Exchange (DDE) protocol.",
+        "score": 0.6618
+      },
+      {
+        "sentence": "DDE traditionally allows for the sending of messages between applications that share data, for example from Word to Excel or vice versa.",
+        "score": 0.6577
+      },
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.4985
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.4851
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.4808
+      },
+      {
+        "sentence": "Figure 2 shows the relevant part in our XML file.",
+        "score": 0.4302
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.5276
+      },
+      {
+        "sentence": "In Figures 3 to 5, the target DLL, the original and new DLL, as well as the full process flow are shown.",
+        "score": 0.4035
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.5117
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.3935
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.4425
+      },
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.4138
+      },
+      {
+        "sentence": "Attaching a debugger to dllhost.exe, reveals the keylogger files and configuration, replaced DLL file, as well as another folder, which is likely used to store screenshots and other data.",
+        "score": 0.3767
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.4576
+      },
+      {
+        "sentence": "Take Screen Error,service dll not exists Earlier, we mentioned the threat actor uses custom SSL libraries to communicate to the C2.",
+        "score": 0.479
+      },
+      {
+        "sentence": "While we have been unable to observe this behavior in any traffic logs, we were able to extract a certificate, which can be found in Appendix B.",
+        "score": 0.3681
+      },
+      {
+        "sentence": "Converting this certificate to the DER format, we find strings pointing to jessma.org, and an email address, ldcsaa@21cn.com.",
+        "score": 0.532
+      },
+      {
+        "sentence": "These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2.",
+        "score": 0.3332
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.491
+      },
+      {
+        "sentence": "In Table 1 below, you may find other payloads, with their related and fake, or replaced Windows DLL or service.",
+        "score": 0.3074
+      },
+      {
+        "sentence": "Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "While the connection initially seems rather weak, it did hit the same Yara rule as mentioned before and the sample with hash 29e44cfa7bcde079e9c7afb23ca8ef86 additionally includes an SSL certificate, which, when converted, points to another custom SSL library, called WolfSSL, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93a small, fast, portable implementation of TLS/SSL for embedded devices to the cloud\\xc3\\xa2\\xe2\\x82\\xac\\xef\\xbf\\xbd.",
+        "score": 0.4993
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.3667
+      },
+      {
+        "sentence": "Another sample which hit our Yara rule is 7aea7486e3a7a839f49ebc61f1680ba3, which was first uploaded to VirusTotal on 2017-08-25.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.4625
+      },
+      {
+        "sentence": "All samples (hashes) and other indicators are provided in Appendix A.",
+        "score": 0.4115
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.3069
+      },
+      {
+        "sentence": "Figure 9 - C2 graphing There was some overlap with the samples and infrastructure, and one email address appears to jump out, which is linked to several domains: 657603405@qq[.]com.",
+        "score": 0.4798
+      },
+      {
+        "sentence": "This email address does not appear to have been observed before.",
+        "score": 0.3721
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.4933
+      },
+      {
+        "sentence": "Examples include: Weblogic727.xxuz[.]com (2017-07-27 campaign); and, Weblogic1709.zzux[.]com (2017-09-17 campaign).",
+        "score": 0.4131
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.4599
+      },
+      {
+        "sentence": "Conclusion In this report, we have analysed what we assess with high confidence, to be (part of) the latest KeyBoy campaign, a threat actor that has been active for several years, and displays at least a medium level of technical and operational know-how.",
+        "score": 0.4429
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.5504
+      },
+      {
+        "sentence": "While we do not have a clear visibility of targeting, it does appear that this latest campaign targets at least some Western organisations, likely for corporate espionage purposes.",
+        "score": 0.3585
+      },
+      {
+        "sentence": "Organisations can refer to Appendix A, in order to search of any possible indicators of compromise.",
+        "score": 0.3597
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.4569
+      },
+      {
+        "sentence": "If you would like more information on any of the threats discussed in this alert, or you suspect you may be compromised, please feel free to get in touch, by emailing threatintelligence@uk.pwc.com.",
+        "score": 0.3761
+      },
+      {
+        "sentence": "Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+        "score": 0.3092
+      }
+    ],
+    "T1083": [
+      {
+        "sentence": "Analysis Our analysis starts with a Microsoft Word document named 2017 Q4 Work Plan.docx (with a hash of 292843976600e8ad2130224d70356bfc), which was created on 2017-10-11 by a user called \\xc3\\xa2\\xe2\\x82\\xac\\xc5\\x93Admin\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2, and first uploaded to VirusTotal, a website and file scanning service, on the same day, by a user in South Africa.",
+        "score": 0.4205
+      },
+      {
+        "sentence": "Figure 1 \\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x80\\x9c Word Error Once we extract the initial document, using 7-zip for example, we can observe the usual structure, and inside, a file called document.xml is of interest.",
+        "score": 0.4743
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.3694
+      },
+      {
+        "sentence": "The malware will also, in some observed cases, output debug or error messages in a newly created file in the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s Application Data folder as DebugLog.TXT, for example: \\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Cookies\\\\DebugLog.TXT Then, the original dropper DLL will then be deleted, using a simple batch file that runs in a loop.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.3643
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.3329
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.4032
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.356
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.309
+      },
+      {
+        "sentence": "Organisations can refer to Appendix A, in order to search of any possible indicators of compromise.",
+        "score": 0.4909
+      },
+      {
+        "sentence": "Please see www.pwc.com/structure for further details.",
+        "score": 0.4409
+      }
+    ],
+    "T1050": [
+      {
+        "sentence": "In the case reported on by SensePost, this allowed for the fetching or downloading of remote payloads, using PowerShell for example.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "In this XML, a remote payload, in this case a DLL, will be downloaded using PowerShell, moved to the user\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s temporary folder, and run using rundll32.exe, starting in the HOK function or export.",
+        "score": 0.4194
+      },
+      {
+        "sentence": "The DLL starts in the function named Insys, which performs some simple checks, for example, if the current user account is an administrator, and will subsequently call the function named SSSS, which is the main function.",
+        "score": 0.3186
+      },
+      {
+        "sentence": "Figure 3 - Target DLL, config and keylog file built dynamically on the stack Figure 4 - Real and fake rasauto.dll (rasauto32.dll is the real or original DLL) Figure 5 - Complete process flow While visually there is apparently no difference, due to the malware being time-stomped (altering the created and modified dates of a file or folder), we can however observe a few subtle differences in the real and malicious binary.",
+        "score": 0.3722
+      },
+      {
+        "sentence": "Figure 6 - Subtle differences As can be seen in Figure 6, the fake DLL has a different link date, some minor spelling mistakes, and does not include the build in the file version details.",
+        "score": 0.3242
+      },
+      {
+        "sentence": "As the malware also disables Windows File Protection and thus any pop-ups, it may not be immediately obvious to system administrators that a legitimate DLL was actually replaced.",
+        "score": 0.3465
+      },
+      {
+        "sentence": "Dllhost.exe is additionally seen to call back or phone home to a hardcoded range of C2 servers, on ports 53, 80, and 443.",
+        "score": 0.3078
+      },
+      {
+        "sentence": "Another ASCII string can be discovered in the DLL\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s config, MDDEFGEGETGIZ, which likely pertains to the specific KeyBoy campaign, or target.",
+        "score": 0.3481
+      },
+      {
+        "sentence": "Additionally, said library sported an interesting debug path: D:\\\\Work\\\\VS\\\\Horse\\\\TSSL\\\\TSSL_v0.3.1_20170722\\\\TClient\\\\Release\\\\TClient.pdb In addition to writing a Yara rule for the dropper DLL and finding additional samples as mentioned above, we repeated the same process for the payload DLL.",
+        "score": 0.3876
+      },
+      {
+        "sentence": "In Table 1 below, you may find other payloads, with their related and fake, or replaced Windows DLL or service.",
+        "score": 0.5643
+      },
+      {
+        "sentence": "Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China.",
+        "score": 0.3813
+      },
+      {
+        "sentence": "The latter likely points to a Visual Studio project short name, or VS.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "The same hash or binary also includes what we assess to be a campaign name or KeyBoy version identifier, which is weblogic20170727.",
+        "score": 0.3755
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.309
+      },
+      {
+        "sentence": "One other relevant point to note in regards to the infrastructure, is the use of dates, likely relating to campaign names, as part of the C2 servers.",
+        "score": 0.3369
+      },
+      {
+        "sentence": "All C2\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s are provided in Appendix A.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "Several connections can be made to CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report from 2016, such as the continued usage of fake services and related DLLs, powerful capabilities, several exports and strings present in the (sometimes decrypted) DLLs, as well as campaign or version identifiers which are reminiscent and consistent with earlier reported identifiers.",
+        "score": 0.5233
+      },
+      {
+        "sentence": "Additionally, organisations may wish to disable default administrator credentials, which will prevent unauthorised services to be installed.",
+        "score": 0.5107
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.3418
+      }
+    ],
+    "T1016": [
+      {
+        "sentence": "Figure 7 - Dllhost connecting to a remote address Dllhost usually has no need to connect to the internet or WAN, and as such it is a possible indicator of malicious activity.",
+        "score": 0.3314
+      },
+      {
+        "sentence": "These belong to projects by a Chinese developer, where one of the tools or libraries is named HP-Socket, which is a \\xc3\\xa2\\xe2\\x82\\xac\\xcb\\x9cHigh Performance TCP/UDP Socket Component\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2.",
+        "score": 0.334
+      },
+      {
+        "sentence": "Hash Impersonated DLL Impersonated service a55b0c98ac3965067d0270a95e60e87e ikeext.dll IKE and AuthIP IPsec Keying Modules 2e04cdf98aead9dd9a5210d7e601cca7 rasauto.dll Remote Access Auto Connection Manager d6ddecdb823de235dd650c0f7a2f3d8f rasauto.dll Remote Access Auto Connection Manager 1dbbdd99cb8d7089ab31efb5dcf09706 sinet.dll Unknown 581ddf0208038a90f8bc2cdc75833425 sinet.dll Unknown Table 1 - Impersonated DLLs Sinet.dll may relate to SPlayer, a popular video player in China.",
+        "score": 0.313
+      },
+      {
+        "sentence": "This sample appears to be an older variant of KeyBoy, as there are several plain-text strings present, which are consistent with CitizenLab\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s report referenced in the introduction.",
+        "score": 0.3079
+      },
+      {
+        "sentence": "Infrastructure We have mapped out the complete infrastructure that we have discovered, using Maltego, as shown in Figure 9.",
+        "score": 0.4069
+      },
+      {
+        "sentence": "Further Information Clients who are part of our threat intelligence subscription services, can refer to our latest report CTO-TIB-20171019-01A - KeyBoy's new toys, which includes more information as well as ruling in order to detect KeyBoy\\xc3\\xa2\\xe2\\x82\\xac\\xe2\\x84\\xa2s latest campaign.",
+        "score": 0.3204
+      },
+      {
+        "sentence": "Terms and conditions Privacy Statement Cookie info Legal Disclaimer About Site Provider Provision of Services Diversity Web Accessibility User details",
+        "score": 0.3211
+      }
+    ]
+  }
+}

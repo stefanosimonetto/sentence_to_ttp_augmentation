@@ -1,0 +1,865 @@
+{
+  "original_txt": "ESET researchers have discovered a Linux variant of the SideWalk backdoor, one of the multiple custom implants used by the SparklingGoblin APT group. This variant was deployed against a Hong Kong university in February 2021, the same university that had already been targeted by SparklingGoblin during the student protests in May 2020. We originally named this backdoor StageClient, but now refer to it simply as SideWalk Linux. We also discovered that a previously known Linux backdoor – the Specter RAT, first documented by 360 Netlab – is also actually a SideWalk Linux variant, having multiple commonalities with the samples we identified.\nSparklingGoblin is an APT group whose tactics, techniques, and procedures (TTPs) partially overlap with APT41 and BARIUM. It makes use of Motnug and ChaCha20-based loaders, the CROSSWALK and SideWalk backdoors, along with Korplug (aka PlugX) and Cobalt Strike. While the group targets mostly East and Southeast Asia, we have also seen SparklingGoblin targeting a broad range of organizations and verticals around the world, with a particular focus on the academic sector. SparklingGoblin is one of the groups with access to the ShadowPad backdoor.\nThis blogpost documents SideWalk Linux, its victimology, and its numerous similarities with the originally discovered SideWalk backdoor.\nAttribution\nThe SideWalk backdoor is exclusive to SparklingGoblin. In addition to the multiple code similarities between the Linux variants of SideWalk and various SparklingGoblin tools, one of the SideWalk Linux samples uses a C&C address (66.42.103[.]222) that was previously used by SparklingGoblin.\nConsidering all of these factors, we attribute with high confidence SideWalk Linux to the SparklingGoblin APT group.\nVictimology\nEven though there are various SideWalk Linux samples, as we now know them, on VirusTotal, in our telemetry we have found only one victim compromised with this SideWalk variant: a Hong Kong university that, amidst student protests, had previously been targeted by both SparklingGoblin (using the Motnug loader and the CROSSWALK backdoor) and Fishmonger (using the ShadowPad and Spyder backdoors). Note that at that time we put those two different clusters of activity under the broader Winnti Group denomination.\nSparklingGoblin first compromised this particular university in May 2020, and we first detected the Linux variant of SideWalk in that university’s network in February 2021. The group continuously targeted this organization over a long period of time, successfully compromising multiple key servers, including a print server, an email server, and a server used to manage student schedules and course registrations.\nThe road to Sidewalk Linux\nSideWalk, which we first described in its Windows form in our blogpost on August 24th, 2021, is a multipurpose backdoor that can load additional modules sent from the C&C server. It makes use of Google Docs as a dead-drop resolver, and Cloudflare workers as its C&C server. It can properly handle communication behind a proxy.\nThe compromise chain is currently unknown, but we think that the initial attack vector could have been exploitation. This hypothesis is based on the 360 Netlab article describing the Specter botnet targeting IP cameras, and NVR and DVR devices, and the fact that the Hong Kong victim used a vulnerable WordPress server, since there were many attempts to install various webshells.\nWe first documented the Linux variant of SideWalk as StageClient on July 2nd, 2021, without making the connection at that time to SparklingGoblin and its custom SideWalk backdoor. The original name was used because of the repeated appearances of the string StageClient in the code.\nWhile researching StageClient further, we found a blogpost about the Specter botnet described by 360 Netlab. That blogpost describes a modular Linux backdoor with flexible configuration that uses a ChaCha20 encryption variant – basically a subset of StageClient’s functionality. Further inspection confirmed this hypothesis; we additionally found a huge overlap in functionality, infrastructure, and symbols present in all the binaries.\nWe compared the StageClient sample E5E6E100876E652189E7D25FFCF06DE959093433 with Specter samples 7DF0BE2774B17F672B96860D013A933E97862E6C and found numerous similarities, some of which we list below.\nFirst, there is an overlap in C&C commands. Next, the samples have the same structure of configuration and encryption method (see Figure 1 and Figure 2).\nAdditionally, the samples’ modules are managed in almost the same way, and the majority of the interfaces are identical; modules of StageClient only need to implement one additional handler, which is for closing the module. Three out of the five known modules are almost identical.\nLastly, we could see striking overlaps in the network protocols of the compared samples. A variant of ChaCha20 is used twice for encryption with LZ4 compression in the very same way. Both StageClient and Specter create a number of threads (see Figure 3 and Figure 4) to manage sending and receiving asynchronous messages along with heartbeats.\nDespite all these striking similarities, there are several changes. The most notable ones are the following:\n- The authors switched from the C language to C++. The reason is unknown, but it should be easier to implement such modular architecture in C++ due to its polymorphism support.\n- An option to exchange messages over HTTP was added (see Figure 5 and Figure 6).\n- Downloadable plugins were replaced with precompiled modules that fulfill the same purpose; a number of new commands and two new modules were added.\n- Added the module TaskSchedulerMod, which operates as a built-in cron utility. Its cron table is stored in memory; the jobs are received over the network and executed as shell commands.\n- Added the module SysInfoMgr, which provides information about the underlying system such as the list of installed packages and hardware details.\nThese similarities convince us that Specter and StageClient are from the same malware family. However, considering the numerous code overlaps between the StageClient variant used against the Hong Kong university in February 2021 and SideWalk for Windows, as described in the next section, we now believe that Specter and StageClient are both Linux variants of SideWalk, so we have decided to refer to them as SideWalk Linux.\nSimilarities with the Windows variant\nSideWalk Windows and SideWalk Linux share too many similarities to describe within the confines of this blogpost, so here we only cover the most striking ones.\nChaCha20\nAn obvious similarity is noticeable in the implementations of ChaCha20 encryption: both variants use a counter with an initial value of 0x0B, which was previously mentioned in our blogpost as a specificity of SideWalk’s ChaCha20 implementation.\nSoftware architecture\nOne SideWalk particularity is the use of multiple threads to execute one specific task. We noticed that in both variants there are exactly five threads executed simultaneously, each of them having a specific task. The following list describes the function of each; the thread names are from the code:\n- StageClient::ThreadNetworkReverse\nIf a connection to the C&C server is not already established, this thread periodically attempts to retrieve the local proxy configuration and the C&C server location from the dead-drop resolver. If the previous step was successful, it attempts to initiate a connection to the C&C server. - StageClient::ThreadHeartDetect\nIf the backdoor did not receive a command in the specified amount of time, this thread can terminate the connection with the C&C server or switch to a “nap” mode that introduces minor changes to the behavior. - StageClient::ThreadPollingDriven\nIf there is no other queued data to send, this thread periodically sends a heartbeat command to the C&C server that can additionally contain the current time. - StageClient::ThreadBizMsgSend\nThis thread periodically checks whether there is data to be sent in the message queues used by all the other threads and, if so, processes it. - StageClient::ThreadBizMsgHandler\nThis thread periodically checks whether there are any pending messages received from the C&C server and, if so, handles them.\nConfiguration\nAs in SideWalk Windows, the configuration is decrypted using ChaCha20.\nChecksum\nFirst, before decrypting, there is a data integrity check. This check is similar in both implementations of SideWalk (see Figure 7 and Figure 8): an MD5 hash is computed on the ChaCha20 nonce concatenated to the encrypted configuration data. This hash is then checked against a predefined value, and if not equal, SideWalk exits.\nLayout\nFigure 9 presents excerpts of decrypted configurations from the samples that we analyzed.\nThe SideWalk Linux config contains less information than the SideWalk Windows one. This makes sense because the majority of the configuration artifacts in SideWalk Windows are used as cryptography and network parameters, whereas most of these are internal in SideWalk Linux.\nDecryption using ChaCha20\nAs previously mentioned, SideWalk uses a main global structure to store its configuration. This configuration is first decrypted using the modified implementation of ChaCha20, as seen in Figure 10.\nFigure 10. ChaCha20 decryption call in SideWalk Windows (left) and in SideWalk Linux (right)\nNote that the ChaCha20 key is exactly the same in both variants, strengthening the connection between the two.\nDead-drop resolver\nThe dead-drop resolver payload is identical in both samples. As a reminder from our blogpost on SideWalk, Figure 11 depicts the format of the payload that is fetched from the dead-drop resolver.\nFor the first delimiter, we notice that the PublicKey: part of the string is ignored; the string AE68[…]3EFF is directly searched, as shown in Figure 12.\nFigure 12. SideWalk Linux’s first delimiter routine (left), end delimiter and middle delimiter routines (right)\nThe delimiters are identical, as well as the whole decoding algorithm.\nVictim fingerprinting\nIn order to fingerprint the victim, different artifacts are gathered on the victim’s machine. We noticed that the fetched information is exactly the same, to the extent of it even being fetched in the same order.\nAs the boot time in either case is a Windows-compliant time format, we can hypothesize that the operators’ controller runs under Windows, and that the controller is the same for both Linux and Windows victims. Another argument supporting this hypothesis is that the ChaCha20 keys used in both implementations of SideWalk are the same.\nCommunication protocol\nData serialization\nThe communication protocol between the infected machine and the C&C is HTTP or HTTPS, depending on the configuration, but in both cases, the data is serialized in the same manner. Not only is the implementation very similar, but the identical encryption key is used in both implementations, which, again, accentuates the similarity between the two variants.\nPOST requests\nIn the POST requests used by SideWalk to fetch commands and payloads from the C&C server, one noticeable point is the use of the two parameters gtsid and gtuvid, as seen in Figure 13. Identical parameters are used in the Linux variant.\nPOST /M26RcKtVr5WniDVZ/5CDpKo5zmAYbTmFl HTTP/1.1\nCache-Control: no-cache\nConnection: close\nPragma: no-cache\nUser-Agent: Mozilla/5.0 Chrome/72.0.3626.109 Safari/537.36\ngtsid: zn3isN2C6bWsqYvO\ngtuvid: 7651E459979F931D39EDC12D68384C21249A8DE265F3A925F6E289A2467BC47D\nContent-Length: 120\nHost: update.facebookint.workers[.]dev\nFigure 13. Example of a POST request used by SideWalk Windows\nAnother interesting point is that the Windows variant runs as fully position-independent shellcode, whereas the Linux variant is a shared library. However, we think the malware’s authors could have just taken an extra step, using a tool such as sRDI to convert a compiled SideWalk PE to shellcode instead of manually writing the shellcode.\nCommands\nOnly four commands are not implemented or implemented differently in the Linux variant, as listed in Table 1. All the other commands are present – even with the same IDs.\nTable 1. Commands with different or missing implementation in the Linux version of SideWalk\n| Command ID (from C&C) | Windows variants | Linux variants |\n|---|---|---|\n| 0x7C | Load a plugin sent by the C&C server. | Not implemented in SideWalk Linux. |\n| 0x82 | Collect domain information about running processes, and owners (owner SID, account name, process name, domain information). | Do nothing. |\n| 0x8C | Data serialization function. | Commands that are not handled, but fall in the default case, which is broadcasting a message to all the loaded modules. |\n| 0x8E | Write the received data to the file located at %AllUsersProfile%\\UTXP\\nat\\<filename>, where <filename> is a hash of the value returned by VirtualAlloc at each execution of the malware. | #rowspan# |\nVersioning\nIn the Linux variant, we observed a specificity that was not found in the Windows variant: a version number is computed (see Figure 14).\nThe hardcoded date could be the beginning or end of development of this version of SideWalk Linux. The final computation is made out of the year, day, and month, from the value Oct 26 2020. In this case, the result is 1171798691840.\nPlugins\nIn SideWalk Linux variants, modules are built in; they cannot be fetched from the C&C server. That is a notable difference from the Windows variant. Some of those built-in functionalities, like gathering system information (SysInfoMgr, for example) such as network configuration, are done directly by dedicated functions in the Windows variant. In the Windows variant, some plugins can be added through C&C communication.\nDefense evasion\nThe Windows variant of SideWalk goes to great lengths to conceal the objectives of its code. It trimmed out all data and code that was unnecessary for its execution and encrypted the rest. On the other hand, the Linux variants contain symbols and leave some unique authentication keys and other artifacts unencrypted, which makes the detection and analysis significantly easier.\nAdditionally, the much higher number of inlined functions in the Windows variant suggests that its code was compiled with a higher level of compiler optimizations.\nConclusion\nThe backdoor that was used to attack a Hong Kong university in February 2021 is the same malware family as the SideWalk backdoor, and actually is a Linux variant of the backdoor. This Linux version exhibits several similarities with its Windows counterpart along with various novelties.\nFor any inquiries about our research published on WeLiveSecurity, please contact us at threatintel@eset.com.\nESET Research now also offers private APT intelligence reports and data feeds. For any inquiries about this service, visit the ESET Threat Intelligence page.\nIoCs\nA comprehensive list of Indicators of Compromise and samples can be found in our GitHub repository.\n| SHA-1 | Filename | ESET detection name | Description |\n|---|---|---|---|\n| FA6A40D3FC5CD4D975A01E298179A0B36AA02D4E | ssh_tunnel1_0 | Linux/SideWalk.L | SideWalk Linux (StageClient variant) |\n| 7DF0BE2774B17F672B96860D013A933E97862E6C | hw_ex_watchdog.exe | Linux/SideWalk.B | SideWalk Linux (Specter variant) |\nNetwork\n| Domain | IP | First seen | Notes |\n|---|---|---|---|\n| rec.micosoft[.]ga | 172.67.8[.]59 | SideWalk C&C server (StageClient variant) | |\n| 66.42.103[.]222 | SideWalk C&C server (Specter variant from 360 Netlab’s blogpost) |\nMITRE ATT&CK techniques\nThis table was built using version 11 of the MITRE ATT&CK framework.\n| Tactic | ID | Name | Description |\n|---|---|---|---|\n| Resource Development | T1587.001 | Develop Capabilities: Malware | SparklingGoblin uses its own malware arsenal. |\n| Discovery | T1016 | System Network Configuration Discovery | SideWalk Linux has the ability to find the network configuration of the compromised machine, including the proxy configuration. |\n| Command and Control | T1071.001 | Application Layer Protocol: Web Protocols | SideWalk Linux communicates via HTTPS with the C&C server. |\n| T1573.001 | Encrypted Channel: Symmetric Cryptography | SideWalk Linux uses ChaCha20 to encrypt communication data. |",
+  "sanitized_txt": "ESET researchers have discovered a Linux variant of the SideWalk backdoor, one of the multiple custom implants used by the SparklingGoblin APT group. This variant was deployed against a Hong Kong university in February 2021, the same university that had already been targeted by SparklingGoblin during the student protests in May 2020. We originally named this backdoor StageClient, but now refer to it simply as SideWalk Linux. We also discovered that a previously known Linux backdoor – the Specter RAT, first documented by 360 Netlab – is also actually a SideWalk Linux variant, having multiple commonalities with the samples we identified.\nSparklingGoblin is an APT group whose tactics, techniques, and procedures (TTPs) partially overlap with APT41 and BARIUM. It makes use of Motnug and ChaCha20-based loaders, the CROSSWALK and SideWalk backdoors, along with Korplug (aka PlugX) and Cobalt Strike. While the group targets mostly East and Southeast Asia, we have also seen SparklingGoblin targeting a broad range of organizations and verticals around the world, with a particular focus on the academic sector. SparklingGoblin is one of the groups with access to the ShadowPad backdoor.\nThis blogpost documents SideWalk Linux, its victimology, and its numerous similarities with the originally discovered SideWalk backdoor.\nAttribution The SideWalk backdoor is exclusive to SparklingGoblin. In addition to the multiple code similarities between the Linux variants of SideWalk and various SparklingGoblin tools, one of the SideWalk Linux samples uses a C&C address (66.42.103[.]222) that was previously used by SparklingGoblin.\nConsidering all of these factors, we attribute with high confidence SideWalk Linux to the SparklingGoblin APT group.\nVictimology Even though there are various SideWalk Linux samples, as we now know them, on VirusTotal, in our telemetry we have found only one victim compromised with this SideWalk variant: a Hong Kong university that, amidst student protests, had previously been targeted by both SparklingGoblin (using the Motnug loader and the CROSSWALK backdoor) and Fishmonger (using the ShadowPad and Spyder backdoors). Note that at that time we put those two different clusters of activity under the broader Winnti Group denomination.\nSparklingGoblin first compromised this particular university in May 2020, and we first detected the Linux variant of SideWalk in that university’s network in February 2021. The group continuously targeted this organization over a long period of time, successfully compromising multiple key servers, including a print server, an email server, and a server used to manage student schedules and course registrations.\nThe road to Sidewalk Linux SideWalk, which we first described in its Windows form in our blogpost on August 24th, 2021, is a multipurpose backdoor that can load additional modules sent from the C&C server. It makes use of Google Docs as a dead-drop resolver, and Cloudflare workers as its C&C server. It can properly handle communication behind a proxy.\nThe compromise chain is currently unknown, but we think that the initial attack vector could have been exploitation. This hypothesis is based on the 360 Netlab article describing the Specter botnet targeting IP cameras, and NVR and DVR devices, and the fact that the Hong Kong victim used a vulnerable WordPress server, since there were many attempts to install various webshells.\nWe first documented the Linux variant of SideWalk as StageClient on July 2nd, 2021, without making the connection at that time to SparklingGoblin and its custom SideWalk backdoor. The original name was used because of the repeated appearances of the string StageClient in the code.\nWhile researching StageClient further, we found a blogpost about the Specter botnet described by 360 Netlab. That blogpost describes a modular Linux backdoor with flexible configuration that uses a ChaCha20 encryption variant – basically a subset of StageClient’s functionality. Further inspection confirmed this hypothesis; we additionally found a huge overlap in functionality, infrastructure, and symbols present in all the binaries.\nWe compared the StageClient sample E5E6E100876E652189E7D25FFCF06DE959093433 with Specter samples 7DF0BE2774B17F672B96860D013A933E97862E6C and found numerous similarities, some of which we list below.\nFirst, there is an overlap in C&C commands. Next, the samples have the same structure of configuration and encryption method (see Figure 1 and Figure 2).\nAdditionally, the samples’ modules are managed in almost the same way, and the majority of the interfaces are identical; modules of StageClient only need to implement one additional handler, which is for closing the module. Three out of the five known modules are almost identical.\nLastly, we could see striking overlaps in the network protocols of the compared samples. A variant of ChaCha20 is used twice for encryption with LZ4 compression in the very same way. Both StageClient and Specter create a number of threads (see Figure 3 and Figure 4) to manage sending and receiving asynchronous messages along with heartbeats.\nDespite all these striking similarities, there are several changes. The most notable ones are the following:\n- The authors switched from the C language to C++. The reason is unknown, but it should be easier to implement such modular architecture in C++ due to its polymorphism support.\n- An option to exchange messages over HTTP was added (see Figure 5 and Figure 6).\n- Downloadable plugins were replaced with precompiled modules that fulfill the same purpose; a number of new commands and two new modules were added.\n- Added the module TaskSchedulerMod, which operates as a built-in cron utility. Its cron table is stored in memory; the jobs are received over the network and executed as shell commands.\n- Added the module SysInfoMgr, which provides information about the underlying system such as the list of installed packages and hardware details.\nThese similarities convince us that Specter and StageClient are from the same malware family. However, considering the numerous code overlaps between the StageClient variant used against the Hong Kong university in February 2021 and SideWalk for Windows, as described in the next section, we now believe that Specter and StageClient are both Linux variants of SideWalk, so we have decided to refer to them as SideWalk Linux.\nSimilarities with the Windows variant SideWalk Windows and SideWalk Linux share too many similarities to describe within the confines of this blogpost, so here we only cover the most striking ones.\nChaCha20 An obvious similarity is noticeable in the implementations of ChaCha20 encryption: both variants use a counter with an initial value of 0x0B, which was previously mentioned in our blogpost as a specificity of SideWalk’s ChaCha20 implementation.\nSoftware architecture One SideWalk particularity is the use of multiple threads to execute one specific task. We noticed that in both variants there are exactly five threads executed simultaneously, each of them having a specific task. The following list describes the function of each; the thread names are from the code:\n- StageClient::ThreadNetworkReverse If a connection to the C&C server is not already established, this thread periodically attempts to retrieve the local proxy configuration and the C&C server location from the dead-drop resolver. If the previous step was successful, it attempts to initiate a connection to the C&C server. - StageClient::ThreadHeartDetect If the backdoor did not receive a command in the specified amount of time, this thread can terminate the connection with the C&C server or switch to a “nap” mode that introduces minor changes to the behavior. - StageClient::ThreadPollingDriven If there is no other queued data to send, this thread periodically sends a heartbeat command to the C&C server that can additionally contain the current time. - StageClient::ThreadBizMsgSend This thread periodically checks whether there is data to be sent in the message queues used by all the other threads and, if so, processes it. - StageClient::ThreadBizMsgHandler This thread periodically checks whether there are any pending messages received from the C&C server and, if so, handles them.\nConfiguration As in SideWalk Windows, the configuration is decrypted using ChaCha20.\nChecksum First, before decrypting, there is a data integrity check. This check is similar in both implementations of SideWalk (see Figure 7 and Figure 8): an MD5 hash is computed on the ChaCha20 nonce concatenated to the encrypted configuration data. This hash is then checked against a predefined value, and if not equal, SideWalk exits.\nLayout Figure 9 presents excerpts of decrypted configurations from the samples that we analyzed.\nThe SideWalk Linux config contains less information than the SideWalk Windows one. This makes sense because the majority of the configuration artifacts in SideWalk Windows are used as cryptography and network parameters, whereas most of these are internal in SideWalk Linux.\nDecryption using ChaCha20 As previously mentioned, SideWalk uses a main global structure to store its configuration. This configuration is first decrypted using the modified implementation of ChaCha20, as seen in Figure 10.\nFigure 10. ChaCha20 decryption call in SideWalk Windows (left) and in SideWalk Linux (right) Note that the ChaCha20 key is exactly the same in both variants, strengthening the connection between the two.\nDead-drop resolver The dead-drop resolver payload is identical in both samples. As a reminder from our blogpost on SideWalk, Figure 11 depicts the format of the payload that is fetched from the dead-drop resolver.\nFor the first delimiter, we notice that the PublicKey: part of the string is ignored; the string AE68[…]3EFF is directly searched, as shown in Figure 12.\nFigure 12. SideWalk Linux’s first delimiter routine (left), end delimiter and middle delimiter routines (right) The delimiters are identical, as well as the whole decoding algorithm.\nVictim fingerprinting In order to fingerprint the victim, different artifacts are gathered on the victim’s machine. We noticed that the fetched information is exactly the same, to the extent of it even being fetched in the same order.\nAs the boot time in either case is a Windows-compliant time format, we can hypothesize that the operators’ controller runs under Windows, and that the controller is the same for both Linux and Windows victims. Another argument supporting this hypothesis is that the ChaCha20 keys used in both implementations of SideWalk are the same.\nCommunication protocol Data serialization The communication protocol between the infected machine and the C&C is HTTP or HTTPS, depending on the configuration, but in both cases, the data is serialized in the same manner. Not only is the implementation very similar, but the identical encryption key is used in both implementations, which, again, accentuates the similarity between the two variants.\nPOST requests In the POST requests used by SideWalk to fetch commands and payloads from the C&C server, one noticeable point is the use of the two parameters gtsid and gtuvid, as seen in Figure 13. Identical parameters are used in the Linux variant.\nPOST /M26RcKtVr5WniDVZ/5CDpKo5zmAYbTmFl HTTP/1.1 Cache-Control: no-cache Connection: close Pragma: no-cache User-Agent: Mozilla/5.0 Chrome/72.0.3626.109 Safari/537.36 gtsid: zn3isN2C6bWsqYvO gtuvid: 7651E459979F931D39EDC12D68384C21249A8DE265F3A925F6E289A2467BC47D Content-Length: 120 Host: update.facebookint.workers[.]dev Figure 13. Example of a POST request used by SideWalk Windows Another interesting point is that the Windows variant runs as fully position-independent shellcode, whereas the Linux variant is a shared library. However, we think the malware’s authors could have just taken an extra step, using a tool such as sRDI to convert a compiled SideWalk PE to shellcode instead of manually writing the shellcode.\nCommands Only four commands are not implemented or implemented differently in the Linux variant, as listed in Table 1. All the other commands are present – even with the same IDs.\nTable 1. Commands with different or missing implementation in the Linux version of SideWalk | Command ID (from C&C) | Windows variants | Linux variants | |---|---|---| | 0x7C | Load a plugin sent by the C&C server. | Not implemented in SideWalk Linux. | | 0x82 | Collect domain information about running processes, and owners (owner SID, account name, process name, domain information). | Do nothing. | | 0x8C | Data serialization function. | Commands that are not handled, but fall in the default case, which is broadcasting a message to all the loaded modules. | | 0x8E | Write the received data to the file located at %AllUsersProfile%\\UTXP\\nat\\<filename>, where <filename> is a hash of the value returned by VirtualAlloc at each execution of the malware. | #rowspan# | Versioning In the Linux variant, we observed a specificity that was not found in the Windows variant: a version number is computed (see Figure 14).\nThe hardcoded date could be the beginning or end of development of this version of SideWalk Linux. The final computation is made out of the year, day, and month, from the value Oct 26 2020. In this case, the result is 1171798691840.\nPlugins In SideWalk Linux variants, modules are built in; they cannot be fetched from the C&C server. That is a notable difference from the Windows variant. Some of those built-in functionalities, like gathering system information (SysInfoMgr, for example) such as network configuration, are done directly by dedicated functions in the Windows variant. In the Windows variant, some plugins can be added through C&C communication.\nDefense evasion The Windows variant of SideWalk goes to great lengths to conceal the objectives of its code. It trimmed out all data and code that was unnecessary for its execution and encrypted the rest. On the other hand, the Linux variants contain symbols and leave some unique authentication keys and other artifacts unencrypted, which makes the detection and analysis significantly easier.\nAdditionally, the much higher number of inlined functions in the Windows variant suggests that its code was compiled with a higher level of compiler optimizations.\nConclusion The backdoor that was used to attack a Hong Kong university in February 2021 is the same malware family as the SideWalk backdoor, and actually is a Linux variant of the backdoor. This Linux version exhibits several similarities with its Windows counterpart along with various novelties.\nFor any inquiries about our research published on WeLiveSecurity, please contact us at threatintel@eset.com.\nESET Research now also offers private APT intelligence reports and data feeds. For any inquiries about this service, visit the ESET Threat Intelligence page.\nIoCs A comprehensive list of Indicators of Compromise and samples can be found in our GitHub repository.\n| SHA-1 | Filename | ESET detection name | Description | |---|---|---|---| | FA6A40D3FC5CD4D975A01E298179A0B36AA02D4E | ssh_tunnel1_0 | Linux/SideWalk.L | SideWalk Linux (StageClient variant) | | 7DF0BE2774B17F672B96860D013A933E97862E6C | hw_ex_watchdog.exe | Linux/SideWalk.B | SideWalk Linux (Specter variant) | Network | Domain | IP | First seen | Notes | |---|---|---|---| | rec.micosoft[.]ga | 172.67.8[.]59 | SideWalk C&C server (StageClient variant) | | | 66.42.103[.]222 | SideWalk C&C server (Specter variant from 360 Netlab’s blogpost) | MITRE ATT&CK techniques This table was built using version 11 of the MITRE ATT&CK framework.",
+  "ID_list": [
+    "T1016",
+    "T1071.001",
+    "T1573.001",
+    "T1587.001"
+  ],
+  "Name_list": [
+    "Execution",
+    "Proxy",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1587.001": [
+      {
+        "sentence": "ESET researchers have discovered a Linux variant of the SideWalk backdoor, one of the multiple custom implants used by the SparklingGoblin APT group.",
+        "score": 0.5224
+      },
+      {
+        "sentence": "This variant was deployed against a Hong Kong university in February 2021, the same university that had already been targeted by SparklingGoblin during the student protests in May 2020.",
+        "score": 0.4072
+      },
+      {
+        "sentence": "We originally named this backdoor StageClient, but now refer to it simply as SideWalk Linux.",
+        "score": 0.4215
+      },
+      {
+        "sentence": "We also discovered that a previously known Linux backdoor – the Specter RAT, first documented by 360 Netlab – is also actually a SideWalk Linux variant, having multiple commonalities with the samples we identified.",
+        "score": 0.5012
+      },
+      {
+        "sentence": "SparklingGoblin is an APT group whose tactics, techniques, and procedures (TTPs) partially overlap with APT41 and BARIUM.",
+        "score": 0.5389
+      },
+      {
+        "sentence": "It makes use of Motnug and ChaCha20-based loaders, the CROSSWALK and SideWalk backdoors, along with Korplug (aka PlugX) and Cobalt Strike.",
+        "score": 0.5202
+      },
+      {
+        "sentence": "While the group targets mostly East and Southeast Asia, we have also seen SparklingGoblin targeting a broad range of organizations and verticals around the world, with a particular focus on the academic sector.",
+        "score": 0.4087
+      },
+      {
+        "sentence": "SparklingGoblin is one of the groups with access to the ShadowPad backdoor.",
+        "score": 0.5145
+      },
+      {
+        "sentence": "This blogpost documents SideWalk Linux, its victimology, and its numerous similarities with the originally discovered SideWalk backdoor.",
+        "score": 0.4575
+      },
+      {
+        "sentence": "Attribution The SideWalk backdoor is exclusive to SparklingGoblin.",
+        "score": 0.3095
+      },
+      {
+        "sentence": "In addition to the multiple code similarities between the Linux variants of SideWalk and various SparklingGoblin tools, one of the SideWalk Linux samples uses a C&C address (66.42.103[.]222) that was previously used by SparklingGoblin.",
+        "score": 0.5604
+      },
+      {
+        "sentence": "Considering all of these factors, we attribute with high confidence SideWalk Linux to the SparklingGoblin APT group.",
+        "score": 0.3863
+      },
+      {
+        "sentence": "Victimology Even though there are various SideWalk Linux samples, as we now know them, on VirusTotal, in our telemetry we have found only one victim compromised with this SideWalk variant: a Hong Kong university that, amidst student protests, had previously been targeted by both SparklingGoblin (using the Motnug loader and the CROSSWALK backdoor) and Fishmonger (using the ShadowPad and Spyder backdoors).",
+        "score": 0.5307
+      },
+      {
+        "sentence": "Note that at that time we put those two different clusters of activity under the broader Winnti Group denomination.",
+        "score": 0.47
+      },
+      {
+        "sentence": "SparklingGoblin first compromised this particular university in May 2020, and we first detected the Linux variant of SideWalk in that university’s network in February 2021.",
+        "score": 0.3939
+      },
+      {
+        "sentence": "The group continuously targeted this organization over a long period of time, successfully compromising multiple key servers, including a print server, an email server, and a server used to manage student schedules and course registrations.",
+        "score": 0.4927
+      },
+      {
+        "sentence": "The road to Sidewalk Linux SideWalk, which we first described in its Windows form in our blogpost on August 24th, 2021, is a multipurpose backdoor that can load additional modules sent from the C&C server.",
+        "score": 0.6075
+      },
+      {
+        "sentence": "It makes use of Google Docs as a dead-drop resolver, and Cloudflare workers as its C&C server.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "It can properly handle communication behind a proxy.",
+        "score": 0.3273
+      },
+      {
+        "sentence": "The compromise chain is currently unknown, but we think that the initial attack vector could have been exploitation.",
+        "score": 0.444
+      },
+      {
+        "sentence": "This hypothesis is based on the 360 Netlab article describing the Specter botnet targeting IP cameras, and NVR and DVR devices, and the fact that the Hong Kong victim used a vulnerable WordPress server, since there were many attempts to install various webshells.",
+        "score": 0.376
+      },
+      {
+        "sentence": "We first documented the Linux variant of SideWalk as StageClient on July 2nd, 2021, without making the connection at that time to SparklingGoblin and its custom SideWalk backdoor.",
+        "score": 0.4503
+      },
+      {
+        "sentence": "The original name was used because of the repeated appearances of the string StageClient in the code.",
+        "score": 0.4604
+      },
+      {
+        "sentence": "While researching StageClient further, we found a blogpost about the Specter botnet described by 360 Netlab.",
+        "score": 0.5004
+      },
+      {
+        "sentence": "That blogpost describes a modular Linux backdoor with flexible configuration that uses a ChaCha20 encryption variant – basically a subset of StageClient’s functionality.",
+        "score": 0.5909
+      },
+      {
+        "sentence": "Further inspection confirmed this hypothesis; we additionally found a huge overlap in functionality, infrastructure, and symbols present in all the binaries.",
+        "score": 0.5643
+      },
+      {
+        "sentence": "We compared the StageClient sample E5E6E100876E652189E7D25FFCF06DE959093433 with Specter samples 7DF0BE2774B17F672B96860D013A933E97862E6C and found numerous similarities, some of which we list below.",
+        "score": 0.5518
+      },
+      {
+        "sentence": "First, there is an overlap in C&C commands.",
+        "score": 0.5118
+      },
+      {
+        "sentence": "Next, the samples have the same structure of configuration and encryption method (see Figure 1 and Figure 2).",
+        "score": 0.5949
+      },
+      {
+        "sentence": "Additionally, the samples’ modules are managed in almost the same way, and the majority of the interfaces are identical; modules of StageClient only need to implement one additional handler, which is for closing the module.",
+        "score": 0.4689
+      },
+      {
+        "sentence": "Three out of the five known modules are almost identical.",
+        "score": 0.5607
+      },
+      {
+        "sentence": "Lastly, we could see striking overlaps in the network protocols of the compared samples.",
+        "score": 0.3843
+      },
+      {
+        "sentence": "A variant of ChaCha20 is used twice for encryption with LZ4 compression in the very same way.",
+        "score": 0.4576
+      },
+      {
+        "sentence": "Both StageClient and Specter create a number of threads (see Figure 3 and Figure 4) to manage sending and receiving asynchronous messages along with heartbeats.",
+        "score": 0.3962
+      },
+      {
+        "sentence": "Despite all these striking similarities, there are several changes.",
+        "score": 0.4324
+      },
+      {
+        "sentence": "The most notable ones are the following: - The authors switched from the C language to C++.",
+        "score": 0.4291
+      },
+      {
+        "sentence": "The reason is unknown, but it should be easier to implement such modular architecture in C++ due to its polymorphism support. - An option to exchange messages over HTTP was added (see Figure 5 and Figure 6). - Downloadable plugins were replaced with precompiled modules that fulfill the same purpose; a number of new commands and two new modules were added. - Added the module TaskSchedulerMod, which operates as a built-in cron utility.",
+        "score": 0.5661
+      },
+      {
+        "sentence": "Its cron table is stored in memory; the jobs are received over the network and executed as shell commands. - Added the module SysInfoMgr, which provides information about the underlying system such as the list of installed packages and hardware details.",
+        "score": 0.4119
+      },
+      {
+        "sentence": "These similarities convince us that Specter and StageClient are from the same malware family.",
+        "score": 0.6438
+      },
+      {
+        "sentence": "However, considering the numerous code overlaps between the StageClient variant used against the Hong Kong university in February 2021 and SideWalk for Windows, as described in the next section, we now believe that Specter and StageClient are both Linux variants of SideWalk, so we have decided to refer to them as SideWalk Linux.",
+        "score": 0.469
+      },
+      {
+        "sentence": "Similarities with the Windows variant SideWalk Windows and SideWalk Linux share too many similarities to describe within the confines of this blogpost, so here we only cover the most striking ones.",
+        "score": 0.3697
+      },
+      {
+        "sentence": "ChaCha20 An obvious similarity is noticeable in the implementations of ChaCha20 encryption: both variants use a counter with an initial value of 0x0B, which was previously mentioned in our blogpost as a specificity of SideWalk’s ChaCha20 implementation.",
+        "score": 0.4263
+      },
+      {
+        "sentence": "Software architecture One SideWalk particularity is the use of multiple threads to execute one specific task.",
+        "score": 0.3615
+      },
+      {
+        "sentence": "We noticed that in both variants there are exactly five threads executed simultaneously, each of them having a specific task.",
+        "score": 0.3481
+      },
+      {
+        "sentence": "The following list describes the function of each; the thread names are from the code: - StageClient::ThreadNetworkReverse If a connection to the C&C server is not already established, this thread periodically attempts to retrieve the local proxy configuration and the C&C server location from the dead-drop resolver.",
+        "score": 0.4339
+      },
+      {
+        "sentence": "Configuration As in SideWalk Windows, the configuration is decrypted using ChaCha20.",
+        "score": 0.4593
+      },
+      {
+        "sentence": "Checksum First, before decrypting, there is a data integrity check.",
+        "score": 0.437
+      },
+      {
+        "sentence": "This check is similar in both implementations of SideWalk (see Figure 7 and Figure 8): an MD5 hash is computed on the ChaCha20 nonce concatenated to the encrypted configuration data.",
+        "score": 0.4361
+      },
+      {
+        "sentence": "Layout Figure 9 presents excerpts of decrypted configurations from the samples that we analyzed.",
+        "score": 0.47
+      },
+      {
+        "sentence": "The SideWalk Linux config contains less information than the SideWalk Windows one.",
+        "score": 0.3097
+      },
+      {
+        "sentence": "This makes sense because the majority of the configuration artifacts in SideWalk Windows are used as cryptography and network parameters, whereas most of these are internal in SideWalk Linux.",
+        "score": 0.4692
+      },
+      {
+        "sentence": "Decryption using ChaCha20 As previously mentioned, SideWalk uses a main global structure to store its configuration.",
+        "score": 0.4383
+      },
+      {
+        "sentence": "This configuration is first decrypted using the modified implementation of ChaCha20, as seen in Figure 10.",
+        "score": 0.474
+      },
+      {
+        "sentence": "ChaCha20 decryption call in SideWalk Windows (left) and in SideWalk Linux (right) Note that the ChaCha20 key is exactly the same in both variants, strengthening the connection between the two.",
+        "score": 0.4714
+      },
+      {
+        "sentence": "Dead-drop resolver The dead-drop resolver payload is identical in both samples.",
+        "score": 0.4248
+      },
+      {
+        "sentence": "As a reminder from our blogpost on SideWalk, Figure 11 depicts the format of the payload that is fetched from the dead-drop resolver.",
+        "score": 0.4607
+      },
+      {
+        "sentence": "SideWalk Linux’s first delimiter routine (left), end delimiter and middle delimiter routines (right) The delimiters are identical, as well as the whole decoding algorithm.",
+        "score": 0.4511
+      },
+      {
+        "sentence": "Victim fingerprinting In order to fingerprint the victim, different artifacts are gathered on the victim’s machine.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "We noticed that the fetched information is exactly the same, to the extent of it even being fetched in the same order.",
+        "score": 0.3285
+      },
+      {
+        "sentence": "As the boot time in either case is a Windows-compliant time format, we can hypothesize that the operators’ controller runs under Windows, and that the controller is the same for both Linux and Windows victims.",
+        "score": 0.4844
+      },
+      {
+        "sentence": "Another argument supporting this hypothesis is that the ChaCha20 keys used in both implementations of SideWalk are the same.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "Communication protocol Data serialization The communication protocol between the infected machine and the C&C is HTTP or HTTPS, depending on the configuration, but in both cases, the data is serialized in the same manner.",
+        "score": 0.4042
+      },
+      {
+        "sentence": "Not only is the implementation very similar, but the identical encryption key is used in both implementations, which, again, accentuates the similarity between the two variants.",
+        "score": 0.515
+      },
+      {
+        "sentence": "POST requests In the POST requests used by SideWalk to fetch commands and payloads from the C&C server, one noticeable point is the use of the two parameters gtsid and gtuvid, as seen in Figure 13.",
+        "score": 0.3938
+      },
+      {
+        "sentence": "Identical parameters are used in the Linux variant.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "POST /M26RcKtVr5WniDVZ/5CDpKo5zmAYbTmFl HTTP/1.1 Cache-Control: no-cache Connection: close Pragma: no-cache User-Agent: Mozilla/5.0 Chrome/72.0.3626.109 Safari/537.36 gtsid: zn3isN2C6bWsqYvO gtuvid: 7651E459979F931D39EDC12D68384C21249A8DE265F3A925F6E289A2467BC47D Content-Length: 120 Host: update.facebookint.workers[.]dev Figure 13.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "Example of a POST request used by SideWalk Windows Another interesting point is that the Windows variant runs as fully position-independent shellcode, whereas the Linux variant is a shared library.",
+        "score": 0.4062
+      },
+      {
+        "sentence": "However, we think the malware’s authors could have just taken an extra step, using a tool such as sRDI to convert a compiled SideWalk PE to shellcode instead of manually writing the shellcode.",
+        "score": 0.5402
+      },
+      {
+        "sentence": "Commands Only four commands are not implemented or implemented differently in the Linux variant, as listed in Table 1.",
+        "score": 0.4316
+      },
+      {
+        "sentence": "All the other commands are present – even with the same IDs.",
+        "score": 0.3392
+      },
+      {
+        "sentence": "The hardcoded date could be the beginning or end of development of this version of SideWalk Linux.",
+        "score": 0.4883
+      },
+      {
+        "sentence": "The final computation is made out of the year, day, and month, from the value Oct 26 2020.",
+        "score": 0.421
+      },
+      {
+        "sentence": "In this case, the result is 1171798691840.",
+        "score": 0.3154
+      },
+      {
+        "sentence": "Plugins In SideWalk Linux variants, modules are built in; they cannot be fetched from the C&C server.",
+        "score": 0.5429
+      },
+      {
+        "sentence": "That is a notable difference from the Windows variant.",
+        "score": 0.4196
+      },
+      {
+        "sentence": "Some of those built-in functionalities, like gathering system information (SysInfoMgr, for example) such as network configuration, are done directly by dedicated functions in the Windows variant.",
+        "score": 0.321
+      },
+      {
+        "sentence": "In the Windows variant, some plugins can be added through C&C communication.",
+        "score": 0.4897
+      },
+      {
+        "sentence": "Defense evasion The Windows variant of SideWalk goes to great lengths to conceal the objectives of its code.",
+        "score": 0.3999
+      },
+      {
+        "sentence": "It trimmed out all data and code that was unnecessary for its execution and encrypted the rest.",
+        "score": 0.4497
+      },
+      {
+        "sentence": "On the other hand, the Linux variants contain symbols and leave some unique authentication keys and other artifacts unencrypted, which makes the detection and analysis significantly easier.",
+        "score": 0.5086
+      },
+      {
+        "sentence": "Additionally, the much higher number of inlined functions in the Windows variant suggests that its code was compiled with a higher level of compiler optimizations.",
+        "score": 0.4958
+      },
+      {
+        "sentence": "Conclusion The backdoor that was used to attack a Hong Kong university in February 2021 is the same malware family as the SideWalk backdoor, and actually is a Linux variant of the backdoor.",
+        "score": 0.4778
+      },
+      {
+        "sentence": "This Linux version exhibits several similarities with its Windows counterpart along with various novelties.",
+        "score": 0.3651
+      },
+      {
+        "sentence": "For any inquiries about our research published on WeLiveSecurity, please contact us at threatintel@eset.com.",
+        "score": 0.3384
+      },
+      {
+        "sentence": "ESET Research now also offers private APT intelligence reports and data feeds.",
+        "score": 0.4457
+      },
+      {
+        "sentence": "For any inquiries about this service, visit the ESET Threat Intelligence page.",
+        "score": 0.3766
+      }
+    ],
+    "T1573.001": [
+      {
+        "sentence": "We originally named this backdoor StageClient, but now refer to it simply as SideWalk Linux.",
+        "score": 0.3029
+      },
+      {
+        "sentence": "We also discovered that a previously known Linux backdoor – the Specter RAT, first documented by 360 Netlab – is also actually a SideWalk Linux variant, having multiple commonalities with the samples we identified.",
+        "score": 0.3257
+      },
+      {
+        "sentence": "SparklingGoblin is an APT group whose tactics, techniques, and procedures (TTPs) partially overlap with APT41 and BARIUM.",
+        "score": 0.3607
+      },
+      {
+        "sentence": "It makes use of Motnug and ChaCha20-based loaders, the CROSSWALK and SideWalk backdoors, along with Korplug (aka PlugX) and Cobalt Strike.",
+        "score": 0.4359
+      },
+      {
+        "sentence": "This blogpost documents SideWalk Linux, its victimology, and its numerous similarities with the originally discovered SideWalk backdoor.",
+        "score": 0.322
+      },
+      {
+        "sentence": "In addition to the multiple code similarities between the Linux variants of SideWalk and various SparklingGoblin tools, one of the SideWalk Linux samples uses a C&C address (66.42.103[.]222) that was previously used by SparklingGoblin.",
+        "score": 0.4817
+      },
+      {
+        "sentence": "Victimology Even though there are various SideWalk Linux samples, as we now know them, on VirusTotal, in our telemetry we have found only one victim compromised with this SideWalk variant: a Hong Kong university that, amidst student protests, had previously been targeted by both SparklingGoblin (using the Motnug loader and the CROSSWALK backdoor) and Fishmonger (using the ShadowPad and Spyder backdoors).",
+        "score": 0.3526
+      },
+      {
+        "sentence": "The road to Sidewalk Linux SideWalk, which we first described in its Windows form in our blogpost on August 24th, 2021, is a multipurpose backdoor that can load additional modules sent from the C&C server.",
+        "score": 0.4344
+      },
+      {
+        "sentence": "It makes use of Google Docs as a dead-drop resolver, and Cloudflare workers as its C&C server.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "We first documented the Linux variant of SideWalk as StageClient on July 2nd, 2021, without making the connection at that time to SparklingGoblin and its custom SideWalk backdoor.",
+        "score": 0.3148
+      },
+      {
+        "sentence": "The original name was used because of the repeated appearances of the string StageClient in the code.",
+        "score": 0.3578
+      },
+      {
+        "sentence": "While researching StageClient further, we found a blogpost about the Specter botnet described by 360 Netlab.",
+        "score": 0.3322
+      },
+      {
+        "sentence": "That blogpost describes a modular Linux backdoor with flexible configuration that uses a ChaCha20 encryption variant – basically a subset of StageClient’s functionality.",
+        "score": 0.6482
+      },
+      {
+        "sentence": "Further inspection confirmed this hypothesis; we additionally found a huge overlap in functionality, infrastructure, and symbols present in all the binaries.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "We compared the StageClient sample E5E6E100876E652189E7D25FFCF06DE959093433 with Specter samples 7DF0BE2774B17F672B96860D013A933E97862E6C and found numerous similarities, some of which we list below.",
+        "score": 0.4607
+      },
+      {
+        "sentence": "First, there is an overlap in C&C commands.",
+        "score": 0.5639
+      },
+      {
+        "sentence": "Next, the samples have the same structure of configuration and encryption method (see Figure 1 and Figure 2).",
+        "score": 0.6628
+      },
+      {
+        "sentence": "Additionally, the samples’ modules are managed in almost the same way, and the majority of the interfaces are identical; modules of StageClient only need to implement one additional handler, which is for closing the module.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "Three out of the five known modules are almost identical.",
+        "score": 0.3584
+      },
+      {
+        "sentence": "Lastly, we could see striking overlaps in the network protocols of the compared samples.",
+        "score": 0.3852
+      },
+      {
+        "sentence": "A variant of ChaCha20 is used twice for encryption with LZ4 compression in the very same way.",
+        "score": 0.6076
+      },
+      {
+        "sentence": "Both StageClient and Specter create a number of threads (see Figure 3 and Figure 4) to manage sending and receiving asynchronous messages along with heartbeats.",
+        "score": 0.4215
+      },
+      {
+        "sentence": "Despite all these striking similarities, there are several changes.",
+        "score": 0.326
+      },
+      {
+        "sentence": "The most notable ones are the following: - The authors switched from the C language to C++.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "The reason is unknown, but it should be easier to implement such modular architecture in C++ due to its polymorphism support. - An option to exchange messages over HTTP was added (see Figure 5 and Figure 6). - Downloadable plugins were replaced with precompiled modules that fulfill the same purpose; a number of new commands and two new modules were added. - Added the module TaskSchedulerMod, which operates as a built-in cron utility.",
+        "score": 0.4756
+      },
+      {
+        "sentence": "Its cron table is stored in memory; the jobs are received over the network and executed as shell commands. - Added the module SysInfoMgr, which provides information about the underlying system such as the list of installed packages and hardware details.",
+        "score": 0.4245
+      },
+      {
+        "sentence": "These similarities convince us that Specter and StageClient are from the same malware family.",
+        "score": 0.3834
+      },
+      {
+        "sentence": "ChaCha20 An obvious similarity is noticeable in the implementations of ChaCha20 encryption: both variants use a counter with an initial value of 0x0B, which was previously mentioned in our blogpost as a specificity of SideWalk’s ChaCha20 implementation.",
+        "score": 0.5717
+      },
+      {
+        "sentence": "Software architecture One SideWalk particularity is the use of multiple threads to execute one specific task.",
+        "score": 0.3999
+      },
+      {
+        "sentence": "We noticed that in both variants there are exactly five threads executed simultaneously, each of them having a specific task.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "The following list describes the function of each; the thread names are from the code: - StageClient::ThreadNetworkReverse If a connection to the C&C server is not already established, this thread periodically attempts to retrieve the local proxy configuration and the C&C server location from the dead-drop resolver.",
+        "score": 0.3921
+      },
+      {
+        "sentence": "Configuration As in SideWalk Windows, the configuration is decrypted using ChaCha20.",
+        "score": 0.52
+      },
+      {
+        "sentence": "Checksum First, before decrypting, there is a data integrity check.",
+        "score": 0.4382
+      },
+      {
+        "sentence": "This check is similar in both implementations of SideWalk (see Figure 7 and Figure 8): an MD5 hash is computed on the ChaCha20 nonce concatenated to the encrypted configuration data.",
+        "score": 0.5493
+      },
+      {
+        "sentence": "Layout Figure 9 presents excerpts of decrypted configurations from the samples that we analyzed.",
+        "score": 0.3897
+      },
+      {
+        "sentence": "This makes sense because the majority of the configuration artifacts in SideWalk Windows are used as cryptography and network parameters, whereas most of these are internal in SideWalk Linux.",
+        "score": 0.4533
+      },
+      {
+        "sentence": "Decryption using ChaCha20 As previously mentioned, SideWalk uses a main global structure to store its configuration.",
+        "score": 0.5169
+      },
+      {
+        "sentence": "This configuration is first decrypted using the modified implementation of ChaCha20, as seen in Figure 10.",
+        "score": 0.4944
+      },
+      {
+        "sentence": "ChaCha20 decryption call in SideWalk Windows (left) and in SideWalk Linux (right) Note that the ChaCha20 key is exactly the same in both variants, strengthening the connection between the two.",
+        "score": 0.4948
+      },
+      {
+        "sentence": "Dead-drop resolver The dead-drop resolver payload is identical in both samples.",
+        "score": 0.3167
+      },
+      {
+        "sentence": "As a reminder from our blogpost on SideWalk, Figure 11 depicts the format of the payload that is fetched from the dead-drop resolver.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "For the first delimiter, we notice that the PublicKey: part of the string is ignored; the string AE68[…]3EFF is directly searched, as shown in Figure 12.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "SideWalk Linux’s first delimiter routine (left), end delimiter and middle delimiter routines (right) The delimiters are identical, as well as the whole decoding algorithm.",
+        "score": 0.4345
+      },
+      {
+        "sentence": "Victim fingerprinting In order to fingerprint the victim, different artifacts are gathered on the victim’s machine.",
+        "score": 0.3073
+      },
+      {
+        "sentence": "We noticed that the fetched information is exactly the same, to the extent of it even being fetched in the same order.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "As the boot time in either case is a Windows-compliant time format, we can hypothesize that the operators’ controller runs under Windows, and that the controller is the same for both Linux and Windows victims.",
+        "score": 0.3805
+      },
+      {
+        "sentence": "Another argument supporting this hypothesis is that the ChaCha20 keys used in both implementations of SideWalk are the same.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "Communication protocol Data serialization The communication protocol between the infected machine and the C&C is HTTP or HTTPS, depending on the configuration, but in both cases, the data is serialized in the same manner.",
+        "score": 0.6216
+      },
+      {
+        "sentence": "Not only is the implementation very similar, but the identical encryption key is used in both implementations, which, again, accentuates the similarity between the two variants.",
+        "score": 0.5792
+      },
+      {
+        "sentence": "POST requests In the POST requests used by SideWalk to fetch commands and payloads from the C&C server, one noticeable point is the use of the two parameters gtsid and gtuvid, as seen in Figure 13.",
+        "score": 0.5485
+      },
+      {
+        "sentence": "Identical parameters are used in the Linux variant.",
+        "score": 0.3816
+      },
+      {
+        "sentence": "POST /M26RcKtVr5WniDVZ/5CDpKo5zmAYbTmFl HTTP/1.1 Cache-Control: no-cache Connection: close Pragma: no-cache User-Agent: Mozilla/5.0 Chrome/72.0.3626.109 Safari/537.36 gtsid: zn3isN2C6bWsqYvO gtuvid: 7651E459979F931D39EDC12D68384C21249A8DE265F3A925F6E289A2467BC47D Content-Length: 120 Host: update.facebookint.workers[.]dev Figure 13.",
+        "score": 0.4107
+      },
+      {
+        "sentence": "Example of a POST request used by SideWalk Windows Another interesting point is that the Windows variant runs as fully position-independent shellcode, whereas the Linux variant is a shared library.",
+        "score": 0.3553
+      },
+      {
+        "sentence": "However, we think the malware’s authors could have just taken an extra step, using a tool such as sRDI to convert a compiled SideWalk PE to shellcode instead of manually writing the shellcode.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "Commands Only four commands are not implemented or implemented differently in the Linux variant, as listed in Table 1.",
+        "score": 0.4132
+      },
+      {
+        "sentence": "All the other commands are present – even with the same IDs.",
+        "score": 0.4417
+      },
+      {
+        "sentence": "The hardcoded date could be the beginning or end of development of this version of SideWalk Linux.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "The final computation is made out of the year, day, and month, from the value Oct 26 2020.",
+        "score": 0.4099
+      },
+      {
+        "sentence": "In this case, the result is 1171798691840.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "Plugins In SideWalk Linux variants, modules are built in; they cannot be fetched from the C&C server.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "In the Windows variant, some plugins can be added through C&C communication.",
+        "score": 0.3881
+      },
+      {
+        "sentence": "Defense evasion The Windows variant of SideWalk goes to great lengths to conceal the objectives of its code.",
+        "score": 0.3449
+      },
+      {
+        "sentence": "It trimmed out all data and code that was unnecessary for its execution and encrypted the rest.",
+        "score": 0.5537
+      },
+      {
+        "sentence": "On the other hand, the Linux variants contain symbols and leave some unique authentication keys and other artifacts unencrypted, which makes the detection and analysis significantly easier.",
+        "score": 0.5185
+      },
+      {
+        "sentence": "Additionally, the much higher number of inlined functions in the Windows variant suggests that its code was compiled with a higher level of compiler optimizations.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "ESET Research now also offers private APT intelligence reports and data feeds.",
+        "score": 0.3287
+      },
+      {
+        "sentence": "For any inquiries about this service, visit the ESET Threat Intelligence page.",
+        "score": 0.3302
+      }
+    ],
+    "T1016": [
+      {
+        "sentence": "SparklingGoblin is an APT group whose tactics, techniques, and procedures (TTPs) partially overlap with APT41 and BARIUM.",
+        "score": 0.3025
+      },
+      {
+        "sentence": "In addition to the multiple code similarities between the Linux variants of SideWalk and various SparklingGoblin tools, one of the SideWalk Linux samples uses a C&C address (66.42.103[.]222) that was previously used by SparklingGoblin.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "It can properly handle communication behind a proxy.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "Lastly, we could see striking overlaps in the network protocols of the compared samples.",
+        "score": 0.3731
+      },
+      {
+        "sentence": "Its cron table is stored in memory; the jobs are received over the network and executed as shell commands. - Added the module SysInfoMgr, which provides information about the underlying system such as the list of installed packages and hardware details.",
+        "score": 0.4862
+      },
+      {
+        "sentence": "The following list describes the function of each; the thread names are from the code: - StageClient::ThreadNetworkReverse If a connection to the C&C server is not already established, this thread periodically attempts to retrieve the local proxy configuration and the C&C server location from the dead-drop resolver.",
+        "score": 0.4842
+      },
+      {
+        "sentence": "This makes sense because the majority of the configuration artifacts in SideWalk Windows are used as cryptography and network parameters, whereas most of these are internal in SideWalk Linux.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "Dead-drop resolver The dead-drop resolver payload is identical in both samples.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "Victim fingerprinting In order to fingerprint the victim, different artifacts are gathered on the victim’s machine.",
+        "score": 0.3826
+      },
+      {
+        "sentence": "Some of those built-in functionalities, like gathering system information (SysInfoMgr, for example) such as network configuration, are done directly by dedicated functions in the Windows variant.",
+        "score": 0.6358
+      },
+      {
+        "sentence": "For any inquiries about this service, visit the ESET Threat Intelligence page.",
+        "score": 0.3287
+      }
+    ],
+    "T1071.001": [
+      {
+        "sentence": "In addition to the multiple code similarities between the Linux variants of SideWalk and various SparklingGoblin tools, one of the SideWalk Linux samples uses a C&C address (66.42.103[.]222) that was previously used by SparklingGoblin.",
+        "score": 0.4118
+      },
+      {
+        "sentence": "The road to Sidewalk Linux SideWalk, which we first described in its Windows form in our blogpost on August 24th, 2021, is a multipurpose backdoor that can load additional modules sent from the C&C server.",
+        "score": 0.4064
+      },
+      {
+        "sentence": "It makes use of Google Docs as a dead-drop resolver, and Cloudflare workers as its C&C server.",
+        "score": 0.4113
+      },
+      {
+        "sentence": "It can properly handle communication behind a proxy.",
+        "score": 0.4888
+      },
+      {
+        "sentence": "We first documented the Linux variant of SideWalk as StageClient on July 2nd, 2021, without making the connection at that time to SparklingGoblin and its custom SideWalk backdoor.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "While researching StageClient further, we found a blogpost about the Specter botnet described by 360 Netlab.",
+        "score": 0.342
+      },
+      {
+        "sentence": "That blogpost describes a modular Linux backdoor with flexible configuration that uses a ChaCha20 encryption variant – basically a subset of StageClient’s functionality.",
+        "score": 0.338
+      },
+      {
+        "sentence": "First, there is an overlap in C&C commands.",
+        "score": 0.4406
+      },
+      {
+        "sentence": "Next, the samples have the same structure of configuration and encryption method (see Figure 1 and Figure 2).",
+        "score": 0.3544
+      },
+      {
+        "sentence": "Additionally, the samples’ modules are managed in almost the same way, and the majority of the interfaces are identical; modules of StageClient only need to implement one additional handler, which is for closing the module.",
+        "score": 0.3584
+      },
+      {
+        "sentence": "Lastly, we could see striking overlaps in the network protocols of the compared samples.",
+        "score": 0.515
+      },
+      {
+        "sentence": "A variant of ChaCha20 is used twice for encryption with LZ4 compression in the very same way.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "Both StageClient and Specter create a number of threads (see Figure 3 and Figure 4) to manage sending and receiving asynchronous messages along with heartbeats.",
+        "score": 0.4463
+      },
+      {
+        "sentence": "The reason is unknown, but it should be easier to implement such modular architecture in C++ due to its polymorphism support. - An option to exchange messages over HTTP was added (see Figure 5 and Figure 6). - Downloadable plugins were replaced with precompiled modules that fulfill the same purpose; a number of new commands and two new modules were added. - Added the module TaskSchedulerMod, which operates as a built-in cron utility.",
+        "score": 0.5639
+      },
+      {
+        "sentence": "Its cron table is stored in memory; the jobs are received over the network and executed as shell commands. - Added the module SysInfoMgr, which provides information about the underlying system such as the list of installed packages and hardware details.",
+        "score": 0.3892
+      },
+      {
+        "sentence": "These similarities convince us that Specter and StageClient are from the same malware family.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "ChaCha20 An obvious similarity is noticeable in the implementations of ChaCha20 encryption: both variants use a counter with an initial value of 0x0B, which was previously mentioned in our blogpost as a specificity of SideWalk’s ChaCha20 implementation.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "Software architecture One SideWalk particularity is the use of multiple threads to execute one specific task.",
+        "score": 0.327
+      },
+      {
+        "sentence": "We noticed that in both variants there are exactly five threads executed simultaneously, each of them having a specific task.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "The following list describes the function of each; the thread names are from the code: - StageClient::ThreadNetworkReverse If a connection to the C&C server is not already established, this thread periodically attempts to retrieve the local proxy configuration and the C&C server location from the dead-drop resolver.",
+        "score": 0.4302
+      },
+      {
+        "sentence": "Configuration As in SideWalk Windows, the configuration is decrypted using ChaCha20.",
+        "score": 0.4237
+      },
+      {
+        "sentence": "Checksum First, before decrypting, there is a data integrity check.",
+        "score": 0.3121
+      },
+      {
+        "sentence": "This check is similar in both implementations of SideWalk (see Figure 7 and Figure 8): an MD5 hash is computed on the ChaCha20 nonce concatenated to the encrypted configuration data.",
+        "score": 0.36
+      },
+      {
+        "sentence": "Layout Figure 9 presents excerpts of decrypted configurations from the samples that we analyzed.",
+        "score": 0.3609
+      },
+      {
+        "sentence": "This makes sense because the majority of the configuration artifacts in SideWalk Windows are used as cryptography and network parameters, whereas most of these are internal in SideWalk Linux.",
+        "score": 0.331
+      },
+      {
+        "sentence": "This configuration is first decrypted using the modified implementation of ChaCha20, as seen in Figure 10.",
+        "score": 0.4588
+      },
+      {
+        "sentence": "ChaCha20 decryption call in SideWalk Windows (left) and in SideWalk Linux (right) Note that the ChaCha20 key is exactly the same in both variants, strengthening the connection between the two.",
+        "score": 0.3594
+      },
+      {
+        "sentence": "Dead-drop resolver The dead-drop resolver payload is identical in both samples.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "As a reminder from our blogpost on SideWalk, Figure 11 depicts the format of the payload that is fetched from the dead-drop resolver.",
+        "score": 0.4704
+      },
+      {
+        "sentence": "For the first delimiter, we notice that the PublicKey: part of the string is ignored; the string AE68[…]3EFF is directly searched, as shown in Figure 12.",
+        "score": 0.3765
+      },
+      {
+        "sentence": "SideWalk Linux’s first delimiter routine (left), end delimiter and middle delimiter routines (right) The delimiters are identical, as well as the whole decoding algorithm.",
+        "score": 0.3774
+      },
+      {
+        "sentence": "We noticed that the fetched information is exactly the same, to the extent of it even being fetched in the same order.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "As the boot time in either case is a Windows-compliant time format, we can hypothesize that the operators’ controller runs under Windows, and that the controller is the same for both Linux and Windows victims.",
+        "score": 0.3754
+      },
+      {
+        "sentence": "Another argument supporting this hypothesis is that the ChaCha20 keys used in both implementations of SideWalk are the same.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "Communication protocol Data serialization The communication protocol between the infected machine and the C&C is HTTP or HTTPS, depending on the configuration, but in both cases, the data is serialized in the same manner.",
+        "score": 0.7937
+      },
+      {
+        "sentence": "POST requests In the POST requests used by SideWalk to fetch commands and payloads from the C&C server, one noticeable point is the use of the two parameters gtsid and gtuvid, as seen in Figure 13.",
+        "score": 0.742
+      },
+      {
+        "sentence": "Identical parameters are used in the Linux variant.",
+        "score": 0.3135
+      },
+      {
+        "sentence": "POST /M26RcKtVr5WniDVZ/5CDpKo5zmAYbTmFl HTTP/1.1 Cache-Control: no-cache Connection: close Pragma: no-cache User-Agent: Mozilla/5.0 Chrome/72.0.3626.109 Safari/537.36 gtsid: zn3isN2C6bWsqYvO gtuvid: 7651E459979F931D39EDC12D68384C21249A8DE265F3A925F6E289A2467BC47D Content-Length: 120 Host: update.facebookint.workers[.]dev Figure 13.",
+        "score": 0.5794
+      },
+      {
+        "sentence": "Example of a POST request used by SideWalk Windows Another interesting point is that the Windows variant runs as fully position-independent shellcode, whereas the Linux variant is a shared library.",
+        "score": 0.6655
+      },
+      {
+        "sentence": "Commands Only four commands are not implemented or implemented differently in the Linux variant, as listed in Table 1.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "All the other commands are present – even with the same IDs.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "The final computation is made out of the year, day, and month, from the value Oct 26 2020.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "Plugins In SideWalk Linux variants, modules are built in; they cannot be fetched from the C&C server.",
+        "score": 0.3545
+      },
+      {
+        "sentence": "In the Windows variant, some plugins can be added through C&C communication.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "On the other hand, the Linux variants contain symbols and leave some unique authentication keys and other artifacts unencrypted, which makes the detection and analysis significantly easier.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "For any inquiries about this service, visit the ESET Threat Intelligence page.",
+        "score": 0.3604
+      }
+    ]
+  }
+}

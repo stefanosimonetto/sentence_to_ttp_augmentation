@@ -1,0 +1,259 @@
+{
+  "original_txt": "Je vous propose aujourd'hui un article sur l'attaque présentée par Vincent Le Toux (@mysmartlogon) et Benjamin Delpy (@gentilkiwi) durant la conférence de sécurité BluehatIL 2018 qui a eu lieu les 23 et 24 janvier.\nLeur présentation s'intitulait Active Directory: What can make your million dollar SIEM go blind?\nEn effet, l'intérêt pour un attaquant d'utiliser DCSHadow est de ne laisser aucune tracer de ses modifications puisque celles-ci sont effectuées sur une machine compromise par l'attaquant. Ainsi aucun log de modification AD n'est remonté.\nVous pouvez retrouver la vidéo et les slides de la présentation sur le site officiel sur DCShadow https://www.dcshadow.com/.\nUn peu d'histoire\nLa première évocation par Vincent et Benjamin de ce qui allait devenir DCShadow remonte à l'été 2017.Faisant de la réponse à incident sur Active Directory depuis quelques années le tweet de Vincent m'a forcémment interpelé. La possibilité qu'un attaquant puisse altérer les métadonnées de réplication a toujours été une de nos craintes sur le forensic AD.\nJ'ai pourtant évoqué en répondant à ses tweets une autre méthode, non forensic mais plus de blue team, les cookies de réplication AD.\nLes cookies de réplication AD sont assez méconnus mais utilisés par les équipes de réponse à incident AD lors des remédiations/reconstructions d'environnement Active Directory compromis.\nIls permettent notamment de limiter l'interruption de service lors de la remédiation contrairement aux précédentes méthodologies.\nC'est un sujet assez peu documenté mais on peut en trouver une trace dans la présentation de l'ANSSI sur TV5 Monde du SSTIC 2017 Retour technique de l'incident de TV5Monde.\nCookie de réplication AD\nUn cookie de réplication est un fichier généré par l'utilisation d'une extension de serveur LDAP, le contrôle DirSync. Il faut d'abord initialiser le cookie pour pouvoir avoir les modifications depuis la dernière utilisation du cookie.\nPour plus d'informations sur comment tracer les modifications vous pouvez consulter le lien suivant : Overview of Change Tracking Techniques.\nVous retrouverez dedans une page dédiée au contrôle DirSync.\nPour utiliser ce contrôle, il ya plusieurs possibilités.\nLa plus simple pour tester rapidement, c'est d'utiliser Repadmin avec le switch /showchanges (visible avec l'aide en mode expert de repadmin /experthelp).\nC'est ce que je vais utiliser dans cet article.\nPour des résultats plus exploitables, on utilisera les méthodes de la classe System.DirectoryServices.DirectorySynchronization\nCa marche très bien avec du powershell :\nJe ne vais pas m'étender c'est relativement simple à utiliser. Revenons maintenant sur l'attaque DCShadow.\nDétection de l'utilisation de DCShadow\nAlsid a fait un très bon article sur DCShadow (DCShadow explained: A technical deep dive into the latest AD attack technique) je vais donc revenir dessus très brièvement.\nDétecter l'utilisation de DCShadow peut paraître assez trivial. En effet, pour être utilisé, DCShadow doit au préalable effectuer des modifications sur des objets Active Directory. En journalisant la modification de ces objets, on peut détecter facilement l'utilisation de DCShadow.\nIl suffit pour cela de configurer correctement la politique d'audit (audit réplication détaillée et modifications AD) et de configurer quelques SACL (écriture de l'attribut servicePrincipalName des objets Computer ).\nIl ya toutefois un gros bémol à cette technique. L'attaquant en capacité d'utiliser DCShadow dispose de privilèges élevés sur l'Active Directory. Rien ne l'empêche de modifier temporairement la politique d'audit sur le contrôleur de domaine qui sera ciblé par DCShadow pour la réactiver par la suite.\nCa nous laisse donc la détection par le réseau qui est beaucoup moins trivial à mettre en place ou les cookies de réplication.\nIl est intéressant d'ailleurs de comparer ce que remonte la journalisation AD avec ce que remonte le cookie de réplication.\nJ'effectue une modification avec DCShadow.\nVoici ce que j'ai dans le log:\nOn peut voir l'ajout puis la suppression du SPN de catalogue global (GC/).\nVoici ce qu'on a avec le cookie de réplication:\nAvec le cookie de réplication, on a la valeur finale du SPN, avec le GUID du service DRS mais pas le GC qui a été supprimé.\nCe qui est intéressant c'est que la journalisation ne log pas l'ajout du SPN du service DRS (GUID E35...).\nOn peut donc déjà détecter l'utilisation de DCShadow sans utiliser la journalisation ni la capture réseau.\nComme je l'ai déjà dit, l'intérêt de DCShadow est de ne pas laisser de trace sur les modifications en elles-même.\nC'est bien de détecter que DCShadow a été utilisé mais ne pas savoir ce qui a été modifié rend la remédiation imposible.\nOn va voir qu'il y a plusieurs cas en fonction de comment on utilise DCShadow.\nMais avant de voir tout ça nous allons faire un très court rappel sur ce qui déclenche une réplication entre les contrôleurs de domaine car ça a énormément d'importance pour la suite.\nRéplication AD et USN\nLa réplication AD se base sur le numéro USN (Update Sequence Number).Pour faire très simple, le DC qui demande les réplications à son partenaire demande les modifications effectuées depuis le dernier USN qu'il connait.\nAutrement dit, ton dernier USN que je connais est X, envoie-moi les attributs qui ont un numéro USN supérieur.\nPour plus d'informations, vous pouvez vous réferrez à cet article du technet : Tracking updates\nComme je l'ai dit l'USN a beaucoup d'importance pour la suite.\nDétection des modifications opérées via DCShadow\nJe n'ai pas pu tester tous les cas possibles en quelques heures mais voici déjà un bon aperçu.Modification d'un attribut existant sur le DC où a eu lieu la dernière modification de l'attribut avec les switchs de DCShadow par défaut\nLe premier cas que l'on va voir est l'utilisation de DCShadow telle qu'elle a été faite au début de l'article.Si l'on regarde les métadonnées de l'objet nous avons ceci :\nOn peut voir que la valeur du numéro USN de l'attribut Description est 42, nombre assez remarquable.\nEn regardant le code source, on trouve rapidement que c'est une valeur hardcodée et qu'il ya une branche conditionnelle (switch qu'on verra plus tard).\nCe qui m'a étonné quand j'ai joué la première fois avec DCShadow, c'était que cette modification n'était pas détectée par le cookie de réplication.\nMon premier réflexe a été de me dire qu'il sera catché par le cookie sur mon second DC lors de la réplication, mais je n'avais rien non plus et surtout l'attribut n'était pas modifié sur le second DC.\nJe vérifie les réplications et il n'y a pas de problème.\nJe compare ensuite les métadonnées de réplication.\nEt là on peut voir une différence entre les 2.\nMa modification effectuée avec DCShadow n'a donc pas été repliquée sur les autres contrôleurs de domaine.\nLa raison est simple, la valeur d'USN étant 42, la modification n'est pas répliquée.\nOn voit tout de suite un intérêt du point de vue DFIR.\nPremièrement, 42 est un marquant fort dans les métadonnées de réplication (mais peut-être modifié dans le code par l'attaquant).\nDeuxièmement, les modifications n'ayant pas été repliquées, la remédiation des modifications est très simple, il suffit de reconstruire le DC (après avoir réglé le problème de privilège bien évidemment).\nDans ce cas, on ne se sert pas du cookie de réplication puisqu'il n'y a pas réplication mais on peut retrouver les modifications via les métadonnées (ou comparer les données entre le DC sur lequel DCShadow a été utilisé et un autre DC).\nL'intérêt pour l'attaquant est bien évidemment de ne pas utiliser DCShadow dans ce sens. Puisque si on détecte l'utilisation de DCShadow sur ce contrôleur de domaine on retrouvera rapidement les modifications qu'il a effectuées.\nOn va donc utiliser l'autre branche conditionnelle du code qui est un switch permettant de spécifier le numéro USN.\nModification d'un attribut existant sur le DC où a eu lieu la dernière modification de l'attribut en utilisant le switch replOriginatingUsn de DCShadow\nCette fois, nous allons spécifier la valeur du numéro USN.On recommence cette fois en utilisant le switch /replOriginatingUsn avec un numéro USN permettant la réplication.\nOn vérifie les réplications.\nEt là, on voit que la modification de l'attribut Description a bien été répliquée.\nD'un point de vue DFIR c'est la merde, les modifications ont été répliquées et je n'ai plus le marquant du numéro USN.\nBonne chance pour remédier ...\nMais cette fois, si on regarde le cookie de réplication:\nOn voit bien la modification avec la valeur de l'attribut modifié.\nIl est assez facile de retrouver les modifications opérées avec DCShadow puisqu'elles vont suivre la modification du SPN.\nAutre marquant\nJe me suis demandé si l'utilisation de DCShadow pouvait provoquer un USN Rollback.\nEn réflechissant, ça ne peut pas être le cas mais en regardant la valeur de Up-to-dateness Vector j'ai eu la surprise de voir ceci.\nA creuser mais ça pourrait être un marquant de l'utilisation de DCShadow si on n'a pas déployé de moyen de détection.\nConclusion\nOn peut donc désormais répondre à la question de cet article, est-ce vraiment impossible de détecter DCShadow ?Il faut bien séparer utilisation de DCShadow et modifications opérées par DCShadow.\nDans les 2 cas on a pu voir qu'il était possible de les détecter (Bien que je n'ai pas pu tester tous les cas possibles).\nCette détection s'avère tout de même très difficile.\nClairement si vous n'êtes pas en capacité d'empêcher l'attaquant de récupérer les privilèges nécessaires à l'utilisation de DCShadow, il est peu probable que vous soyez en capacité de déployer une détection basée sur les cookies de réplication.\nAucun commentaire:\nEnregistrer un commentaire",
+  "sanitized_txt": "Je vous propose aujourd'hui un article sur l'attaque présentée par Vincent Le Toux (@mysmartlogon) et Benjamin Delpy (@gentilkiwi) durant la conférence de sécurité BluehatIL 2018 qui a eu lieu les 23 et 24 janvier.\nLeur présentation s'intitulait Active Directory: What can make your million dollar SIEM go blind?\nEn effet, l'intérêt pour un attaquant d'utiliser DCSHadow est de ne laisser aucune tracer de ses modifications puisque celles-ci sont effectuées sur une machine compromise par l'attaquant. Ainsi aucun log de modification AD n'est remonté.\nVous pouvez retrouver la vidéo et les slides de la présentation sur le site officiel sur DCShadow https://www.dcshadow.com/.\nUn peu d'histoire La première évocation par Vincent et Benjamin de ce qui allait devenir DCShadow remonte à l'été 2017.Faisant de la réponse à incident sur Active Directory depuis quelques années le tweet de Vincent m'a forcémment interpelé. La possibilité qu'un attaquant puisse altérer les métadonnées de réplication a toujours été une de nos craintes sur le forensic AD.\nJ'ai pourtant évoqué en répondant à ses tweets une autre méthode, non forensic mais plus de blue team, les cookies de réplication AD.\nLes cookies de réplication AD sont assez méconnus mais utilisés par les équipes de réponse à incident AD lors des remédiations/reconstructions d'environnement Active Directory compromis.\nIls permettent notamment de limiter l'interruption de service lors de la remédiation contrairement aux précédentes méthodologies.\nC'est un sujet assez peu documenté mais on peut en trouver une trace dans la présentation de l'ANSSI sur TV5 Monde du SSTIC 2017 Retour technique de l'incident de TV5Monde.\nCookie de réplication AD Un cookie de réplication est un fichier généré par l'utilisation d'une extension de serveur LDAP, le contrôle DirSync. Il faut d'abord initialiser le cookie pour pouvoir avoir les modifications depuis la dernière utilisation du cookie.\nPour plus d'informations sur comment tracer les modifications vous pouvez consulter le lien suivant : Overview of Change Tracking Techniques.\nVous retrouverez dedans une page dédiée au contrôle DirSync.\nPour utiliser ce contrôle, il ya plusieurs possibilités.\nLa plus simple pour tester rapidement, c'est d'utiliser Repadmin avec le switch /showchanges (visible avec l'aide en mode expert de repadmin /experthelp).\nC'est ce que je vais utiliser dans cet article.\nPour des résultats plus exploitables, on utilisera les méthodes de la classe System.DirectoryServices.DirectorySynchronization Ca marche très bien avec du powershell :\nJe ne vais pas m'étender c'est relativement simple à utiliser. Revenons maintenant sur l'attaque DCShadow.\nDétection de l'utilisation de DCShadow Alsid a fait un très bon article sur DCShadow (DCShadow explained: A technical deep dive into the latest AD attack technique) je vais donc revenir dessus très brièvement.\nDétecter l'utilisation de DCShadow peut paraître assez trivial. En effet, pour être utilisé, DCShadow doit au préalable effectuer des modifications sur des objets Active Directory. En journalisant la modification de ces objets, on peut détecter facilement l'utilisation de DCShadow.\nIl suffit pour cela de configurer correctement la politique d'audit (audit réplication détaillée et modifications AD) et de configurer quelques SACL (écriture de l'attribut servicePrincipalName des objets Computer ).\nIl ya toutefois un gros bémol à cette technique. L'attaquant en capacité d'utiliser DCShadow dispose de privilèges élevés sur l'Active Directory. Rien ne l'empêche de modifier temporairement la politique d'audit sur le contrôleur de domaine qui sera ciblé par DCShadow pour la réactiver par la suite.\nCa nous laisse donc la détection par le réseau qui est beaucoup moins trivial à mettre en place ou les cookies de réplication.\nIl est intéressant d'ailleurs de comparer ce que remonte la journalisation AD avec ce que remonte le cookie de réplication.\nJ'effectue une modification avec DCShadow.\nVoici ce que j'ai dans le log:\nOn peut voir l'ajout puis la suppression du SPN de catalogue global (GC/).\nVoici ce qu'on a avec le cookie de réplication:\nAvec le cookie de réplication, on a la valeur finale du SPN, avec le GUID du service DRS mais pas le GC qui a été supprimé.\nCe qui est intéressant c'est que la journalisation ne log pas l'ajout du SPN du service DRS (GUID E35...).\nOn peut donc déjà détecter l'utilisation de DCShadow sans utiliser la journalisation ni la capture réseau.\nComme je l'ai déjà dit, l'intérêt de DCShadow est de ne pas laisser de trace sur les modifications en elles-même.\nC'est bien de détecter que DCShadow a été utilisé mais ne pas savoir ce qui a été modifié rend la remédiation imposible.\nOn va voir qu'il y a plusieurs cas en fonction de comment on utilise DCShadow.\nMais avant de voir tout ça nous allons faire un très court rappel sur ce qui déclenche une réplication entre les contrôleurs de domaine car ça a énormément d'importance pour la suite.\nRéplication AD et USN La réplication AD se base sur le numéro USN (Update Sequence Number).Pour faire très simple, le DC qui demande les réplications à son partenaire demande les modifications effectuées depuis le dernier USN qu'il connait.\nAutrement dit, ton dernier USN que je connais est X, envoie-moi les attributs qui ont un numéro USN supérieur.\nPour plus d'informations, vous pouvez vous réferrez à cet article du technet : Tracking updates Comme je l'ai dit l'USN a beaucoup d'importance pour la suite.\nDétection des modifications opérées via DCShadow Je n'ai pas pu tester tous les cas possibles en quelques heures mais voici déjà un bon aperçu.Modification d'un attribut existant sur le DC où a eu lieu la dernière modification de l'attribut avec les switchs de DCShadow par défaut Le premier cas que l'on va voir est l'utilisation de DCShadow telle qu'elle a été faite au début de l'article.Si l'on regarde les métadonnées de l'objet nous avons ceci :\nOn peut voir que la valeur du numéro USN de l'attribut Description est 42, nombre assez remarquable.\nEn regardant le code source, on trouve rapidement que c'est une valeur hardcodée et qu'il ya une branche conditionnelle (switch qu'on verra plus tard).\nCe qui m'a étonné quand j'ai joué la première fois avec DCShadow, c'était que cette modification n'était pas détectée par le cookie de réplication.\nMon premier réflexe a été de me dire qu'il sera catché par le cookie sur mon second DC lors de la réplication, mais je n'avais rien non plus et surtout l'attribut n'était pas modifié sur le second DC.\nJe vérifie les réplications et il n'y a pas de problème.\nJe compare ensuite les métadonnées de réplication.\nEt là on peut voir une différence entre les 2.\nMa modification effectuée avec DCShadow n'a donc pas été repliquée sur les autres contrôleurs de domaine.\nLa raison est simple, la valeur d'USN étant 42, la modification n'est pas répliquée.\nOn voit tout de suite un intérêt du point de vue DFIR.\nPremièrement, 42 est un marquant fort dans les métadonnées de réplication (mais peut-être modifié dans le code par l'attaquant).\nDeuxièmement, les modifications n'ayant pas été repliquées, la remédiation des modifications est très simple, il suffit de reconstruire le DC (après avoir réglé le problème de privilège bien évidemment).\nDans ce cas, on ne se sert pas du cookie de réplication puisqu'il n'y a pas réplication mais on peut retrouver les modifications via les métadonnées (ou comparer les données entre le DC sur lequel DCShadow a été utilisé et un autre DC).\nL'intérêt pour l'attaquant est bien évidemment de ne pas utiliser DCShadow dans ce sens. Puisque si on détecte l'utilisation de DCShadow sur ce contrôleur de domaine on retrouvera rapidement les modifications qu'il a effectuées.\nOn va donc utiliser l'autre branche conditionnelle du code qui est un switch permettant de spécifier le numéro USN.\nModification d'un attribut existant sur le DC où a eu lieu la dernière modification de l'attribut en utilisant le switch replOriginatingUsn de DCShadow Cette fois, nous allons spécifier la valeur du numéro USN.On recommence cette fois en utilisant le switch /replOriginatingUsn avec un numéro USN permettant la réplication.\nOn vérifie les réplications.\nEt là, on voit que la modification de l'attribut Description a bien été répliquée.\nD'un point de vue DFIR c'est la merde, les modifications ont été répliquées et je n'ai plus le marquant du numéro USN.\nBonne chance pour remédier ...\nMais cette fois, si on regarde le cookie de réplication:\nOn voit bien la modification avec la valeur de l'attribut modifié.\nIl est assez facile de retrouver les modifications opérées avec DCShadow puisqu'elles vont suivre la modification du SPN.\nAutre marquant Je me suis demandé si l'utilisation de DCShadow pouvait provoquer un USN Rollback.\nEn réflechissant, ça ne peut pas être le cas mais en regardant la valeur de Up-to-dateness Vector j'ai eu la surprise de voir ceci.\nA creuser mais ça pourrait être un marquant de l'utilisation de DCShadow si on n'a pas déployé de moyen de détection.\nConclusion On peut donc désormais répondre à la question de cet article, est-ce vraiment impossible de détecter DCShadow ?Il faut bien séparer utilisation de DCShadow et modifications opérées par DCShadow.\nDans les 2 cas on a pu voir qu'il était possible de les détecter (Bien que je n'ai pas pu tester tous les cas possibles).\nCette détection s'avère tout de même très difficile.\nClairement si vous n'êtes pas en capacité d'empêcher l'attaquant de récupérer les privilèges nécessaires à l'utilisation de DCShadow, il est peu probable que vous soyez en capacité de déployer une détection basée sur les cookies de réplication.\nAucun commentaire:\nEnregistrer un commentaire",
+  "ID_list": [
+    "T1207"
+  ],
+  "Name_list": [
+    "PowerShell",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1207": [
+      {
+        "sentence": "Je vous propose aujourd'hui un article sur l'attaque présentée par Vincent Le Toux (@mysmartlogon) et Benjamin Delpy (@gentilkiwi) durant la conférence de sécurité BluehatIL 2018 qui a eu lieu les 23 et 24 janvier.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "Leur présentation s'intitulait Active Directory: What can make your million dollar SIEM go blind?",
+        "score": 0.3924
+      },
+      {
+        "sentence": "En effet, l'intérêt pour un attaquant d'utiliser DCSHadow est de ne laisser aucune tracer de ses modifications puisque celles-ci sont effectuées sur une machine compromise par l'attaquant.",
+        "score": 0.3777
+      },
+      {
+        "sentence": "Ainsi aucun log de modification AD n'est remonté.",
+        "score": 0.4941
+      },
+      {
+        "sentence": "Vous pouvez retrouver la vidéo et les slides de la présentation sur le site officiel sur DCShadow https://www.dcshadow.com/.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "Un peu d'histoire La première évocation par Vincent et Benjamin de ce qui allait devenir DCShadow remonte à l'été 2017.Faisant de la réponse à incident sur Active Directory depuis quelques années le tweet de Vincent m'a forcémment interpelé.",
+        "score": 0.4907
+      },
+      {
+        "sentence": "La possibilité qu'un attaquant puisse altérer les métadonnées de réplication a toujours été une de nos craintes sur le forensic AD.",
+        "score": 0.3542
+      },
+      {
+        "sentence": "J'ai pourtant évoqué en répondant à ses tweets une autre méthode, non forensic mais plus de blue team, les cookies de réplication AD.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "Les cookies de réplication AD sont assez méconnus mais utilisés par les équipes de réponse à incident AD lors des remédiations/reconstructions d'environnement Active Directory compromis.",
+        "score": 0.5046
+      },
+      {
+        "sentence": "Ils permettent notamment de limiter l'interruption de service lors de la remédiation contrairement aux précédentes méthodologies.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "C'est un sujet assez peu documenté mais on peut en trouver une trace dans la présentation de l'ANSSI sur TV5 Monde du SSTIC 2017 Retour technique de l'incident de TV5Monde.",
+        "score": 0.3024
+      },
+      {
+        "sentence": "Cookie de réplication AD Un cookie de réplication est un fichier généré par l'utilisation d'une extension de serveur LDAP, le contrôle DirSync.",
+        "score": 0.4544
+      },
+      {
+        "sentence": "Il faut d'abord initialiser le cookie pour pouvoir avoir les modifications depuis la dernière utilisation du cookie.",
+        "score": 0.3781
+      },
+      {
+        "sentence": "Pour plus d'informations sur comment tracer les modifications vous pouvez consulter le lien suivant : Overview of Change Tracking Techniques.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "Vous retrouverez dedans une page dédiée au contrôle DirSync.",
+        "score": 0.3532
+      },
+      {
+        "sentence": "La plus simple pour tester rapidement, c'est d'utiliser Repadmin avec le switch /showchanges (visible avec l'aide en mode expert de repadmin /experthelp).",
+        "score": 0.3762
+      },
+      {
+        "sentence": "Pour des résultats plus exploitables, on utilisera les méthodes de la classe System.DirectoryServices.DirectorySynchronization Ca marche très bien avec du powershell : Je ne vais pas m'étender c'est relativement simple à utiliser.",
+        "score": 0.355
+      },
+      {
+        "sentence": "Revenons maintenant sur l'attaque DCShadow.",
+        "score": 0.4629
+      },
+      {
+        "sentence": "Détection de l'utilisation de DCShadow Alsid a fait un très bon article sur DCShadow (DCShadow explained: A technical deep dive into the latest AD attack technique) je vais donc revenir dessus très brièvement.",
+        "score": 0.5301
+      },
+      {
+        "sentence": "Détecter l'utilisation de DCShadow peut paraître assez trivial.",
+        "score": 0.3689
+      },
+      {
+        "sentence": "En effet, pour être utilisé, DCShadow doit au préalable effectuer des modifications sur des objets Active Directory.",
+        "score": 0.6121
+      },
+      {
+        "sentence": "En journalisant la modification de ces objets, on peut détecter facilement l'utilisation de DCShadow.",
+        "score": 0.4734
+      },
+      {
+        "sentence": "Il suffit pour cela de configurer correctement la politique d'audit (audit réplication détaillée et modifications AD) et de configurer quelques SACL (écriture de l'attribut servicePrincipalName des objets Computer ).",
+        "score": 0.4811
+      },
+      {
+        "sentence": "Il ya toutefois un gros bémol à cette technique.",
+        "score": 0.3413
+      },
+      {
+        "sentence": "L'attaquant en capacité d'utiliser DCShadow dispose de privilèges élevés sur l'Active Directory.",
+        "score": 0.5161
+      },
+      {
+        "sentence": "Rien ne l'empêche de modifier temporairement la politique d'audit sur le contrôleur de domaine qui sera ciblé par DCShadow pour la réactiver par la suite.",
+        "score": 0.4046
+      },
+      {
+        "sentence": "Ca nous laisse donc la détection par le réseau qui est beaucoup moins trivial à mettre en place ou les cookies de réplication.",
+        "score": 0.3141
+      },
+      {
+        "sentence": "Il est intéressant d'ailleurs de comparer ce que remonte la journalisation AD avec ce que remonte le cookie de réplication.",
+        "score": 0.386
+      },
+      {
+        "sentence": "J'effectue une modification avec DCShadow.",
+        "score": 0.4674
+      },
+      {
+        "sentence": "Voici ce que j'ai dans le log: On peut voir l'ajout puis la suppression du SPN de catalogue global (GC/).",
+        "score": 0.323
+      },
+      {
+        "sentence": "Voici ce qu'on a avec le cookie de réplication: Avec le cookie de réplication, on a la valeur finale du SPN, avec le GUID du service DRS mais pas le GC qui a été supprimé.",
+        "score": 0.3926
+      },
+      {
+        "sentence": "Ce qui est intéressant c'est que la journalisation ne log pas l'ajout du SPN du service DRS (GUID E35...).",
+        "score": 0.3592
+      },
+      {
+        "sentence": "On peut donc déjà détecter l'utilisation de DCShadow sans utiliser la journalisation ni la capture réseau.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "Comme je l'ai déjà dit, l'intérêt de DCShadow est de ne pas laisser de trace sur les modifications en elles-même.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "C'est bien de détecter que DCShadow a été utilisé mais ne pas savoir ce qui a été modifié rend la remédiation imposible.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "On va voir qu'il y a plusieurs cas en fonction de comment on utilise DCShadow.",
+        "score": 0.3501
+      },
+      {
+        "sentence": "Mais avant de voir tout ça nous allons faire un très court rappel sur ce qui déclenche une réplication entre les contrôleurs de domaine car ça a énormément d'importance pour la suite.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "Réplication AD et USN La réplication AD se base sur le numéro USN (Update Sequence Number).Pour faire très simple, le DC qui demande les réplications à son partenaire demande les modifications effectuées depuis le dernier USN qu'il connait.",
+        "score": 0.4345
+      },
+      {
+        "sentence": "Autrement dit, ton dernier USN que je connais est X, envoie-moi les attributs qui ont un numéro USN supérieur.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "En regardant le code source, on trouve rapidement que c'est une valeur hardcodée et qu'il ya une branche conditionnelle (switch qu'on verra plus tard).",
+        "score": 0.3112
+      },
+      {
+        "sentence": "Ce qui m'a étonné quand j'ai joué la première fois avec DCShadow, c'était que cette modification n'était pas détectée par le cookie de réplication.",
+        "score": 0.382
+      },
+      {
+        "sentence": "Mon premier réflexe a été de me dire qu'il sera catché par le cookie sur mon second DC lors de la réplication, mais je n'avais rien non plus et surtout l'attribut n'était pas modifié sur le second DC.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Je vérifie les réplications et il n'y a pas de problème.",
+        "score": 0.3053
+      },
+      {
+        "sentence": "Et là on peut voir une différence entre les 2.",
+        "score": 0.3087
+      },
+      {
+        "sentence": "Ma modification effectuée avec DCShadow n'a donc pas été repliquée sur les autres contrôleurs de domaine.",
+        "score": 0.466
+      },
+      {
+        "sentence": "La raison est simple, la valeur d'USN étant 42, la modification n'est pas répliquée.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "Premièrement, 42 est un marquant fort dans les métadonnées de réplication (mais peut-être modifié dans le code par l'attaquant).",
+        "score": 0.3213
+      },
+      {
+        "sentence": "Deuxièmement, les modifications n'ayant pas été repliquées, la remédiation des modifications est très simple, il suffit de reconstruire le DC (après avoir réglé le problème de privilège bien évidemment).",
+        "score": 0.3368
+      },
+      {
+        "sentence": "Dans ce cas, on ne se sert pas du cookie de réplication puisqu'il n'y a pas réplication mais on peut retrouver les modifications via les métadonnées (ou comparer les données entre le DC sur lequel DCShadow a été utilisé et un autre DC).",
+        "score": 0.4668
+      },
+      {
+        "sentence": "L'intérêt pour l'attaquant est bien évidemment de ne pas utiliser DCShadow dans ce sens.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "Puisque si on détecte l'utilisation de DCShadow sur ce contrôleur de domaine on retrouvera rapidement les modifications qu'il a effectuées.",
+        "score": 0.4786
+      },
+      {
+        "sentence": "On va donc utiliser l'autre branche conditionnelle du code qui est un switch permettant de spécifier le numéro USN.",
+        "score": 0.3478
+      },
+      {
+        "sentence": "Modification d'un attribut existant sur le DC où a eu lieu la dernière modification de l'attribut en utilisant le switch replOriginatingUsn de DCShadow Cette fois, nous allons spécifier la valeur du numéro USN.On recommence cette fois en utilisant le switch /replOriginatingUsn avec un numéro USN permettant la réplication.",
+        "score": 0.5241
+      },
+      {
+        "sentence": "On vérifie les réplications.",
+        "score": 0.314
+      },
+      {
+        "sentence": "Et là, on voit que la modification de l'attribut Description a bien été répliquée.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "Mais cette fois, si on regarde le cookie de réplication: On voit bien la modification avec la valeur de l'attribut modifié.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "Il est assez facile de retrouver les modifications opérées avec DCShadow puisqu'elles vont suivre la modification du SPN.",
+        "score": 0.4587
+      },
+      {
+        "sentence": "Autre marquant Je me suis demandé si l'utilisation de DCShadow pouvait provoquer un USN Rollback.",
+        "score": 0.4454
+      },
+      {
+        "sentence": "A creuser mais ça pourrait être un marquant de l'utilisation de DCShadow si on n'a pas déployé de moyen de détection.",
+        "score": 0.3651
+      },
+      {
+        "sentence": "Conclusion On peut donc désormais répondre à la question de cet article, est-ce vraiment impossible de détecter DCShadow ?Il faut bien séparer utilisation de DCShadow et modifications opérées par DCShadow.",
+        "score": 0.4183
+      },
+      {
+        "sentence": "Clairement si vous n'êtes pas en capacité d'empêcher l'attaquant de récupérer les privilèges nécessaires à l'utilisation de DCShadow, il est peu probable que vous soyez en capacité de déployer une détection basée sur les cookies de réplication.",
+        "score": 0.3819
+      }
+    ]
+  }
+}

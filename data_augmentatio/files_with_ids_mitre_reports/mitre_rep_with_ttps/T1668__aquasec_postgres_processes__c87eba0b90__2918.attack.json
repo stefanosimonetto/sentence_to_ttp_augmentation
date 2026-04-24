@@ -1,0 +1,275 @@
+{
+  "original_txt": "Aqua Nautilus researchers have uncovered PG_MEM, a new PostgreSQL malware, that brute forces its way into PostgreSQL databases, delivers payloads to hide its operations, and mines cryptocurrency. In this blog, we explain this attack, the techniques used by the threat actor, and how to detect and protect your environments.\nAbout Postgres\nPostgreSQL, commonly known as Postgres, is a powerful, open source relational database management system (RDBMS) known for its robustness and flexibility. Brute force attacks on Postgres involve repeatedly attempting to guess the database credentials until access is gained, exploiting weak passwords. Once accessed, attackers can leverage the COPY … FROM PROGRAM SQL command to execute arbitrary shell commands on the host, allowing them to perform malicious activities such as data theft or deploying malware.\nAttack flow\nWe observed a successful brute force attack on a PostgreSQL database, which led to the exploitation of a feature that allows command execution. Next, the threat actor created a superuser role in the database and dropped two files to disk. These files are used to eliminate competition, evade detection, gain persistence, and ultimately deploy cryptocurrency miners. While this is the main impact, at this point the attacker can also run commands, view data, and control the server.\nBrute Force Attack\nThe first stage is a simple brute force attack. We observe several login attempts to the PostgreSQL database being refused until the brute force attack successfully guesses the honeypot’s username and password (which were intentionally set to be easy to guess).\nGaining Persistence\nAfter the threat actor successfully guess the user and password, the attack sequence commenced. The following set of SQL commands, were executed:\nFirst, the threat actor creates a new user role with login capability and high privileges. Next, the threat actor interacts with the current user who initially enabled access to the system. The SELECT CURRENT_USER command retrieves the name of the current database user in the session. The following command prints the names of the users and indicates if they have superuser privileges. Then, the current user postgres is stripped of superuser privileges. This restricts the privileges of other threat actors who might still gain access to the system via the weak password.\nInitial System Discovery\nThe threat actor is gathering information about the system.\nThe first command displays the path to the pg_hba.conf file, which is the configuration file for client authentication. The second command retrieves the version of the PostgreSQL server. Next, the threat actor creates a temporary table to store temporary data and files before they are saved to disk or memory. The threat actor uses the PROGRAM feature, which enables shell commands on the host. The threat actor runs uname and whoami and stores the data in the temporary table. Each time, the temp table is deleted with the TRUNCATE command, which is a faster and more efficient deletion action in PostgreSQL.\nPayload Delivery\nIn total, there are two files downloaded from the threat actor’s remote server. In Figure 5 below, you can observe the first block of commands aimed at delivering the first payload.\nIn general, the threat actor uses a temporary table to store various code and data. Before and after each command, the threat actor uses TRUNCATE to clear the temporary table (pg_temp.log_tmp) and then uses COPY … FROM PROGRAM to execute various shell commands, capturing their output into the table.\nThe threat actor is using the following command to open a TCP connection to the IP address 128.199.77.96 on port 3232 and get dqQkiJwLFH. It is then stored as the file pg_core.\nNext using chmod the pg_core file is modified to be an executed and the MD5 is calculated. The pg_core file is later executed with a specific argument. This string is encoded with base64 and after decoded, you can see a crypto mining related message, where h probably stands for hash and p stands for assigned worker.\nThe executable data is also stored in the temporary table and then saved on the path /var/lib/postgresql/data/log-tmp.\nThe code is also designed to retrieve the process ID of the current PostgreSQL backend process. This can be useful for debugging or monitoring purposes.\nIn addition, all cron jobs for the current user are removed and various processes are being killed such as kdevtmpfsi, pg_mem, kinsing, postgres-kernel, and others.\nThe threat actor is stopping historic attacks of himself and others, this shows that he has some intel on competitors.\nLastly, the threat actor deletes files such as the binary pg_core and logs of the malware such as ps_stat_good to evade defenses (such as volume-based scanners).\nThe threat actor also deploys a second payload, named pg_mem, this is a dropper which contains xmr cryptominer, and is responsible to optimize crypto mining operation. Below you can see operations via Postgres, which are very similar to the delivery of the first payload.\nAs can be seen, the threat actor opens a TCP connection to the IP address `128.199.77.96` on port `3232` and get KfLhjeXuQc. It is then stored as the file pg_mem.\nAfter the ELF file pg_mem is executed, it stores a third ELF binary named memory. This file is an XMRIG cryptominer, which is used to mine cryptocurrency.\nAs can be seen in Figure 12 below, the cryptominer memory\nis executed with the argument deleted\nand in addition, the threat actor is creating a cron job with the execution of pg_mem and it inserts an empty value into the pg_hba\nconfiguration file.\nThere are 3 files dropped to disk on the following path /var/lib/postgresql/data/:\n- memory (MD5: 3f3eae22dd67e741e87a18a2383900a5) detected in VT as a cryptominer.\n- pg_core (MD5: aacf2146cac9946592f069ef6d94635b) with various detections, such as Potentially unwanted, cryptominer, trojan, etc.\n- pg_mem (MD5: f705c3bc4e98585357c03feac623356c) with various detections, such as Potentially unwanted, cryptominer, trojan, etc.\nAll 3 ELF binaries are packed, stripped and the strings were encrypted.\nExposed Postgres Servers in the Wild\nShodan, the search engine for Internet-connected devices, was utilized to identify exposed PostgreSQL databases. By querying Shodan for publicly accessible Postgres instances, we uncovered more than 800,000 internet connected databases. This highlights the critical need for securing database servers against brute force attacks and potential exploitation.\nMapping the Campaign to the MITRE ATT&CK Framework\nOur investigation showed that the attackers have been using some common techniques throughout the campaign. Here we map each component of the attack to the corresponding techniques of the MITRE ATT&CK framework:\nThe described attack involves several stages, each utilizing different techniques and sub-techniques according to the MITRE ATT&CK framework. Here is a breakdown of the relevant techniques and sub-techniques:\nInitial Access\n- T1190 – Exploit Public-Facing Application: The attacker exploits a vulnerability in the Postgres database to gain initial access.\nExecution\n- T1059.004 – Command and Scripting Interpreter: Unix Shell: The attacker executes SQL commands that leverage the PROGRAM feature to run shell commands on the host system.\nPersistence\n- T1136.001 – Create Account: Local Account: The attacker creates a new user role with login capabilities and high privileges.\n- T1098 – Account Manipulation: The attacker manipulates user roles and privileges, stripping superuser privileges from the existing postgres user to maintain access and control.\n- T1053.003 – Scheduled Task/Job: Cron: Removing all cron jobs to prevent interference from legitimate scheduled tasks, and adding a cron job to run pg_mem.\nPrivilege Escalation\n- T1068 – Exploitation for Privilege Escalation: The attacker escalates privileges by exploiting the ability to execute commands as a superuser.\nDefense Evasion\n- T1070.004 – Indicator Removal on Host: File Deletion: The attacker deletes files and logs related to their malware to evade detection.\n- T1036.004 – Masquerading: Masquerade Task or Service: The attacker modifies the pg_core file to be executable and disguises it as a legitimate file.\nCredentials Access\n- T1110.002 – Brute Force: Password Guessing: The attacker uses brute force to guess the user and password of the Postgres database.\nDiscovery\n- T1082 – System Information Discovery: The attacker gathers system information using commands like uname and whoami.\n- T1057 – Process Discovery: The attacker retrieves the process ID of the PostgreSQL backend process for further analysis or manipulation.\nCollection\n- T1005 – Data from Local System: The attacker collects data by viewing and extracting information from the database and the host system.\nCommand and Control\n- T1105 – Ingress Tool Transfer: The attacker downloads files from a remote server to the compromised system.\n- T1071.001 – Application Layer Protocol: Web Protocols: The attacker uses web protocols to communicate with the remote server for command and control.\nImpact\n- T1496 – Resource Hijacking: The primary impact is the deployment of cryptominers, leveraging the system’s resources to mine cryptocurrency.\nDetection and remediation with Aqua’s CNAPP\nThis campaign is exploiting internet facing Postgres databases with weak password. Many organizations connect their databases to the internet, weak password is a result of a misconfiguration, and lack of proper identity controls. This is not a rare issue and many large organizations suffer from these problems. Aqua Security can provide invaluable information concerning vulnerabilities and misconfigurations, but sometimes employees choose weak passwords or a zero-day vulnerability emerges.\nFor this reason you should adopt defense in depth approach which aims to deploy detection and protection mechanisms in various junctions of your software development life cycle in the cloud. Runtime detection and response tools such as Aqua’s Runtime Protection are built to detect malicious or suspicious behavior in runtime.\nIf one of your running workloads is vulnerable to the Confluence vulnerability, Aqua’s Runtime Protection will let you see all the relevant detection. For instance, we highlighted two detections below:\nIn Figure 14 above, you can see a detection of database program spawned a shell, indicating a suspicious behavior of databases running shell commands. The execution of the shell is also marked as malicious. You can see that it illustrates TCP connection and fetching the main payload.\nSimilarly in Figure 15 above, you can see a DNS resolve request for a crypto pool and a communication to the cryptomining pool.",
+  "sanitized_txt": "Aqua Nautilus researchers have uncovered PG_MEM, a new PostgreSQL malware, that brute forces its way into PostgreSQL databases, delivers payloads to hide its operations, and mines cryptocurrency. In this blog, we explain this attack, the techniques used by the threat actor, and how to detect and protect your environments.\nAbout Postgres PostgreSQL, commonly known as Postgres, is a powerful, open source relational database management system (RDBMS) known for its robustness and flexibility. Brute force attacks on Postgres involve repeatedly attempting to guess the database credentials until access is gained, exploiting weak passwords. Once accessed, attackers can leverage the COPY … FROM PROGRAM SQL command to execute arbitrary shell commands on the host, allowing them to perform malicious activities such as data theft or deploying malware.\nAttack flow We observed a successful brute force attack on a PostgreSQL database, which led to the exploitation of a feature that allows command execution. Next, the threat actor created a superuser role in the database and dropped two files to disk. These files are used to eliminate competition, evade detection, gain persistence, and ultimately deploy cryptocurrency miners. While this is the main impact, at this point the attacker can also run commands, view data, and control the server.\nBrute Force Attack The first stage is a simple brute force attack. We observe several login attempts to the PostgreSQL database being refused until the brute force attack successfully guesses the honeypot’s username and password (which were intentionally set to be easy to guess).\nGaining Persistence After the threat actor successfully guess the user and password, the attack sequence commenced. The following set of SQL commands, were executed:\nFirst, the threat actor creates a new user role with login capability and high privileges. Next, the threat actor interacts with the current user who initially enabled access to the system. The SELECT CURRENT_USER command retrieves the name of the current database user in the session. The following command prints the names of the users and indicates if they have superuser privileges. Then, the current user postgres is stripped of superuser privileges. This restricts the privileges of other threat actors who might still gain access to the system via the weak password.\nInitial System Discovery The threat actor is gathering information about the system.\nThe first command displays the path to the pg_hba.conf file, which is the configuration file for client authentication. The second command retrieves the version of the PostgreSQL server. Next, the threat actor creates a temporary table to store temporary data and files before they are saved to disk or memory. The threat actor uses the PROGRAM feature, which enables shell commands on the host. The threat actor runs uname and whoami and stores the data in the temporary table. Each time, the temp table is deleted with the TRUNCATE command, which is a faster and more efficient deletion action in PostgreSQL.\nPayload Delivery In total, there are two files downloaded from the threat actor’s remote server. In Figure 5 below, you can observe the first block of commands aimed at delivering the first payload.\nIn general, the threat actor uses a temporary table to store various code and data. Before and after each command, the threat actor uses TRUNCATE to clear the temporary table (pg_temp.log_tmp) and then uses COPY … FROM PROGRAM to execute various shell commands, capturing their output into the table.\nThe threat actor is using the following command to open a TCP connection to the IP address 128.199.77.96 on port 3232 and get dqQkiJwLFH. It is then stored as the file pg_core.\nNext using chmod the pg_core file is modified to be an executed and the MD5 is calculated. The pg_core file is later executed with a specific argument. This string is encoded with base64 and after decoded, you can see a crypto mining related message, where h probably stands for hash and p stands for assigned worker.\nThe executable data is also stored in the temporary table and then saved on the path /var/lib/postgresql/data/log-tmp.\nThe code is also designed to retrieve the process ID of the current PostgreSQL backend process. This can be useful for debugging or monitoring purposes.\nIn addition, all cron jobs for the current user are removed and various processes are being killed such as kdevtmpfsi, pg_mem, kinsing, postgres-kernel, and others.\nThe threat actor is stopping historic attacks of himself and others, this shows that he has some intel on competitors.\nLastly, the threat actor deletes files such as the binary pg_core and logs of the malware such as ps_stat_good to evade defenses (such as volume-based scanners).\nThe threat actor also deploys a second payload, named pg_mem, this is a dropper which contains xmr cryptominer, and is responsible to optimize crypto mining operation. Below you can see operations via Postgres, which are very similar to the delivery of the first payload.\nAs can be seen, the threat actor opens a TCP connection to the IP address `128.199.77.96` on port `3232` and get KfLhjeXuQc. It is then stored as the file pg_mem.\nAfter the ELF file pg_mem is executed, it stores a third ELF binary named memory. This file is an XMRIG cryptominer, which is used to mine cryptocurrency.\nAs can be seen in Figure 12 below, the cryptominer memory is executed with the argument deleted and in addition, the threat actor is creating a cron job with the execution of pg_mem and it inserts an empty value into the pg_hba configuration file.\nThere are 3 files dropped to disk on the following path /var/lib/postgresql/data/:\n- memory (MD5: 3f3eae22dd67e741e87a18a2383900a5) detected in VT as a cryptominer.\n- pg_core (MD5: aacf2146cac9946592f069ef6d94635b) with various detections, such as Potentially unwanted, cryptominer, trojan, etc.\n- pg_mem (MD5: f705c3bc4e98585357c03feac623356c) with various detections, such as Potentially unwanted, cryptominer, trojan, etc.\nAll 3 ELF binaries are packed, stripped and the strings were encrypted.\nExposed Postgres Servers in the Wild Shodan, the search engine for Internet-connected devices, was utilized to identify exposed PostgreSQL databases. By querying Shodan for publicly accessible Postgres instances, we uncovered more than 800,000 internet connected databases. This highlights the critical need for securing database servers against brute force attacks and potential exploitation.\nMapping the Campaign to the MITRE ATT&CK Framework Our investigation showed that the attackers have been using some common techniques throughout the campaign. Here we map each component of the attack to the corresponding techniques of the MITRE ATT&CK framework:\nThe described attack involves several stages, each utilizing different techniques and sub-techniques according to the MITRE ATT&CK framework. Here is a breakdown of the relevant techniques and sub-techniques:\nDetection and remediation with Aqua’s CNAPP This campaign is exploiting internet facing Postgres databases with weak password. Many organizations connect their databases to the internet, weak password is a result of a misconfiguration, and lack of proper identity controls. This is not a rare issue and many large organizations suffer from these problems. Aqua Security can provide invaluable information concerning vulnerabilities and misconfigurations, but sometimes employees choose weak passwords or a zero-day vulnerability emerges.\nFor this reason you should adopt defense in depth approach which aims to deploy detection and protection mechanisms in various junctions of your software development life cycle in the cloud. Runtime detection and response tools such as Aqua’s Runtime Protection are built to detect malicious or suspicious behavior in runtime.\nIf one of your running workloads is vulnerable to the Confluence vulnerability, Aqua’s Runtime Protection will let you see all the relevant detection. For instance, we highlighted two detections below:\nIn Figure 14 above, you can see a detection of database program spawned a shell, indicating a suspicious behavior of databases running shell commands. The execution of the shell is also marked as malicious. You can see that it illustrates TCP connection and fetching the main payload.\nSimilarly in Figure 15 above, you can see a DNS resolve request for a crypto pool and a communication to the cryptomining pool.",
+  "ID_list": [
+    "T1668"
+  ],
+  "Name_list": [
+    "Brute Force",
+    "Discovery",
+    "Execution",
+    "Impact",
+    "Persistence",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1668": [
+      {
+        "sentence": "Aqua Nautilus researchers have uncovered PG_MEM, a new PostgreSQL malware, that brute forces its way into PostgreSQL databases, delivers payloads to hide its operations, and mines cryptocurrency.",
+        "score": 0.5458
+      },
+      {
+        "sentence": "In this blog, we explain this attack, the techniques used by the threat actor, and how to detect and protect your environments.",
+        "score": 0.5237
+      },
+      {
+        "sentence": "About Postgres PostgreSQL, commonly known as Postgres, is a powerful, open source relational database management system (RDBMS) known for its robustness and flexibility.",
+        "score": 0.4074
+      },
+      {
+        "sentence": "Brute force attacks on Postgres involve repeatedly attempting to guess the database credentials until access is gained, exploiting weak passwords.",
+        "score": 0.5368
+      },
+      {
+        "sentence": "Once accessed, attackers can leverage the COPY … FROM PROGRAM SQL command to execute arbitrary shell commands on the host, allowing them to perform malicious activities such as data theft or deploying malware.",
+        "score": 0.4738
+      },
+      {
+        "sentence": "Attack flow We observed a successful brute force attack on a PostgreSQL database, which led to the exploitation of a feature that allows command execution.",
+        "score": 0.4543
+      },
+      {
+        "sentence": "Next, the threat actor created a superuser role in the database and dropped two files to disk.",
+        "score": 0.4251
+      },
+      {
+        "sentence": "These files are used to eliminate competition, evade detection, gain persistence, and ultimately deploy cryptocurrency miners.",
+        "score": 0.4701
+      },
+      {
+        "sentence": "While this is the main impact, at this point the attacker can also run commands, view data, and control the server.",
+        "score": 0.339
+      },
+      {
+        "sentence": "Brute Force Attack The first stage is a simple brute force attack.",
+        "score": 0.3989
+      },
+      {
+        "sentence": "We observe several login attempts to the PostgreSQL database being refused until the brute force attack successfully guesses the honeypot’s username and password (which were intentionally set to be easy to guess).",
+        "score": 0.4934
+      },
+      {
+        "sentence": "Gaining Persistence After the threat actor successfully guess the user and password, the attack sequence commenced.",
+        "score": 0.5503
+      },
+      {
+        "sentence": "The following set of SQL commands, were executed: First, the threat actor creates a new user role with login capability and high privileges.",
+        "score": 0.4376
+      },
+      {
+        "sentence": "Next, the threat actor interacts with the current user who initially enabled access to the system.",
+        "score": 0.4892
+      },
+      {
+        "sentence": "The SELECT CURRENT_USER command retrieves the name of the current database user in the session.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "The following command prints the names of the users and indicates if they have superuser privileges.",
+        "score": 0.3116
+      },
+      {
+        "sentence": "Then, the current user postgres is stripped of superuser privileges.",
+        "score": 0.4552
+      },
+      {
+        "sentence": "This restricts the privileges of other threat actors who might still gain access to the system via the weak password.",
+        "score": 0.6528
+      },
+      {
+        "sentence": "Initial System Discovery The threat actor is gathering information about the system.",
+        "score": 0.4772
+      },
+      {
+        "sentence": "The first command displays the path to the pg_hba.conf file, which is the configuration file for client authentication.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "The second command retrieves the version of the PostgreSQL server.",
+        "score": 0.4095
+      },
+      {
+        "sentence": "The threat actor uses the PROGRAM feature, which enables shell commands on the host.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "Each time, the temp table is deleted with the TRUNCATE command, which is a faster and more efficient deletion action in PostgreSQL.",
+        "score": 0.3584
+      },
+      {
+        "sentence": "Payload Delivery In total, there are two files downloaded from the threat actor’s remote server.",
+        "score": 0.4092
+      },
+      {
+        "sentence": "In Figure 5 below, you can observe the first block of commands aimed at delivering the first payload.",
+        "score": 0.3157
+      },
+      {
+        "sentence": "Before and after each command, the threat actor uses TRUNCATE to clear the temporary table (pg_temp.log_tmp) and then uses COPY … FROM PROGRAM to execute various shell commands, capturing their output into the table.",
+        "score": 0.357
+      },
+      {
+        "sentence": "The threat actor is using the following command to open a TCP connection to the IP address 128.199.77.96 on port 3232 and get dqQkiJwLFH.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "Next using chmod the pg_core file is modified to be an executed and the MD5 is calculated.",
+        "score": 0.347
+      },
+      {
+        "sentence": "This string is encoded with base64 and after decoded, you can see a crypto mining related message, where h probably stands for hash and p stands for assigned worker.",
+        "score": 0.446
+      },
+      {
+        "sentence": "The code is also designed to retrieve the process ID of the current PostgreSQL backend process.",
+        "score": 0.376
+      },
+      {
+        "sentence": "In addition, all cron jobs for the current user are removed and various processes are being killed such as kdevtmpfsi, pg_mem, kinsing, postgres-kernel, and others.",
+        "score": 0.4899
+      },
+      {
+        "sentence": "The threat actor is stopping historic attacks of himself and others, this shows that he has some intel on competitors.",
+        "score": 0.5802
+      },
+      {
+        "sentence": "Lastly, the threat actor deletes files such as the binary pg_core and logs of the malware such as ps_stat_good to evade defenses (such as volume-based scanners).",
+        "score": 0.4925
+      },
+      {
+        "sentence": "The threat actor also deploys a second payload, named pg_mem, this is a dropper which contains xmr cryptominer, and is responsible to optimize crypto mining operation.",
+        "score": 0.4237
+      },
+      {
+        "sentence": "Below you can see operations via Postgres, which are very similar to the delivery of the first payload.",
+        "score": 0.3866
+      },
+      {
+        "sentence": "As can be seen, the threat actor opens a TCP connection to the IP address `128.199.77.96` on port `3232` and get KfLhjeXuQc.",
+        "score": 0.3538
+      },
+      {
+        "sentence": "This file is an XMRIG cryptominer, which is used to mine cryptocurrency.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "As can be seen in Figure 12 below, the cryptominer memory is executed with the argument deleted and in addition, the threat actor is creating a cron job with the execution of pg_mem and it inserts an empty value into the pg_hba configuration file.",
+        "score": 0.4282
+      },
+      {
+        "sentence": "There are 3 files dropped to disk on the following path /var/lib/postgresql/data/: - memory (MD5: 3f3eae22dd67e741e87a18a2383900a5) detected in VT as a cryptominer. - pg_core (MD5: aacf2146cac9946592f069ef6d94635b) with various detections, such as Potentially unwanted, cryptominer, trojan, etc. - pg_mem (MD5: f705c3bc4e98585357c03feac623356c) with various detections, such as Potentially unwanted, cryptominer, trojan, etc.",
+        "score": 0.4549
+      },
+      {
+        "sentence": "All 3 ELF binaries are packed, stripped and the strings were encrypted.",
+        "score": 0.4245
+      },
+      {
+        "sentence": "Exposed Postgres Servers in the Wild Shodan, the search engine for Internet-connected devices, was utilized to identify exposed PostgreSQL databases.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "By querying Shodan for publicly accessible Postgres instances, we uncovered more than 800,000 internet connected databases.",
+        "score": 0.4545
+      },
+      {
+        "sentence": "This highlights the critical need for securing database servers against brute force attacks and potential exploitation.",
+        "score": 0.4818
+      },
+      {
+        "sentence": "Mapping the Campaign to the MITRE ATT&CK Framework Our investigation showed that the attackers have been using some common techniques throughout the campaign.",
+        "score": 0.4189
+      },
+      {
+        "sentence": "Here we map each component of the attack to the corresponding techniques of the MITRE ATT&CK framework: The described attack involves several stages, each utilizing different techniques and sub-techniques according to the MITRE ATT&CK framework.",
+        "score": 0.4522
+      },
+      {
+        "sentence": "Here is a breakdown of the relevant techniques and sub-techniques: Initial Access - – Exploit Public-Facing Application: The attacker exploits a vulnerability in the Postgres database to gain initial access.",
+        "score": 0.5617
+      },
+      {
+        "sentence": "Execution - – Command and Scripting Interpreter: Unix Shell: The attacker executes SQL commands that leverage the PROGRAM feature to run shell commands on the host system.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "Persistence - – Create Account: Local Account: The attacker creates a new user role with login capabilities and high privileges. - – Account Manipulation: The attacker manipulates user roles and privileges, stripping superuser privileges from the existing postgres user to maintain access and control. - – Scheduled Task/Job: Cron: Removing all cron jobs to prevent interference from legitimate scheduled tasks, and adding a cron job to run pg_mem.",
+        "score": 0.5878
+      },
+      {
+        "sentence": "Privilege Escalation - – Exploitation for Privilege Escalation: The attacker escalates privileges by exploiting the ability to execute commands as a superuser.",
+        "score": 0.5185
+      },
+      {
+        "sentence": "Defense Evasion - – Indicator Removal on Host: File Deletion: The attacker deletes files and logs related to their malware to evade detection. - – Masquerading: Masquerade Task or Service: The attacker modifies the pg_core file to be executable and disguises it as a legitimate file.",
+        "score": 0.4701
+      },
+      {
+        "sentence": "Credentials Access - – Brute Force: Password Guessing: The attacker uses brute force to guess the user and password of the Postgres database.",
+        "score": 0.5316
+      },
+      {
+        "sentence": "Discovery - – System Information Discovery: The attacker gathers system information using commands like uname and whoami. - – Process Discovery: The attacker retrieves the process ID of the PostgreSQL backend process for further analysis or manipulation.",
+        "score": 0.4316
+      },
+      {
+        "sentence": "Collection - – Data from Local System: The attacker collects data by viewing and extracting information from the database and the host system.",
+        "score": 0.388
+      },
+      {
+        "sentence": "Command and Control - – Ingress Tool Transfer: The attacker downloads files from a remote server to the compromised system. - – Application Layer Protocol: Web Protocols: The attacker uses web protocols to communicate with the remote server for command and control.",
+        "score": 0.4093
+      },
+      {
+        "sentence": "Impact - – Resource Hijacking: The primary impact is the deployment of cryptominers, leveraging the system’s resources to mine cryptocurrency.",
+        "score": 0.5028
+      },
+      {
+        "sentence": "Detection and remediation with Aqua’s CNAPP This campaign is exploiting internet facing Postgres databases with weak password.",
+        "score": 0.5918
+      },
+      {
+        "sentence": "Many organizations connect their databases to the internet, weak password is a result of a misconfiguration, and lack of proper identity controls.",
+        "score": 0.4707
+      },
+      {
+        "sentence": "This is not a rare issue and many large organizations suffer from these problems.",
+        "score": 0.4131
+      },
+      {
+        "sentence": "Aqua Security can provide invaluable information concerning vulnerabilities and misconfigurations, but sometimes employees choose weak passwords or a zero-day vulnerability emerges.",
+        "score": 0.5171
+      },
+      {
+        "sentence": "For this reason you should adopt defense in depth approach which aims to deploy detection and protection mechanisms in various junctions of your software development life cycle in the cloud.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "Runtime detection and response tools such as Aqua’s Runtime Protection are built to detect malicious or suspicious behavior in runtime.",
+        "score": 0.3562
+      },
+      {
+        "sentence": "If one of your running workloads is vulnerable to the Confluence vulnerability, Aqua’s Runtime Protection will let you see all the relevant detection.",
+        "score": 0.4644
+      },
+      {
+        "sentence": "For instance, we highlighted two detections below: In Figure 14 above, you can see a detection of database program spawned a shell, indicating a suspicious behavior of databases running shell commands.",
+        "score": 0.4395
+      },
+      {
+        "sentence": "You can see that it illustrates TCP connection and fetching the main payload.",
+        "score": 0.3204
+      }
+    ]
+  }
+}

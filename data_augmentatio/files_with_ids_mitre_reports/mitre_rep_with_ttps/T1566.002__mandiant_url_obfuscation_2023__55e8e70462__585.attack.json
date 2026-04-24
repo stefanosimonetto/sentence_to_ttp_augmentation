@@ -1,0 +1,185 @@
+{
+  "original_txt": "Don't @ Me: URL Obfuscation Through Schema Abuse\nMandiant\nWritten by: Nick Simonian\nA technique is being used in the distribution of multiple families of malware that obfuscates the end destination of a URL by abusing the URL schema. Mandiant tracks this adversary methodology as \"URL Schema Obfuscation”. The technique could increase the likelihood of a successful phishing attack, and could cause domain extraction errors in logging or security tooling. If a network defense tool is relying on knowing the server a URL is pointing to (e.g. checking if a domain is on a threat intel feed), it could potentially bypass it and cause gaps in visibility and coverage. Common URL parsing logic will fail when encountering this technique, resulting in the loss of visibility into threat campaigns and actor infrastructure.\nNetwork defenders should check if URLs abusing the schema to obfuscate the destination cause any failures in logging, visibility, or security tooling.\nInitial Lead\nA tweet by @ankit_anubhav was observed describing a technique being used by SMOKELOADER to obfuscate URL destinations. Mandiant’s investigation into this technique discovered multiple other formats of the obfuscation being used to distribute a multitude of malware variants.\nIn their tweet, they use the URL \"hxxp://google.com@1157586937\n” as an example that ends up opening a Rick Roll video. While the destination is upsetting, this tweet shows two obfuscation techniques being used simultaneously:\n- The usage of an \"@” sign to obscure the destination server\n- The usage of alternative hostname formats to obscure the destination IP address\nThe \"@” Sign\nTo start, it helps to understand how a URL is structured and parsed by browsers when clicked.\nRFC1738 documents the structure for URLs. In section 3.1 (Common Internet Scheme Syntax), it lays out the basic structure for all URLs:\n<scheme>//<user>:<password>@<host>:<port>/<url-path>\nIn section 3.3 (HTTP), it states that the format for an HTTP URL follows the structure of:\nhttp://<host>:<port>/<path>?<searchpart>\nThe RFC specifically states that \"No user name or password is allowed.” The user name is defined as the text prior to the \"@” sign. When a browser interprets a URL with the username section populated (anything before the \"@” sign), it discards it, and sends the request to the server following the \"@” sign.\nComparing it with the URL in the tweet shows that the \"google.com” section of the URL is being treated as a username. This can be modified as needed to better trick victims to click a link in spear phishing campaigns. For example, it could be replaced with the target email address domain and become much more effective.\nAlternative Hostname Formats\nIn the example, the digits \"1157586937” are being treated as the host. However, it’s very uncommon for a server IP address to be depicted as an integer. This is the second level of obfuscation.\nA dotted-quad IP address is a common representation of an IPv4 address, consisting of four decimal numbers separated by dots, with each decimal number representing 8 bits of the IP address. For example, the IP address 1.2.3.4 can be represented as the binary number 00000001.00000010.00000011.00000100.\nThis binary representation of an IP address can then be converted to a single integer by treating it as a single, large binary number and converting it to decimal. For example, the binary number 00000001.00000010.00000011.00000100 becomes the decimal number 16909060.\nFigure 1: Showing how the IP 1.2.3.4 translates to a decimal representation\nBrowsers do this conversion automatically. Not only single integer representations can be used:\nHexadecimal can also be put into a dotted-quad format:\nhxxp://google.com@0xC0.0xA8.0x0.0x1\nOctal is also possible:\nhxxp://google.com@0300.0250.0000.0001\nThey can also be mixed to create a truly confusing destination:\nhxxp://google.com@0xc0.168.0x0.1\nDomains can also be used, which can be made to look like legitimate destinations:\nhxxp://legit.banking.site.com@loginportal.onlinebanking.orly/loginPortal.php\nThere are publicly-available tools that can do this level of obfuscation. IPFuscator by Vincent Yiu, for example, generates multiple variations including mixed-type and padded values.\nIn The Wild\nVirusTotal shows usage dating back to at least February 2022. The continuing use of URL Schema Obfuscation is likely because it’s working for the attackers, either by decreasing detections by security tooling, or increasing the likelihood a victim clicks the link.\nOftentimes, the URL is used to download additional malware for execution. These have been seen exploiting multiple vulnerabilities to gain code execution on the victim. Most prevalently, CVE-2017-0199 usage has been detected in multiple downloaded documents, along with CVE-2017-11882. A wide range of commodity malware families have been seen using this technique to gain execution, including LOKIBOT, MATIEX, FORMBOOK, and AGENTTESLA.\nExample of Recent Abuse\nIn February 2023, a component file of a Microsoft Word document was discovered using a YARA rule (see Appendix 1) in a VirusTotal Retrohunt. The attack chain had multiple stages, utilizing a template injection attack and an exploit, and dropping AGENTTESLA, which exfiltrated data via an encrypted Telegram channel.\nPO.docx was first seen on VirusTotal on February 6, 2023. It contains a template injection technique that runs when the document is opened, requesting the next stage of malware. If the document is decompressed, the next stage of the infection chain can be seen inside the webSettings.xml.rels file:\nFigure 2: webSettings.xml.rels file\nThis downloads and opens the obfuscated URL: hxxp://dgdf000000ghfjfgh000000fghfghg0000000fhfghfg000000sdgfggdf00000gdfge00000rtdfgdf00000gdfg@647601465/56.doc\nThis URL, when deobfuscated, is hxxp://38.153.157.57/56.doc\n. The template injection results in the following network request being made from Microsoft Word. Note the obfuscation isn’t present in network traffic; the username field has been stripped out, and the integer representation of the IP address has been changed to the dotted-quad format.\nThe downloaded document, 56.doc, was first seen on VirusTotal on February 6, 2023, the same day as PO.docx. 56.doc is an RTF file that exploits CVE-2017-11882 to download and execute\nhxxp://38.153.157.57/156/vbc.exe\n. Unlike PO.docx, this doesn’t use the URL obfuscation technique.\nThis is internally named \"NNbHhH.exe\", and is AGENTTESLA, sending stolen data via Telegram with the bot ID and token \"6010275350:AAH4W3CDRhQk0wgfyhQ_jITTy3QYmrxdDbw\n”\nDetecting\nWhen writing a complex Regular Expression (Regex), it’s quite common to see if there’s one publicly available that can be reused, instead of starting from scratch and missing potential edge-cases that may not be known. Interestingly, the top voted StackOverflow post for a URL RegEx will fail to find URLs using these techniques. The RegEx shown on the StackOverflow answer is:\nhttps?:\\/\\/(www\\.)?{1,256}\\.[a-zA-Z0-9()]{1,6}\\b(*)\nUsing that Regex in Regex101 shows it misses the obfuscated URL:\nIf a security, logging, or threat intelligence tool is built using this regular expression, it will be unable to successfully identify or parse out these obfuscated URLs.\nFor those on defense, network traffic analysis won’t show this technique in use. When a browser receives a request to go to a URL using this syntax, it automatically translates it to a valid destination before issuing the request. Therefore, by analyzing network traffic, you wouldn’t see an obfuscated URL.\nHowever, using file-based analysis like YARA or AV/EDR can reveal tools using URL schema obfuscation, as can process execution logs. If a program executes something like Powershell’s Invoke-WebRequest module pointing to an obfuscated URL, the obfuscated URL will be shown in the logs. As for detecting it in files, YARA rules are included that can find it in Office documents, RTFs, and PDFs.\nConclusion\nURL Schema Obfuscation is currently being abused to deliver malware in a variety of ways, from phishing links to template injection. Defenders need to ensure security tooling and logging systems are able to detect, identify, and parse the correct indicators to ensure defenses aren’t bypassed by using a format that isn’t RFC-compliant. In lieu of other indicators, detection of URL Schema Obfuscation using the provided YARA rules can be a malicious indicator in itself, helping to detect and prevent intrusions.\nAcknowledgements\nSpecial thanks to Connor McLaughlin and Jared Wilson for their assistance every step of the way.\nAppendix 1: YARA Rules\nrule M_Hunting_ObfuscatedURL_DottedQuad\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"Finds URL Schema Obfuscation of the format http://loremipsum@1.2.3.4\"\nstrings:\n$doc = {d0 cf 11 e0}\n$pdf = {25 50 44 46 2D}\n$docx = {50 4b 03 04}\n$rtf = {7b 5c 72 74}\n$url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(\\:\\d{1,5})?/ nocase\ncondition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url\n}\nrule M_Hunting_ObfuscatedURL_Integer\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"Finds URL Schema Obfuscation of the format http://loremipsum@16909060\"\nstrings:\n$doc = {d0 cf 11 e0}\n$pdf = {25 50 44 46 2D}\n$docx = {50 4b 03 04}\n$rtf = {7b 5c 72 74}\n$url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@\\d{8,10}(\\:\\d{1,5})?/ nocase\ncondition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url\n}\nrule M_Hunting_ObfuscatedURL_DottedQuadHex\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"Finds URL Schema Obfuscation of the format http://loremipsum@0x01.0x02.0x03.0x04\"\nstrings:\n$doc = {d0 cf 11 e0}\n$pdf = {25 50 44 46 2D}\n$docx = {50 4b 03 04}\n$rtf = {7b 5c 72 74}\n$url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@0x[a-fA-F0-9]{1,2}\\.0x[a-fA-F0-9]{1,2}\\.0x[a-fA-F0-9]{1,2}\\.0x[a-fA-F0-9]{1,2}(\\:\\d{1,5})?/ nocase\ncondition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url\n}\nrule M_Hunting_ObfuscatedURL_DottedQuadMix\n{\nmeta:\nauthor = \"Mandiant\"\ndescription = \"Finds URL Schema Obfuscation of the format http://loremipsum@1.2.0x03.0x04\"\nstrings:\n$doc = {d0 cf 11 e0}\n$pdf = {25 50 44 46 2D}\n$docx = {50 4b 03 04}\n$rtf = {7b 5c 72 74}\n$url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@(0x[a-fA-F0-9]{1,2}|\\d{1,3})\\.(0x[a-fA-F0-9]{1,2}|\\d{1,3})\\.(0x[a-fA-F0-9]{1,2}|\\d{1,3})\\.(0x[a-fA-F0-9]{1,2}|\\d{1,3})(\\:\\d{1,5})?/ nocase\ncondition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url\n}\nAppendix 2: Malware Families By URL",
+  "sanitized_txt": "Don't @ Me: URL Obfuscation Through Schema Abuse Mandiant Written by: Nick Simonian A technique is being used in the distribution of multiple families of malware that obfuscates the end destination of a URL by abusing the URL schema. Mandiant tracks this adversary methodology as \"URL Schema Obfuscation”. The technique could increase the likelihood of a successful phishing attack, and could cause domain extraction errors in logging or security tooling. If a network defense tool is relying on knowing the server a URL is pointing to (e.g. checking if a domain is on a threat intel feed), it could potentially bypass it and cause gaps in visibility and coverage. Common URL parsing logic will fail when encountering this technique, resulting in the loss of visibility into threat campaigns and actor infrastructure.\nNetwork defenders should check if URLs abusing the schema to obfuscate the destination cause any failures in logging, visibility, or security tooling.\nInitial Lead A tweet by @ankit_anubhav was observed describing a technique being used by SMOKELOADER to obfuscate URL destinations. Mandiant’s investigation into this technique discovered multiple other formats of the obfuscation being used to distribute a multitude of malware variants.\nIn their tweet, they use the URL \"hxxp://google.com@1157586937 ” as an example that ends up opening a Rick Roll video. While the destination is upsetting, this tweet shows two obfuscation techniques being used simultaneously:\n- The usage of an \"@” sign to obscure the destination server - The usage of alternative hostname formats to obscure the destination IP address The \"@” Sign To start, it helps to understand how a URL is structured and parsed by browsers when clicked.\nRFC1738 documents the structure for URLs. In section 3.1 (Common Internet Scheme Syntax), it lays out the basic structure for all URLs:\n<scheme>//<user>:<password>@<host>:<port>/<url-path> In section 3.3 (HTTP), it states that the format for an HTTP URL follows the structure of:\nhttp://<host>:<port>/<path>?<searchpart> The RFC specifically states that \"No user name or password is allowed.” The user name is defined as the text prior to the \"@” sign. When a browser interprets a URL with the username section populated (anything before the \"@” sign), it discards it, and sends the request to the server following the \"@” sign.\nComparing it with the URL in the tweet shows that the \"google.com” section of the URL is being treated as a username. This can be modified as needed to better trick victims to click a link in spear phishing campaigns. For example, it could be replaced with the target email address domain and become much more effective.\nAlternative Hostname Formats In the example, the digits \"1157586937” are being treated as the host. However, it’s very uncommon for a server IP address to be depicted as an integer. This is the second level of obfuscation.\nA dotted-quad IP address is a common representation of an IPv4 address, consisting of four decimal numbers separated by dots, with each decimal number representing 8 bits of the IP address. For example, the IP address 1.2.3.4 can be represented as the binary number 00000001.00000010.00000011.00000100.\nThis binary representation of an IP address can then be converted to a single integer by treating it as a single, large binary number and converting it to decimal. For example, the binary number 00000001.00000010.00000011.00000100 becomes the decimal number 16909060.\nFigure 1: Showing how the IP 1.2.3.4 translates to a decimal representation Browsers do this conversion automatically. Not only single integer representations can be used:\nHexadecimal can also be put into a dotted-quad format:\nhxxp://google.com@0xC0.0xA8.0x0.0x1 Octal is also possible:\nhxxp://google.com@0300.0250.0000.0001 They can also be mixed to create a truly confusing destination:\nhxxp://google.com@0xc0.168.0x0.1 Domains can also be used, which can be made to look like legitimate destinations:\nhxxp://legit.banking.site.com@loginportal.onlinebanking.orly/loginPortal.php There are publicly-available tools that can do this level of obfuscation. IPFuscator by Vincent Yiu, for example, generates multiple variations including mixed-type and padded values.\nIn The Wild VirusTotal shows usage dating back to at least February 2022. The continuing use of URL Schema Obfuscation is likely because it’s working for the attackers, either by decreasing detections by security tooling, or increasing the likelihood a victim clicks the link.\nOftentimes, the URL is used to download additional malware for execution. These have been seen exploiting multiple vulnerabilities to gain code execution on the victim. Most prevalently, CVE-2017-0199 usage has been detected in multiple downloaded documents, along with CVE-2017-11882. A wide range of commodity malware families have been seen using this technique to gain execution, including LOKIBOT, MATIEX, FORMBOOK, and AGENTTESLA.\nExample of Recent Abuse In February 2023, a component file of a Microsoft Word document was discovered using a YARA rule (see Appendix 1) in a VirusTotal Retrohunt. The attack chain had multiple stages, utilizing a template injection attack and an exploit, and dropping AGENTTESLA, which exfiltrated data via an encrypted Telegram channel.\nPO.docx was first seen on VirusTotal on February 6, 2023. It contains a template injection technique that runs when the document is opened, requesting the next stage of malware. If the document is decompressed, the next stage of the infection chain can be seen inside the webSettings.xml.rels file:\nFigure 2: webSettings.xml.rels file This downloads and opens the obfuscated URL: hxxp://dgdf000000ghfjfgh000000fghfghg0000000fhfghfg000000sdgfggdf00000gdfge00000rtdfgdf00000gdfg@647601465/56.doc This URL, when deobfuscated, is hxxp://38.153.157.57/56.doc . The template injection results in the following network request being made from Microsoft Word. Note the obfuscation isn’t present in network traffic; the username field has been stripped out, and the integer representation of the IP address has been changed to the dotted-quad format.\nThe downloaded document, 56.doc, was first seen on VirusTotal on February 6, 2023, the same day as PO.docx. 56.doc is an RTF file that exploits CVE-2017-11882 to download and execute hxxp://38.153.157.57/156/vbc.exe . Unlike PO.docx, this doesn’t use the URL obfuscation technique.\nThis is internally named \"NNbHhH.exe\", and is AGENTTESLA, sending stolen data via Telegram with the bot ID and token \"6010275350:AAH4W3CDRhQk0wgfyhQ_jITTy3QYmrxdDbw ” Detecting When writing a complex Regular Expression (Regex), it’s quite common to see if there’s one publicly available that can be reused, instead of starting from scratch and missing potential edge-cases that may not be known. Interestingly, the top voted StackOverflow post for a URL RegEx will fail to find URLs using these techniques. The RegEx shown on the StackOverflow answer is:\nhttps?:\\/\\/(www\\.)?{1,256}\\.[a-zA-Z0-9()]{1,6}\\b(*) Using that Regex in Regex101 shows it misses the obfuscated URL:\nIf a security, logging, or threat intelligence tool is built using this regular expression, it will be unable to successfully identify or parse out these obfuscated URLs.\nFor those on defense, network traffic analysis won’t show this technique in use. When a browser receives a request to go to a URL using this syntax, it automatically translates it to a valid destination before issuing the request. Therefore, by analyzing network traffic, you wouldn’t see an obfuscated URL.\nHowever, using file-based analysis like YARA or AV/EDR can reveal tools using URL schema obfuscation, as can process execution logs. If a program executes something like Powershell’s Invoke-WebRequest module pointing to an obfuscated URL, the obfuscated URL will be shown in the logs. As for detecting it in files, YARA rules are included that can find it in Office documents, RTFs, and PDFs.\nConclusion URL Schema Obfuscation is currently being abused to deliver malware in a variety of ways, from phishing links to template injection. Defenders need to ensure security tooling and logging systems are able to detect, identify, and parse the correct indicators to ensure defenses aren’t bypassed by using a format that isn’t RFC-compliant. In lieu of other indicators, detection of URL Schema Obfuscation using the provided YARA rules can be a malicious indicator in itself, helping to detect and prevent intrusions.\nAcknowledgements Special thanks to Connor McLaughlin and Jared Wilson for their assistance every step of the way.\nAppendix 1: YARA Rules rule M_Hunting_ObfuscatedURL_DottedQuad { meta:\nauthor = \"Mandiant\" description = \"Finds URL Schema Obfuscation of the format http://loremipsum@1.2.3.4\" strings:\n$doc = {d0 cf 11 e0} $pdf = {25 50 44 46 2D} $docx = {50 4b 03 04} $rtf = {7b 5c 72 74} $url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(\\:\\d{1,5})?/ nocase condition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url } rule M_Hunting_ObfuscatedURL_Integer { meta:\nauthor = \"Mandiant\" description = \"Finds URL Schema Obfuscation of the format http://loremipsum@16909060\" strings:\n$doc = {d0 cf 11 e0} $pdf = {25 50 44 46 2D} $docx = {50 4b 03 04} $rtf = {7b 5c 72 74} $url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@\\d{8,10}(\\:\\d{1,5})?/ nocase condition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url } rule M_Hunting_ObfuscatedURL_DottedQuadHex { meta:\nauthor = \"Mandiant\" description = \"Finds URL Schema Obfuscation of the format http://loremipsum@0x01.0x02.0x03.0x04\" strings:\n$doc = {d0 cf 11 e0} $pdf = {25 50 44 46 2D} $docx = {50 4b 03 04} $rtf = {7b 5c 72 74} $url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@0x[a-fA-F0-9]{1,2}\\.0x[a-fA-F0-9]{1,2}\\.0x[a-fA-F0-9]{1,2}\\.0x[a-fA-F0-9]{1,2}(\\:\\d{1,5})?/ nocase condition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url } rule M_Hunting_ObfuscatedURL_DottedQuadMix { meta:\nauthor = \"Mandiant\" description = \"Finds URL Schema Obfuscation of the format http://loremipsum@1.2.0x03.0x04\" strings:\n$doc = {d0 cf 11 e0} $pdf = {25 50 44 46 2D} $docx = {50 4b 03 04} $rtf = {7b 5c 72 74} $url = /https?:\\/\\/[\\w\\d\\-\\_]{1,255}\\@(0x[a-fA-F0-9]{1,2}|\\d{1,3})\\.(0x[a-fA-F0-9]{1,2}|\\d{1,3})\\.(0x[a-fA-F0-9]{1,2}|\\d{1,3})\\.(0x[a-fA-F0-9]{1,2}|\\d{1,3})(\\:\\d{1,5})?/ nocase condition:\n($doc at 0 or $docx at 0 or $pdf at 0 or $rtf at 0) and filesize < 3MB and $url } Appendix 2: Malware Families By URL",
+  "ID_list": [
+    "T1566.002"
+  ],
+  "Name_list": [
+    "Execution",
+    "Phishing",
+    "PowerShell",
+    "Template Injection"
+  ],
+  "TTP_sentences": {
+    "T1566.002": [
+      {
+        "sentence": "Don't @ Me: URL Obfuscation Through Schema Abuse Mandiant Written by: Nick Simonian A technique is being used in the distribution of multiple families of malware that obfuscates the end destination of a URL by abusing the URL schema.",
+        "score": 0.4741
+      },
+      {
+        "sentence": "Mandiant tracks this adversary methodology as \"URL Schema Obfuscation”.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "The technique could increase the likelihood of a successful phishing attack, and could cause domain extraction errors in logging or security tooling.",
+        "score": 0.4663
+      },
+      {
+        "sentence": "If a network defense tool is relying on knowing the server a URL is pointing to (e.g. checking if a domain is on a threat intel feed), it could potentially bypass it and cause gaps in visibility and coverage.",
+        "score": 0.4343
+      },
+      {
+        "sentence": "Common URL parsing logic will fail when encountering this technique, resulting in the loss of visibility into threat campaigns and actor infrastructure.",
+        "score": 0.4358
+      },
+      {
+        "sentence": "Network defenders should check if URLs abusing the schema to obfuscate the destination cause any failures in logging, visibility, or security tooling.",
+        "score": 0.4037
+      },
+      {
+        "sentence": "Initial Lead A tweet by @ankit_anubhav was observed describing a technique being used by SMOKELOADER to obfuscate URL destinations.",
+        "score": 0.4374
+      },
+      {
+        "sentence": "Mandiant’s investigation into this technique discovered multiple other formats of the obfuscation being used to distribute a multitude of malware variants.",
+        "score": 0.5062
+      },
+      {
+        "sentence": "In their tweet, they use the URL \"hxxp://google.com@1157586937 ” as an example that ends up opening a Rick Roll video.",
+        "score": 0.5571
+      },
+      {
+        "sentence": "While the destination is upsetting, this tweet shows two obfuscation techniques being used simultaneously: - The usage of an \"@” sign to obscure the destination server - The usage of alternative hostname formats to obscure the destination IP address The \"@” Sign To start, it helps to understand how a URL is structured and parsed by browsers when clicked.",
+        "score": 0.5236
+      },
+      {
+        "sentence": "RFC1738 documents the structure for URLs.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "In section 3.1 (Common Internet Scheme Syntax), it lays out the basic structure for all URLs: <scheme>//<user>:<password>@<host>:<port>/<url-path> In section 3.3 (HTTP), it states that the format for an HTTP URL follows the structure of: http://<host>:<port>/<path>?<searchpart> The RFC specifically states that \"No user name or password is allowed.” The user name is defined as the text prior to the \"@” sign.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "When a browser interprets a URL with the username section populated (anything before the \"@” sign), it discards it, and sends the request to the server following the \"@” sign.",
+        "score": 0.398
+      },
+      {
+        "sentence": "Comparing it with the URL in the tweet shows that the \"google.com” section of the URL is being treated as a username.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "This can be modified as needed to better trick victims to click a link in spear phishing campaigns.",
+        "score": 0.7316
+      },
+      {
+        "sentence": "For example, it could be replaced with the target email address domain and become much more effective.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "This is the second level of obfuscation.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "The continuing use of URL Schema Obfuscation is likely because it’s working for the attackers, either by decreasing detections by security tooling, or increasing the likelihood a victim clicks the link.",
+        "score": 0.6824
+      },
+      {
+        "sentence": "Oftentimes, the URL is used to download additional malware for execution.",
+        "score": 0.536
+      },
+      {
+        "sentence": "These have been seen exploiting multiple vulnerabilities to gain code execution on the victim.",
+        "score": 0.3427
+      },
+      {
+        "sentence": "Most prevalently, CVE-2017-0199 usage has been detected in multiple downloaded documents, along with CVE-2017-11882.",
+        "score": 0.5022
+      },
+      {
+        "sentence": "A wide range of commodity malware families have been seen using this technique to gain execution, including LOKIBOT, MATIEX, FORMBOOK, and AGENTTESLA.",
+        "score": 0.3751
+      },
+      {
+        "sentence": "Example of Recent Abuse In February 2023, a component file of a Microsoft Word document was discovered using a YARA rule (see Appendix 1) in a VirusTotal Retrohunt.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "The attack chain had multiple stages, utilizing a template injection attack and an exploit, and dropping AGENTTESLA, which exfiltrated data via an encrypted Telegram channel.",
+        "score": 0.386
+      },
+      {
+        "sentence": "PO.docx was first seen on VirusTotal on February 6, 2023.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "It contains a template injection technique that runs when the document is opened, requesting the next stage of malware.",
+        "score": 0.5277
+      },
+      {
+        "sentence": "If the document is decompressed, the next stage of the infection chain can be seen inside the webSettings.xml.rels file: Figure 2: webSettings.xml.rels file This downloads and opens the obfuscated URL: hxxp://dgdf000000ghfjfgh000000fghfghg0000000fhfghfg000000sdgfggdf00000gdfge00000rtdfgdf00000gdfg@647601465/56.doc This URL, when deobfuscated, is hxxp://38.153.157.57/56.doc .",
+        "score": 0.5705
+      },
+      {
+        "sentence": "The template injection results in the following network request being made from Microsoft Word.",
+        "score": 0.3419
+      },
+      {
+        "sentence": "The downloaded document, 56.doc, was first seen on VirusTotal on February 6, 2023, the same day as PO.docx.",
+        "score": 0.5684
+      },
+      {
+        "sentence": "56.doc is an RTF file that exploits CVE-2017-11882 to download and execute hxxp://38.153.157.57/156/vbc.exe .",
+        "score": 0.5421
+      },
+      {
+        "sentence": "Unlike PO.docx, this doesn’t use the URL obfuscation technique.",
+        "score": 0.5135
+      },
+      {
+        "sentence": "This is internally named \"NNbHhH.exe\", and is AGENTTESLA, sending stolen data via Telegram with the bot ID and token \"6010275350:AAH4W3CDRhQk0wgfyhQ_jITTy3QYmrxdDbw ” Detecting When writing a complex Regular Expression (Regex), it’s quite common to see if there’s one publicly available that can be reused, instead of starting from scratch and missing potential edge-cases that may not be known.",
+        "score": 0.389
+      },
+      {
+        "sentence": "The RegEx shown on the StackOverflow answer is: https?:\\/\\/(www\\.)?{1,256}\\.[a-zA-Z0-9()]{1,6}\\b(*) Using that Regex in Regex101 shows it misses the obfuscated URL: If a security, logging, or threat intelligence tool is built using this regular expression, it will be unable to successfully identify or parse out these obfuscated URLs.",
+        "score": 0.4386
+      },
+      {
+        "sentence": "When a browser receives a request to go to a URL using this syntax, it automatically translates it to a valid destination before issuing the request.",
+        "score": 0.4618
+      },
+      {
+        "sentence": "Therefore, by analyzing network traffic, you wouldn’t see an obfuscated URL.",
+        "score": 0.4855
+      },
+      {
+        "sentence": "However, using file-based analysis like YARA or AV/EDR can reveal tools using URL schema obfuscation, as can process execution logs.",
+        "score": 0.4144
+      },
+      {
+        "sentence": "If a program executes something like Powershell’s Invoke-WebRequest module pointing to an obfuscated URL, the obfuscated URL will be shown in the logs.",
+        "score": 0.4364
+      },
+      {
+        "sentence": "As for detecting it in files, YARA rules are included that can find it in Office documents, RTFs, and PDFs.",
+        "score": 0.4544
+      },
+      {
+        "sentence": "Conclusion URL Schema Obfuscation is currently being abused to deliver malware in a variety of ways, from phishing links to template injection.",
+        "score": 0.5769
+      },
+      {
+        "sentence": "Defenders need to ensure security tooling and logging systems are able to detect, identify, and parse the correct indicators to ensure defenses aren’t bypassed by using a format that isn’t RFC-compliant.",
+        "score": 0.4023
+      },
+      {
+        "sentence": "In lieu of other indicators, detection of URL Schema Obfuscation using the provided YARA rules can be a malicious indicator in itself, helping to detect and prevent intrusions.",
+        "score": 0.4889
+      },
+      {
+        "sentence": "Acknowledgements Special thanks to Connor McLaughlin and Jared Wilson for their assistance every step of the way.",
+        "score": 0.3329
+      }
+    ]
+  }
+}

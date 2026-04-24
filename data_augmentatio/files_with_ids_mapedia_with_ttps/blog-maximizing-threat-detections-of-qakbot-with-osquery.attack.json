@@ -1,0 +1,835 @@
+{
+  "original_txt": "Initially, Qakbot spreads using malicious email attachments, drive-by-download attacks, or other forms of social engineering. The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign. These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity. This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.\nQakbot’s Initial Infection\nThe chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.\nWindows Script File (WSF) Campaign\nThe Qakbot threat actors are distributing an archive file containing .wsf files via spam mail as part of their campaign. When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.\nThe following query can be used to detect the launching of a WSF file.\nSELECT\nname,\ncmdline,\npath,\npid,\nparent\nFROM processes\nWHERE cmdline LIKE '%.wsf%'\nAND LOWER(name) IN ('wscript.exe','cscript.exe');\nNOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.\nOneNote Campaign\nFollowing Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.\nThe attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment. However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL. For more information refer to our blog on OneNote campaign.\nThe following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.\nSELECT\np1.name AS process_name,\np1.pid AS process_pid,\np1.cmdline AS process_cmdline,\np2.name AS parent_process_name,\np2.pid AS parent_process_pid,\np2.cmdline AS parent_process_cmdline\nFROM processes p1, processes p2\nON p1.parent = p2.pid\nAND LOWER(parent_process_name) = 'onenote.exe'\nAND\n(\nprocess_cmdline LIKE '%\\AppData\\Local\\Temp\\OneNote\\%'\nAND process_cmdline LIKE '%\\Exported\\%'\nAND process_cmdline LIKE '%\\NT\\%'\n)\nAND\n(\nprocess_name IN\n(\n'rundll32.exe', 'regsvr32.exe', 'bitsadmin.exe', 'certutil.exe', 'installutil.exe',\n'schtasks.exe', 'wmic.exe', 'WmiPrvSE.exe', 'cscript.exe', 'wscript.exe',\n'cmstp.exe', 'Microsoft.Workflow.Compiler.exe', 'regasm.exe', 'regsvcs.exe', 'mshta.exe',\n'msxsl.exe', 'ieexec.exe', 'cmd.exe', 'powershell.exe', 'hh.exe', 'javaw.exe', 'pcalua.exe',\n'curl.exe', 'scriptrunner.exe', 'certoc.exe', 'workfolders.exe', 'odbcconf.exe', 'msiexec.exe', 'msdt.exe'\n)\nOR\n(\nprocess_cmdline LIKE '%.bat%'\nOR process_cmdline LIKE '%.dat%'\nOR process_cmdline LIKE '%.exe%'\nOR process_cmdline LIKE '%.hta%'\nOR process_cmdline LIKE '%.vba%'\nOR process_cmdline LIKE '%.vbe%'\nOR process_cmdline LIKE '%.vbs%'\nOR process_cmdline LIKE '%.wsh%'\nOR process_cmdline LIKE '%.wsf%'\nOR process_cmdline LIKE '%.js%'\nOR process_cmdline LIKE '%.scr%'\nOR process_cmdline LIKE '%.pif%'\nOR process_cmdline LIKE '%.cmd%'\nOR process_cmdline LIKE '%.chm%'\nOR process_cmdline LIKE '%.ps%'\nOR process_cmdline LIKE '%.lnk%'\nOR process_cmdline LIKE '%.ps1%'\nOR process_cmdline LIKE '%.ps2%'\nOR process_cmdline LIKE '%.jse%'\n)\n);\nHTML Smuggling Campaign\nBased on our observation, Qakbot malware is also being distributed via emails with HTML attachments containing malicious JavaScript code in HTML5 attributes. Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.\nAfter user clicks on the shortcut file from the mounted drive, the LNK file initiates the execution of hidden Windows 7 calculator and side-loading of Qakbot DLL.\nUsing osquery, the calculator loading DLLs from unusual file paths can be detected.\nSELECT\ndatetime,\nsource,\nprovider_name,\ncomputer_name,\neventid,\njson_extract(data,'$.EventData.Image') as process_name,\njson_extract(data,'$.EventData.ProcessId') as process_pid,\njson_extract(data,'$.EventData.ImageLoaded') as image_loaded\nFROM windows_events\nWHERE eventid = '7'\nAND process_name LIKE '%calc.exe'\nAND\n(\nimage_loaded NOT LIKE 'C:WindowsSystem32%'\nOR image_loaded NOT LIKE 'C:WindowsSysWOW64%'\n);\nQakbot’s Behaviour in Later Stages\nOnce the Qakbot DLL was loaded into the targeted machine, the following behaviors were observed.\nQakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges. This is achieved by creating a SYSTEM user account which is used to perform the task.\n\"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time}\nThe following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.\nSELECT\n*\nFROM scheduled_tasks\nWHERE\n(\naction LIKE '%/create%'\nAND action LIKE '%SYSTEM%'\nAND action LIKE '%regsvr32%'\nAND action LIKE '%-s%'\n);\nQakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.\nThe Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.\nSELECT\np1.name as process_name,\np1.pid as process_pid,\np1.cmdline as process_cmdline,\np2.name as parent_process_name,\np2.pid as parent_process_pid,\np2.cmdline as parent_process_cmdline\nFROM processes p1, processes p2\nON p2.pid = p1.parent\nAND LOWER(parent_process_name) IN ('wermgr.exe','onedrivesetup.exe','msra.exe','dxdiag.exe','xwizard.exe','atbroker.exe','mobsync.exe','certenrollctrl.exe','explorer.exe')\nAND LOWER(process_name) = 'lsass.exe';\nQakbot conducts a system discovery process to gather information about the systeminfo, ipconfig, nslookup and arp on the targeted machine, allowing the adversary to carry out lateral movement activities.\nBelow query can be used to detect Qakbot injected process executing system discovery commands.\nSELECT name,\npid,\npath,\ncmdline,\nparent\nFROM processes\nWHERE LOWER(name) IN ('wermgr.exe','onedrivesetup.exe','msra.exe','dxdiag.exe','xwizard.exe','atbroker.exe','mobsync.exe','certenrollctrl.exe','explorer.exe')\nAND\n(\ncmdline LIKE '%whoami%'\nOR cmdline LIKE '%arp%'\nOR cmdline LIKE '%ipconfig%'\nOR cmdline LIKE '%net view%'\nOR cmdline LIKE '%nslookup%'\nOR cmdline LIKE '%nltest%'\nOR cmdline LIKE '%net share%'\nOR cmdline LIKE '%netstat%'\nOR cmdline LIKE '%net localgroup%'\nOR cmdline LIKE '%qwinsta%'\n);\nNote: All the queries were tested on the Osquery version 5.6.0 & above.\nQakbot employs multiple threads to carry out its activities. One such thread involves gathering information about the compromised device and exfiltrating data to its Command and Control (C2) server.\nThese queries can be tested in a controlled, sandbox environment on below samples\nThreat Synopsis\nThreat Actors Employing Qakbot\n- TA570, Mallard Spider, Gold Lagoon, DEV-0450\n- TA577\n- FIN7, CARBON SPIDER, GOLD NIAGARA, Calcium\n- DEV-0464\n- DEV-0216\n- DEV-0506\n- DEV-0826\n- DEV-0365\n- ProLock\n- Wizard sider, TEMP.MixMaster, GOLD BLACKBURN, FIN12\n- Water Minyades, Steel Clover\n- GOLD CABIN, Shakthak, TA551, ATK236, G0127, Monster Libra\nCVE’s Exploited by Qakbot\nMalware’s Deployed by Qakbot\n- Conti\n- Prolock\n- Egregor\n- DoppelPaymer\n- REvil/Sodinokibi\n- Black Basta\nMITRE ATT&CK Techniques\n| Tactic | Technique ID | Technique Name |\n| Initial Access | T1566.001 | Phishing: Spearphishing Attachment |\n| Execution | T1204.001 T1204.002 | User Execution: Malicious Link User Execution: Malicious File |\n| Defense Evasion | T1055.012 T1218.010 T1218.011 | Process Injection: Process Hollowing System Binary Proxy Execution: Regsvr32 System Binary Proxy Execution: RunDll32 |\n| Discovery | T1033 T1047 T1049 T1082 T1518.001 | System Owner/User Discovery Windows Management Instrumentation System Network Connections Discovery System Information Discovery Security Software Discovery |\n| Persistence | T1053 | Scheduled Tasks |\n| Credential Access | T1555 | Credentials from Password Stores |\n| Command and Control | T1071 T1105 | Application Layer Protocol Ingress Tool Transfer |\n| Exfiltration | T1041 | Exfiltration Over C2 Channel |\nConclusion\nQakbot’s adaptability and constant evolution make it a significant threat to financial institutions and businesses alike. Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.\nReferences\n- https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/\n- https://www.attackiq.com/2023/01/25/emulating-qakbot/\n- https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html\n- https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails\nAuthor: Bhargav K\nSenior Threat Researcher, Loginsoft",
+  "sanitized_txt": "Initially, Qakbot spreads using malicious email attachments, drive-by-download attacks, or other forms of social engineering. The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign. These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity. This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.\nQakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.\nWindows Script File (WSF) Campaign The Qakbot threat actors are distributing an archive file containing .wsf files via spam mail as part of their campaign. When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.\nThe following query can be used to detect the launching of a WSF file.\nSELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe');\nNOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.\nOneNote Campaign Following Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.\nThe attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment. However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL. For more information refer to our blog on OneNote campaign.\nThe following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.\nSELECT p1.name AS process_name, p1.pid AS process_pid, p1.cmdline AS process_cmdline, p2.name AS parent_process_name, p2.pid AS parent_process_pid, p2.cmdline AS parent_process_cmdline FROM processes p1, processes p2 ON p1.parent = p2.pid AND LOWER(parent_process_name) = 'onenote.exe' AND ( process_cmdline LIKE '%\\AppData\\Local\\Temp\\OneNote\\%' AND process_cmdline LIKE '%\\Exported\\%' AND process_cmdline LIKE '%\\NT\\%' ) AND ( process_name IN ( 'rundll32.exe', 'regsvr32.exe', 'bitsadmin.exe', 'certutil.exe', 'installutil.exe', 'schtasks.exe', 'wmic.exe', 'WmiPrvSE.exe', 'cscript.exe', 'wscript.exe', 'cmstp.exe', 'Microsoft.Workflow.Compiler.exe', 'regasm.exe', 'regsvcs.exe', 'mshta.exe', 'msxsl.exe', 'ieexec.exe', 'cmd.exe', 'powershell.exe', 'hh.exe', 'javaw.exe', 'pcalua.exe', 'curl.exe', 'scriptrunner.exe', 'certoc.exe', 'workfolders.exe', 'odbcconf.exe', 'msiexec.exe', 'msdt.exe' ) OR ( process_cmdline LIKE '%.bat%' OR process_cmdline LIKE '%.dat%' OR process_cmdline LIKE '%.exe%' OR process_cmdline LIKE '%.hta%' OR process_cmdline LIKE '%.vba%' OR process_cmdline LIKE '%.vbe%' OR process_cmdline LIKE '%.vbs%' OR process_cmdline LIKE '%.wsh%' OR process_cmdline LIKE '%.wsf%' OR process_cmdline LIKE '%.js%' OR process_cmdline LIKE '%.scr%' OR process_cmdline LIKE '%.pif%' OR process_cmdline LIKE '%.cmd%' OR process_cmdline LIKE '%.chm%' OR process_cmdline LIKE '%.ps%' OR process_cmdline LIKE '%.lnk%' OR process_cmdline LIKE '%.ps1%' OR process_cmdline LIKE '%.ps2%' OR process_cmdline LIKE '%.jse%' ) );\nHTML Smuggling Campaign Based on our observation, Qakbot malware is also being distributed via emails with HTML attachments containing malicious JavaScript code in HTML5 attributes. Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.\nAfter user clicks on the shortcut file from the mounted drive, the LNK file initiates the execution of hidden Windows 7 calculator and side-loading of Qakbot DLL.\nUsing osquery, the calculator loading DLLs from unusual file paths can be detected.\nSELECT datetime, source, provider_name, computer_name, eventid, json_extract(data,'$.EventData.Image') as process_name, json_extract(data,'$.EventData.ProcessId') as process_pid, json_extract(data,'$.EventData.ImageLoaded') as image_loaded FROM windows_events WHERE eventid = '7' AND process_name LIKE '%calc.exe' AND ( image_loaded NOT LIKE 'C:WindowsSystem32%' OR image_loaded NOT LIKE 'C:WindowsSysWOW64%' );\nQakbot’s Behaviour in Later Stages Once the Qakbot DLL was loaded into the targeted machine, the following behaviors were observed.\nQakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges. This is achieved by creating a SYSTEM user account which is used to perform the task.\n\"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.\nSELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' );\nQakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.\nThe Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.\nSELECT p1.name as process_name, p1.pid as process_pid, p1.cmdline as process_cmdline, p2.name as parent_process_name, p2.pid as parent_process_pid, p2.cmdline as parent_process_cmdline FROM processes p1, processes p2 ON p2.pid = p1.parent AND LOWER(parent_process_name) IN ('wermgr.exe','onedrivesetup.exe','msra.exe','dxdiag.exe','xwizard.exe','atbroker.exe','mobsync.exe','certenrollctrl.exe','explorer.exe') AND LOWER(process_name) = 'lsass.exe';\nQakbot conducts a system discovery process to gather information about the systeminfo, ipconfig, nslookup and arp on the targeted machine, allowing the adversary to carry out lateral movement activities.\nBelow query can be used to detect Qakbot injected process executing system discovery commands.\nSELECT name, pid, path, cmdline, parent FROM processes WHERE LOWER(name) IN ('wermgr.exe','onedrivesetup.exe','msra.exe','dxdiag.exe','xwizard.exe','atbroker.exe','mobsync.exe','certenrollctrl.exe','explorer.exe') AND ( cmdline LIKE '%whoami%' OR cmdline LIKE '%arp%' OR cmdline LIKE '%ipconfig%' OR cmdline LIKE '%net view%' OR cmdline LIKE '%nslookup%' OR cmdline LIKE '%nltest%' OR cmdline LIKE '%net share%' OR cmdline LIKE '%netstat%' OR cmdline LIKE '%net localgroup%' OR cmdline LIKE '%qwinsta%' );\nNote: All the queries were tested on the Osquery version 5.6.0 & above.\nQakbot employs multiple threads to carry out its activities. One such thread involves gathering information about the compromised device and exfiltrating data to its Command and Control (C2) server.\nReferences - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+  "ID_list": [
+    "T1033",
+    "T1041",
+    "T1047",
+    "T1049",
+    "T1053",
+    "T1055.012",
+    "T1071",
+    "T1082",
+    "T1105",
+    "T1204.001",
+    "T1204.002",
+    "T1218.010",
+    "T1218.011",
+    "T1518.001",
+    "T1555",
+    "T1566.001"
+  ],
+  "Name_list": [
+    "CMSTP",
+    "Discovery",
+    "Execution",
+    "Impact",
+    "InstallUtil",
+    "Lateral Movement",
+    "Mshta",
+    "Persistence",
+    "Phishing",
+    "PowerShell",
+    "Regsvr32",
+    "Rundll32",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1105": [
+      {
+        "sentence": "Initially, Qakbot spreads using malicious email attachments, drive-by-download attacks, or other forms of social engineering.",
+        "score": 0.3429
+      },
+      {
+        "sentence": "The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign.",
+        "score": 0.473
+      },
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.3719
+      },
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.4455
+      },
+      {
+        "sentence": "Windows Script File (WSF) Campaign The Qakbot threat actors are distributing an archive file containing .wsf files via spam mail as part of their campaign.",
+        "score": 0.3755
+      },
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.6105
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.3393
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "OneNote Campaign Following Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.",
+        "score": 0.352
+      },
+      {
+        "sentence": "The attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment.",
+        "score": 0.4168
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.6768
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.3427
+      },
+      {
+        "sentence": "Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.",
+        "score": 0.4178
+      },
+      {
+        "sentence": "Using osquery, the calculator loading DLLs from unusual file paths can be detected.",
+        "score": 0.4741
+      },
+      {
+        "sentence": "Qakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges.",
+        "score": 0.3071
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.3024
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.312
+      },
+      {
+        "sentence": "Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.",
+        "score": 0.4095
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.3708
+      }
+    ],
+    "T1204.001": [
+      {
+        "sentence": "Initially, Qakbot spreads using malicious email attachments, drive-by-download attacks, or other forms of social engineering.",
+        "score": 0.6877
+      },
+      {
+        "sentence": "The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign.",
+        "score": 0.4022
+      },
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.3038
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "Windows Script File (WSF) Campaign The Qakbot threat actors are distributing an archive file containing .wsf files via spam mail as part of their campaign.",
+        "score": 0.3956
+      },
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.6253
+      },
+      {
+        "sentence": "OneNote Campaign Following Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.",
+        "score": 0.4973
+      },
+      {
+        "sentence": "The attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment.",
+        "score": 0.6629
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.4232
+      },
+      {
+        "sentence": "For more information refer to our blog on OneNote campaign.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.4087
+      },
+      {
+        "sentence": "Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.",
+        "score": 0.6182
+      },
+      {
+        "sentence": "After user clicks on the shortcut file from the mounted drive, the LNK file initiates the execution of hidden Windows 7 calculator and side-loading of Qakbot DLL.",
+        "score": 0.566
+      },
+      {
+        "sentence": "Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.4434
+      }
+    ],
+    "T1204.002": [
+      {
+        "sentence": "Initially, Qakbot spreads using malicious email attachments, drive-by-download attacks, or other forms of social engineering.",
+        "score": 0.6331
+      },
+      {
+        "sentence": "The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "Windows Script File (WSF) Campaign The Qakbot threat actors are distributing an archive file containing .wsf files via spam mail as part of their campaign.",
+        "score": 0.4311
+      },
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.6184
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "OneNote Campaign Following Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.",
+        "score": 0.5147
+      },
+      {
+        "sentence": "The attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment.",
+        "score": 0.7033
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.3825
+      },
+      {
+        "sentence": "For more information refer to our blog on OneNote campaign.",
+        "score": 0.3321
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.4292
+      },
+      {
+        "sentence": "Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.",
+        "score": 0.6374
+      },
+      {
+        "sentence": "After user clicks on the shortcut file from the mounted drive, the LNK file initiates the execution of hidden Windows 7 calculator and side-loading of Qakbot DLL.",
+        "score": 0.583
+      },
+      {
+        "sentence": "Using osquery, the calculator loading DLLs from unusual file paths can be detected.",
+        "score": 0.3226
+      },
+      {
+        "sentence": "Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.4195
+      }
+    ],
+    "T1566.001": [
+      {
+        "sentence": "Initially, Qakbot spreads using malicious email attachments, drive-by-download attacks, or other forms of social engineering.",
+        "score": 0.7998
+      },
+      {
+        "sentence": "The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign.",
+        "score": 0.5209
+      },
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.5543
+      },
+      {
+        "sentence": "Windows Script File (WSF) Campaign The Qakbot threat actors are distributing an archive file containing .wsf files via spam mail as part of their campaign.",
+        "score": 0.7125
+      },
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "OneNote Campaign Following Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.",
+        "score": 0.7136
+      },
+      {
+        "sentence": "The attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment.",
+        "score": 0.4886
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.3391
+      },
+      {
+        "sentence": "For more information refer to our blog on OneNote campaign.",
+        "score": 0.3827
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.",
+        "score": 0.4625
+      },
+      {
+        "sentence": "After user clicks on the shortcut file from the mounted drive, the LNK file initiates the execution of hidden Windows 7 calculator and side-loading of Qakbot DLL.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.",
+        "score": 0.5294
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.5765
+      }
+    ],
+    "T1047": [
+      {
+        "sentence": "The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign.",
+        "score": 0.3288
+      },
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.4608
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.3734
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.4245
+      },
+      {
+        "sentence": "Qakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.4788
+      },
+      {
+        "sentence": "SELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' ); Qakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.",
+        "score": 0.3761
+      },
+      {
+        "sentence": "The Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.",
+        "score": 0.3523
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "Qakbot employs multiple threads to carry out its activities.",
+        "score": 0.3384
+      }
+    ],
+    "T1055.012": [
+      {
+        "sentence": "The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign.",
+        "score": 0.3484
+      },
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.3703
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.3389
+      },
+      {
+        "sentence": "The attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment.",
+        "score": 0.3223
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "For more information refer to our blog on OneNote campaign.",
+        "score": 0.3986
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.4637
+      },
+      {
+        "sentence": "Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "Qakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges.",
+        "score": 0.4137
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.3674
+      },
+      {
+        "sentence": "SELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' ); Qakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.",
+        "score": 0.5702
+      },
+      {
+        "sentence": "The Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.",
+        "score": 0.4207
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.499
+      },
+      {
+        "sentence": "Qakbot employs multiple threads to carry out its activities.",
+        "score": 0.4246
+      },
+      {
+        "sentence": "Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.",
+        "score": 0.3187
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.3345
+      }
+    ],
+    "T1071": [
+      {
+        "sentence": "The recent variants of Qakbot employ OneNote, Windows Script File (WSF), and HTML smuggling to disseminate malware as part of a new campaign.",
+        "score": 0.3871
+      },
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.349
+      },
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.3885
+      },
+      {
+        "sentence": "Windows Script File (WSF) Campaign The Qakbot threat actors are distributing an archive file containing .wsf files via spam mail as part of their campaign.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.3446
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "OneNote Campaign Following Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "The attacker entices the victim to click on a button labeled as “Decrypt and View Message” or “Double Click to View File” within an attachment.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.3701
+      },
+      {
+        "sentence": "For more information refer to our blog on OneNote campaign.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.",
+        "score": 0.3428
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.4438
+      },
+      {
+        "sentence": "Qakbot employs multiple threads to carry out its activities.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "One such thread involves gathering information about the compromised device and exfiltrating data to its Command and Control (C2) server.",
+        "score": 0.4985
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.3234
+      }
+    ],
+    "T1049": [
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.3173
+      },
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.6437
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.315
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.436
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.386
+      },
+      {
+        "sentence": "For more information refer to our blog on OneNote campaign.",
+        "score": 0.3361
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.3428
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.3632
+      },
+      {
+        "sentence": "The Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.6069
+      },
+      {
+        "sentence": "Qakbot employs multiple threads to carry out its activities.",
+        "score": 0.3428
+      },
+      {
+        "sentence": "One such thread involves gathering information about the compromised device and exfiltrating data to its Command and Control (C2) server.",
+        "score": 0.5153
+      }
+    ],
+    "T1053": [
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.3127
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.3786
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.3046
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.4834
+      },
+      {
+        "sentence": "Using osquery, the calculator loading DLLs from unusual file paths can be detected.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "Qakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges.",
+        "score": 0.73
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.8107
+      },
+      {
+        "sentence": "SELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' ); Qakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.",
+        "score": 0.4602
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.3462
+      },
+      {
+        "sentence": "Qakbot employs multiple threads to carry out its activities.",
+        "score": 0.4493
+      },
+      {
+        "sentence": "Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.",
+        "score": 0.3019
+      }
+    ],
+    "T1518.001": [
+      {
+        "sentence": "These campaigns showcase the adaptability and sophistication of Qakbot and the constant evolution of malware as a menace to cybersecurity.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.477
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.4146
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.3982
+      },
+      {
+        "sentence": "SELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' ); Qakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.",
+        "score": 0.3169
+      },
+      {
+        "sentence": "The Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.4815
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.3556
+      }
+    ],
+    "T1033": [
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.4556
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.4633
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.5335
+      },
+      {
+        "sentence": "SELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' ); Qakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.",
+        "score": 0.3546
+      },
+      {
+        "sentence": "The Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.4478
+      },
+      {
+        "sentence": "Qakbot employs multiple threads to carry out its activities.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "One such thread involves gathering information about the compromised device and exfiltrating data to its Command and Control (C2) server.",
+        "score": 0.4076
+      }
+    ],
+    "T1041": [
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.3354
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.3388
+      },
+      {
+        "sentence": "For more information refer to our blog on OneNote campaign.",
+        "score": 0.3329
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.3036
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.3926
+      },
+      {
+        "sentence": "One such thread involves gathering information about the compromised device and exfiltrating data to its Command and Control (C2) server.",
+        "score": 0.837
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.605
+      },
+      {
+        "sentence": "Qakbot’s Initial Infection The chart below gives an overview of the campaigns carried out by threat actors over time to distribute Qakbot malware, and further we will delve into the details of these campaigns.",
+        "score": 0.3305
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.3965
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.3995
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.3095
+      },
+      {
+        "sentence": "Using osquery, the calculator loading DLLs from unusual file paths can be detected.",
+        "score": 0.366
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.4527
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.5408
+      },
+      {
+        "sentence": "Qakbot employs multiple threads to carry out its activities.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "One such thread involves gathering information about the compromised device and exfiltrating data to its Command and Control (C2) server.",
+        "score": 0.5027
+      },
+      {
+        "sentence": "Additionally, the malware’s multifaceted nature allows it to serve as an initial infection vector for ransomware and further increasing its potential impact on organizations.",
+        "score": 0.3131
+      },
+      {
+        "sentence": "References - https://thedfirreport.com/2022/02/07/qbot-likes-to-move-it-move-it/ - https://www.attackiq.com/2023/01/25/emulating-qakbot/ - https://www.trellix.com/en-us/about/newsroom/stories/research/demystifying-qbot-malware.html - https://www.fortinet.com/blog/threat-research/new-variant-of-qakbot-spread-by-phishing-emails Author: Bhargav K Senior Threat Researcher, Loginsoft",
+        "score": 0.3285
+      }
+    ],
+    "T1555": [
+      {
+        "sentence": "This article will explore Qakbot’s tactics, techniques, and procedures (TTPs) and detection of Qakbot behaviour by querying and monitoring the operating system using SQL-like syntax with the help of osquery.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "SELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' ); Qakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.",
+        "score": 0.3453
+      },
+      {
+        "sentence": "The Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.",
+        "score": 0.3836
+      }
+    ],
+    "T1218.010": [
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.4466
+      },
+      {
+        "sentence": "The following query can be used to detect the launching of a WSF file.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.4205
+      },
+      {
+        "sentence": "OneNote Campaign Following Microsoft’s decision to block macros, threat actors behind Qakbot resorted to email thread hijacking using a malicious OneNote document for wide-scale distribution by embedding scripts like JSE, CHM, HTA, MSF & BAT in the attachment.",
+        "score": 0.3166
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.444
+      },
+      {
+        "sentence": "The following osquery detects the creation of suspicious child process on execution of the script in the OneNote attachment.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "Upon opening the HTML file, the JavaScript code gets executed within the browser dropping an ISO image file.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "Using osquery, the calculator loading DLLs from unusual file paths can be detected.",
+        "score": 0.3161
+      },
+      {
+        "sentence": "Qakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges.",
+        "score": 0.416
+      },
+      {
+        "sentence": "This is achieved by creating a SYSTEM user account which is used to perform the task. \"schtasks.exe\" /Create /RU \"NT AUTHORITYSYSTEM\" /tn {RandomTaskName} /tr \"regsvr32.exe -s \"C:UsersREDACTED{QakbotDLL}\"\" /SC ONCE /Z /ST {Time} /ET {Time} The following query can be utilized to detect scheduled tasks that create a system user and registers a DLL.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "SELECT * FROM scheduled_tasks WHERE ( action LIKE '%/create%' AND action LIKE '%SYSTEM%' AND action LIKE '%regsvr32%' AND action LIKE '%-s%' ); Qakbot then attempts to inject code into a preselected list of processes to evade detection and target LSASS through an injected process to gain credentials.",
+        "score": 0.4616
+      },
+      {
+        "sentence": "The Qakbot-injected processes accessing lsass.exe for credentials can be detected using the query below.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "Below query can be used to detect Qakbot injected process executing system discovery commands.",
+        "score": 0.3161
+      }
+    ],
+    "T1218.011": [
+      {
+        "sentence": "When user attempts to open the .wsf file, the embedded JavaScript code will launch wscript which in turn downloads the Qakbot DLL.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "SELECT name, cmdline, path, pid, parent FROM processes WHERE cmdline LIKE '%.wsf%' AND LOWER(name) IN ('wscript.exe','cscript.exe'); NOTE: Further analysis is required to determine whether the WSF file exhibits any malicious behavior.",
+        "score": 0.3453
+      },
+      {
+        "sentence": "However, the concealed script executes and retrieves a malicious DLL file from a hardcoded URL.",
+        "score": 0.3942
+      },
+      {
+        "sentence": "Using osquery, the calculator loading DLLs from unusual file paths can be detected.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "Qakbot establishes persistence by creating a scheduled task that registers the Qakbot DLL to execute with elevated privileges.",
+        "score": 0.3303
+      }
+    ]
+  }
+}

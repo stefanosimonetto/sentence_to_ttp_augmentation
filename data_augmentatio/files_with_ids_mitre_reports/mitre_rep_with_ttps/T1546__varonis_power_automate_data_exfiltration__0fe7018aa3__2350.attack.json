@@ -1,0 +1,242 @@
+{
+  "original_txt": "What is Power Automate?\nPower Automate, formerly known as Microsoft Flow, allows users to automate workflows between various apps and services. Using Power Automate, you can create \"flows\" in Microsoft 365 for Outlook, SharePoint, and OneDrive to automatically share or send files, forward emails, and much more.\nAlthough this feature is powerful for day-to-day automation, it can also be used by threat actors to automate data exfiltration, C2 communication, lateral movement, and evade DLP solutions.\nHow does it work?\nPower Automate is enabled by default with Microsoft 365 applications. It allows any user to create their own flows. Flows can be created programmatically or by using the flow planner UI.\nTo create a flow, a user must first create a connection. This connection allows the flow to access the application or resource using the user’s permissions.\nAs soon as the connection is established and the flow is saved, the flow will run. Any activity performed by the flow will be logged under the user who created the connection.\nThis can be seen in the following log example from compliance.microsoft.com/auditlogsearchThis example is a log of an automated flow action where the user Ringo’s flow creates a share link for the file “Share_me.docx”. The actions are logged under the user Ringo since the connection was created with their account, but in reality, they are automated.\nHow can attackers exploit Power Automate?\nSimilar to how forwarding rules in email clients can be used for exfiltration, Power Automate flows can be used to extract not only emails but files from SharePoint and OneDrive. You can also exfiltrate data from other Microsoft 365 applications (even MSGraph).\nLet’s look at some examples.\nEmail exfiltration\nThis is not a forward rule in Outlook/Exchange and therefore forward rule creation detections and preventions will not block or detect this.\nFile exfiltration via shared links\nThe following flow creates an anonymous sharing link for every file created on the SharePoint site that the user has access to and POSTs the link via an API call to the attacker’s server.\nWhen creating a flow that uses file creation as a trigger (i.e. when a file is created do X), the flow will monitor every file created on the SharePoint site, even if the flow owner did not create the file personally. If the flow owner has permission to view the file, the flow will trigger.\nIn most environments, SharePoint permissions are complicated and difficult to maintain. As a result, many users have excessive access to information they don't need—giving attackers a large blast radius.\nA nice bonus is that if the flow is disabled for a few days, the file creations that were missed will be picked up by the re-enabled flow and sent to the attacker.\nCreating Flows with a Script\nCreating flows can be done programmatically using the flow API. Although there’s no dedicated Power Automate API, the flow endpoints can be used to query for existing connections and to create a flow.\nOur script demonstrates an attacker’s approach for business email compromise.\nOnce a Microsoft 365 account is compromised, attackers can simply execute a command that will leak sensitive data coming in, without the need to manually create the Power Automate flow.\nThe following script creates a flow called “Email Forwarding” to automatically forward all received emails to the attacker’s inbox.\nThe flow will then appear in the UI and will be enabled:\nThe flow name is customizable and can be changed to a more obscure value.\nMalicious flows can be leveraged for other activities, such as getting organizational trees from Delve, gathering SharePoint file statistics, and more.\nAbusing Flows via Azure Apps\nAs we discussed in our previous research, attackers can trick users into installing malicious Azure applications that appear to be official, Microsoft-approved code.\nOnce a user installs the malicious Azure app, a threat actor can exploit Power Automate without ever having access to the account’s credentials.\nFirst, we create an app in our attacker tenant and send a link to the victim. Clicking the link will automatically navigate the victim to Azure’s application consent landing page. Once the user consents, our application will have the necessary permissions to create a flow.\nHere we can see our malicious application requesting consent from a user to create and edit flows:\nThe application authenticates the request using a valid Microsoft domain and URL, which increases the likelihood of success.\nThis method comes with a caveat: I could not find a way to create a new Power Automate connection using the Azure app. I could only use existing connections since the application’s token does not have permissions to create a connection. This means that using Azure applications for this attack limits us to users who have already made connections in Power Automate.\nThe more fool-proof method would be to use the user’s credentials or a Power Automate authentication token. Using this method you can create connections and flows programmatically, without user interaction, and create automatic exfiltration flows as your heart desires.\nDetection and Prevention\nThe attacks we discussed describe a few vectors threat actors can use to access Power Automate in an organization.\nVaronis adds behavior-based alerting to Microsoft 365, which can detect abnormal data access and email activity based on the user’s historical baseline. This applies whether the actions are performed manually by the user, via scripts, or using Power Automate.\nThis is perhaps the most practical line of defense against Power Automate exfiltration because it doesn’t require that you write specific detection rules or manually hunt for suspicious changes in IP addresses or user agent strings.\nBehavior-based alerts are also extremely effective at detecting when a user is infected with malware that is operating under the user’s context—it’s very hard for attackers to emulate a user’s normal day-to-day behavior.\nMonitor Abnormal Authentication to the Power Automate Resource\nAzure AD monitors every login in its sign-in logs. This can be a powerful tool to monitor resource access.\nIn this case, we can look at logins made to the Power Automate (a.k.a. “Microsoft Flow Service”) resource and alert when abnormalities occur.\nThe above login event shows our script running as user Ringo and authenticating to the Microsoft Flow Service using the Azure Active Directory PowerShell application which is unexpected. Regular authentication via the UI will use the Microsoft Flow Portal application.\nAnother abnormalities you could look for include:\n- Logins from blacklisted locations\n- Logins by dedicated admin accounts\n- Abnormal data usage by a user\nMonitor PowerAutomate Flow Creations\nWe can directly look at flow logs to get an idea of newly created flows:\nNote that flow logs lack data about what exactly changed in the flow or what flow was created with what connection. However, we can still use this to get a more precise look at what happens after the user authenticates to the Power Automate resource. It might be that the user is allowed to login from every location but not to create flows from them.\nMonitor Automated Flow Activity\nAutomatic actions done by PowerAutomate are indicated by the User Agent “azure-logic-apps/*” in the logs as seen here:\nAnother thing to note is that the action is always done from an Microsoft IP, however, relying on that might cause false positives since we’re dealing with a Microsoft platform.\nUsing this indicative user agent, we can either outright alert on suspicious actions or compare the automated activity with the user’s regular activity and past automated activity to find abnormalities.\nAzure Application Monitoring\nUsing Azure applications for this attack creates a different log trace than using credentials directly. We can see the difference in the Azure AD sign-in logs:\nThe application used for authentication is the “MicrosoftOffice” app which is our malicious application (named “MicrosoftOffice” for phishing reasons), and the resource is the Microsoft Flow Service (same as before).\nMonitoring or limiting authentication to Flow service only for approved apps will limit the attack surface and, in turn, will help prevent exploitation of PowerAutomate.\nMonitoring consents given to applications can also help prevent this attack and other potentially destructive attacks.\nBlock Emails Forwarded from PowerAutomate\nDirectly block exfiltration using email by setting up controls for connectors:\nhttps://docs.microsoft.com/en-us/power-platform/admin/block-forwarded-email-from-power-automate\nReferences:\nWhat should I do now?\nBelow are three ways you can continue your journey to reduce data risk at your company:\nSchedule a demo with us to see Varonis in action. We'll personalize the session to your org's data security needs and answer any questions.\nSee a sample of our Data Risk Assessment and learn the risks that could be lingering in your environment. Varonis' DRA is completely free and offers a clear path to automated remediation.\nFollow us on LinkedIn, YouTube, and X (Twitter) for bite-sized insights on all things data security, including DSPM, threat detection, AI security, and more.",
+  "sanitized_txt": "What is Power Automate?\nPower Automate, formerly known as Microsoft Flow, allows users to automate workflows between various apps and services. Using Power Automate, you can create \"flows\" in Microsoft 365 for Outlook, SharePoint, and OneDrive to automatically share or send files, forward emails, and much more.\nAlthough this feature is powerful for day-to-day automation, it can also be used by threat actors to automate data exfiltration, C2 communication, lateral movement, and evade DLP solutions.\nHow does it work?\nPower Automate is enabled by default with Microsoft 365 applications. It allows any user to create their own flows. Flows can be created programmatically or by using the flow planner UI.\nTo create a flow, a user must first create a connection. This connection allows the flow to access the application or resource using the user’s permissions.\nAs soon as the connection is established and the flow is saved, the flow will run. Any activity performed by the flow will be logged under the user who created the connection.\nThis can be seen in the following log example from compliance.microsoft.com/auditlogsearchThis example is a log of an automated flow action where the user Ringo’s flow creates a share link for the file “Share_me.docx”. The actions are logged under the user Ringo since the connection was created with their account, but in reality, they are automated.\nHow can attackers exploit Power Automate?\nSimilar to how forwarding rules in email clients can be used for exfiltration, Power Automate flows can be used to extract not only emails but files from SharePoint and OneDrive. You can also exfiltrate data from other Microsoft 365 applications (even MSGraph).\nLet’s look at some examples.\nEmail exfiltration This is not a forward rule in Outlook/Exchange and therefore forward rule creation detections and preventions will not block or detect this.\nFile exfiltration via shared links The following flow creates an anonymous sharing link for every file created on the SharePoint site that the user has access to and POSTs the link via an API call to the attacker’s server.\nWhen creating a flow that uses file creation as a trigger (i.e. when a file is created do X), the flow will monitor every file created on the SharePoint site, even if the flow owner did not create the file personally. If the flow owner has permission to view the file, the flow will trigger.\nIn most environments, SharePoint permissions are complicated and difficult to maintain. As a result, many users have excessive access to information they don't need—giving attackers a large blast radius.\nA nice bonus is that if the flow is disabled for a few days, the file creations that were missed will be picked up by the re-enabled flow and sent to the attacker.\nCreating Flows with a Script Creating flows can be done programmatically using the flow API. Although there’s no dedicated Power Automate API, the flow endpoints can be used to query for existing connections and to create a flow.\nOur script demonstrates an attacker’s approach for business email compromise.\nOnce a Microsoft 365 account is compromised, attackers can simply execute a command that will leak sensitive data coming in, without the need to manually create the Power Automate flow.\nThe following script creates a flow called “Email Forwarding” to automatically forward all received emails to the attacker’s inbox.\nThe flow will then appear in the UI and will be enabled:\nThe flow name is customizable and can be changed to a more obscure value.\nMalicious flows can be leveraged for other activities, such as getting organizational trees from Delve, gathering SharePoint file statistics, and more.\nAbusing Flows via Azure Apps As we discussed in our previous research, attackers can trick users into installing malicious Azure applications that appear to be official, Microsoft-approved code.\nOnce a user installs the malicious Azure app, a threat actor can exploit Power Automate without ever having access to the account’s credentials.\nFirst, we create an app in our attacker tenant and send a link to the victim. Clicking the link will automatically navigate the victim to Azure’s application consent landing page. Once the user consents, our application will have the necessary permissions to create a flow.\nHere we can see our malicious application requesting consent from a user to create and edit flows:\nThe application authenticates the request using a valid Microsoft domain and URL, which increases the likelihood of success.\nThis method comes with a caveat: I could not find a way to create a new Power Automate connection using the Azure app. I could only use existing connections since the application’s token does not have permissions to create a connection. This means that using Azure applications for this attack limits us to users who have already made connections in Power Automate.\nThe more fool-proof method would be to use the user’s credentials or a Power Automate authentication token. Using this method you can create connections and flows programmatically, without user interaction, and create automatic exfiltration flows as your heart desires.\nDetection and Prevention The attacks we discussed describe a few vectors threat actors can use to access Power Automate in an organization.\nVaronis adds behavior-based alerting to Microsoft 365, which can detect abnormal data access and email activity based on the user’s historical baseline. This applies whether the actions are performed manually by the user, via scripts, or using Power Automate.\nThis is perhaps the most practical line of defense against Power Automate exfiltration because it doesn’t require that you write specific detection rules or manually hunt for suspicious changes in IP addresses or user agent strings.\nBehavior-based alerts are also extremely effective at detecting when a user is infected with malware that is operating under the user’s context—it’s very hard for attackers to emulate a user’s normal day-to-day behavior.\nMonitor Abnormal Authentication to the Power Automate Resource Azure AD monitors every login in its sign-in logs. This can be a powerful tool to monitor resource access.\nIn this case, we can look at logins made to the Power Automate (a.k.a. “Microsoft Flow Service”) resource and alert when abnormalities occur.\nThe above login event shows our script running as user Ringo and authenticating to the Microsoft Flow Service using the Azure Active Directory PowerShell application which is unexpected. Regular authentication via the UI will use the Microsoft Flow Portal application.\nAnother abnormalities you could look for include:\n- Logins from blacklisted locations - Logins by dedicated admin accounts - Abnormal data usage by a user Monitor PowerAutomate Flow Creations We can directly look at flow logs to get an idea of newly created flows:\nNote that flow logs lack data about what exactly changed in the flow or what flow was created with what connection. However, we can still use this to get a more precise look at what happens after the user authenticates to the Power Automate resource. It might be that the user is allowed to login from every location but not to create flows from them.\nMonitor Automated Flow Activity Automatic actions done by PowerAutomate are indicated by the User Agent “azure-logic-apps/*” in the logs as seen here:\nAnother thing to note is that the action is always done from an Microsoft IP, however, relying on that might cause false positives since we’re dealing with a Microsoft platform.\nUsing this indicative user agent, we can either outright alert on suspicious actions or compare the automated activity with the user’s regular activity and past automated activity to find abnormalities.\nAzure Application Monitoring Using Azure applications for this attack creates a different log trace than using credentials directly. We can see the difference in the Azure AD sign-in logs:\nThe application used for authentication is the “MicrosoftOffice” app which is our malicious application (named “MicrosoftOffice” for phishing reasons), and the resource is the Microsoft Flow Service (same as before).\nMonitoring or limiting authentication to Flow service only for approved apps will limit the attack surface and, in turn, will help prevent exploitation of PowerAutomate.\nMonitoring consents given to applications can also help prevent this attack and other potentially destructive attacks.\nBlock Emails Forwarded from PowerAutomate Directly block exfiltration using email by setting up controls for connectors:\nhttps://docs.microsoft.com/en-us/power-platform/admin/block-forwarded-email-from-power-automate References:\nWhat should I do now?\nBelow are three ways you can continue your journey to reduce data risk at your company:\nSchedule a demo with us to see Varonis in action. We'll personalize the session to your org's data security needs and answer any questions.\nSee a sample of our Data Risk Assessment and learn the risks that could be lingering in your environment. Varonis' DRA is completely free and offers a clear path to automated remediation.\nFollow us on LinkedIn, YouTube, and X (Twitter) for bite-sized insights on all things data security, including DSPM, threat detection, AI security, and more.",
+  "ID_list": [
+    "T1546"
+  ],
+  "Name_list": [
+    "Exfiltration",
+    "Lateral Movement",
+    "Phishing",
+    "PowerShell",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1546": [
+      {
+        "sentence": "What is Power Automate?",
+        "score": 0.3379
+      },
+      {
+        "sentence": "Power Automate, formerly known as Microsoft Flow, allows users to automate workflows between various apps and services.",
+        "score": 0.3663
+      },
+      {
+        "sentence": "Using Power Automate, you can create \"flows\" in Microsoft 365 for Outlook, SharePoint, and OneDrive to automatically share or send files, forward emails, and much more.",
+        "score": 0.3818
+      },
+      {
+        "sentence": "Although this feature is powerful for day-to-day automation, it can also be used by threat actors to automate data exfiltration, C2 communication, lateral movement, and evade DLP solutions.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "Power Automate is enabled by default with Microsoft 365 applications.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "To create a flow, a user must first create a connection.",
+        "score": 0.3626
+      },
+      {
+        "sentence": "This connection allows the flow to access the application or resource using the user’s permissions.",
+        "score": 0.3954
+      },
+      {
+        "sentence": "As soon as the connection is established and the flow is saved, the flow will run.",
+        "score": 0.3066
+      },
+      {
+        "sentence": "Any activity performed by the flow will be logged under the user who created the connection.",
+        "score": 0.4354
+      },
+      {
+        "sentence": "This can be seen in the following log example from compliance.microsoft.com/auditlogsearchThis example is a log of an automated flow action where the user Ringo’s flow creates a share link for the file “Share_me.docx”.",
+        "score": 0.455
+      },
+      {
+        "sentence": "The actions are logged under the user Ringo since the connection was created with their account, but in reality, they are automated.",
+        "score": 0.4555
+      },
+      {
+        "sentence": "How can attackers exploit Power Automate?",
+        "score": 0.3517
+      },
+      {
+        "sentence": "Similar to how forwarding rules in email clients can be used for exfiltration, Power Automate flows can be used to extract not only emails but files from SharePoint and OneDrive.",
+        "score": 0.3472
+      },
+      {
+        "sentence": "Email exfiltration This is not a forward rule in Outlook/Exchange and therefore forward rule creation detections and preventions will not block or detect this.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "File exfiltration via shared links The following flow creates an anonymous sharing link for every file created on the SharePoint site that the user has access to and POSTs the link via an API call to the attacker’s server.",
+        "score": 0.4114
+      },
+      {
+        "sentence": "When creating a flow that uses file creation as a trigger (i.e. when a file is created do X), the flow will monitor every file created on the SharePoint site, even if the flow owner did not create the file personally.",
+        "score": 0.5173
+      },
+      {
+        "sentence": "If the flow owner has permission to view the file, the flow will trigger.",
+        "score": 0.3017
+      },
+      {
+        "sentence": "In most environments, SharePoint permissions are complicated and difficult to maintain.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "As a result, many users have excessive access to information they don't need—giving attackers a large blast radius.",
+        "score": 0.3079
+      },
+      {
+        "sentence": "A nice bonus is that if the flow is disabled for a few days, the file creations that were missed will be picked up by the re-enabled flow and sent to the attacker.",
+        "score": 0.4186
+      },
+      {
+        "sentence": "Creating Flows with a Script Creating flows can be done programmatically using the flow API.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "Although there’s no dedicated Power Automate API, the flow endpoints can be used to query for existing connections and to create a flow.",
+        "score": 0.3574
+      },
+      {
+        "sentence": "Once a Microsoft 365 account is compromised, attackers can simply execute a command that will leak sensitive data coming in, without the need to manually create the Power Automate flow.",
+        "score": 0.4328
+      },
+      {
+        "sentence": "The following script creates a flow called “Email Forwarding” to automatically forward all received emails to the attacker’s inbox.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "Malicious flows can be leveraged for other activities, such as getting organizational trees from Delve, gathering SharePoint file statistics, and more.",
+        "score": 0.3838
+      },
+      {
+        "sentence": "Abusing Flows via Azure Apps As we discussed in our previous research, attackers can trick users into installing malicious Azure applications that appear to be official, Microsoft-approved code.",
+        "score": 0.3896
+      },
+      {
+        "sentence": "Once a user installs the malicious Azure app, a threat actor can exploit Power Automate without ever having access to the account’s credentials.",
+        "score": 0.4468
+      },
+      {
+        "sentence": "First, we create an app in our attacker tenant and send a link to the victim.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "Once the user consents, our application will have the necessary permissions to create a flow.",
+        "score": 0.385
+      },
+      {
+        "sentence": "Here we can see our malicious application requesting consent from a user to create and edit flows: The application authenticates the request using a valid Microsoft domain and URL, which increases the likelihood of success.",
+        "score": 0.3779
+      },
+      {
+        "sentence": "This method comes with a caveat: I could not find a way to create a new Power Automate connection using the Azure app.",
+        "score": 0.3841
+      },
+      {
+        "sentence": "I could only use existing connections since the application’s token does not have permissions to create a connection.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "This means that using Azure applications for this attack limits us to users who have already made connections in Power Automate.",
+        "score": 0.3999
+      },
+      {
+        "sentence": "The more fool-proof method would be to use the user’s credentials or a Power Automate authentication token.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "Using this method you can create connections and flows programmatically, without user interaction, and create automatic exfiltration flows as your heart desires.",
+        "score": 0.3754
+      },
+      {
+        "sentence": "Detection and Prevention The attacks we discussed describe a few vectors threat actors can use to access Power Automate in an organization.",
+        "score": 0.4374
+      },
+      {
+        "sentence": "Varonis adds behavior-based alerting to Microsoft 365, which can detect abnormal data access and email activity based on the user’s historical baseline.",
+        "score": 0.4684
+      },
+      {
+        "sentence": "This applies whether the actions are performed manually by the user, via scripts, or using Power Automate.",
+        "score": 0.4034
+      },
+      {
+        "sentence": "This is perhaps the most practical line of defense against Power Automate exfiltration because it doesn’t require that you write specific detection rules or manually hunt for suspicious changes in IP addresses or user agent strings.",
+        "score": 0.4067
+      },
+      {
+        "sentence": "Behavior-based alerts are also extremely effective at detecting when a user is infected with malware that is operating under the user’s context—it’s very hard for attackers to emulate a user’s normal day-to-day behavior.",
+        "score": 0.4963
+      },
+      {
+        "sentence": "Monitor Abnormal Authentication to the Power Automate Resource Azure AD monitors every login in its sign-in logs.",
+        "score": 0.4917
+      },
+      {
+        "sentence": "This can be a powerful tool to monitor resource access.",
+        "score": 0.3676
+      },
+      {
+        "sentence": "In this case, we can look at logins made to the Power Automate (a.k.a. “Microsoft Flow Service”) resource and alert when abnormalities occur.",
+        "score": 0.5455
+      },
+      {
+        "sentence": "The above login event shows our script running as user Ringo and authenticating to the Microsoft Flow Service using the Azure Active Directory PowerShell application which is unexpected.",
+        "score": 0.4625
+      },
+      {
+        "sentence": "Regular authentication via the UI will use the Microsoft Flow Portal application.",
+        "score": 0.3056
+      },
+      {
+        "sentence": "Another abnormalities you could look for include: - Logins from blacklisted locations - Logins by dedicated admin accounts - Abnormal data usage by a user Monitor PowerAutomate Flow Creations We can directly look at flow logs to get an idea of newly created flows: Note that flow logs lack data about what exactly changed in the flow or what flow was created with what connection.",
+        "score": 0.5339
+      },
+      {
+        "sentence": "However, we can still use this to get a more precise look at what happens after the user authenticates to the Power Automate resource.",
+        "score": 0.4326
+      },
+      {
+        "sentence": "It might be that the user is allowed to login from every location but not to create flows from them.",
+        "score": 0.3397
+      },
+      {
+        "sentence": "Monitor Automated Flow Activity Automatic actions done by PowerAutomate are indicated by the User Agent “azure-logic-apps/*” in the logs as seen here: Another thing to note is that the action is always done from an Microsoft IP, however, relying on that might cause false positives since we’re dealing with a Microsoft platform.",
+        "score": 0.5224
+      },
+      {
+        "sentence": "Using this indicative user agent, we can either outright alert on suspicious actions or compare the automated activity with the user’s regular activity and past automated activity to find abnormalities.",
+        "score": 0.4376
+      },
+      {
+        "sentence": "Azure Application Monitoring Using Azure applications for this attack creates a different log trace than using credentials directly.",
+        "score": 0.5456
+      },
+      {
+        "sentence": "We can see the difference in the Azure AD sign-in logs: The application used for authentication is the “MicrosoftOffice” app which is our malicious application (named “MicrosoftOffice” for phishing reasons), and the resource is the Microsoft Flow Service (same as before).",
+        "score": 0.438
+      },
+      {
+        "sentence": "Monitoring or limiting authentication to Flow service only for approved apps will limit the attack surface and, in turn, will help prevent exploitation of PowerAutomate.",
+        "score": 0.3815
+      },
+      {
+        "sentence": "Monitoring consents given to applications can also help prevent this attack and other potentially destructive attacks.",
+        "score": 0.4313
+      },
+      {
+        "sentence": "Block Emails Forwarded from PowerAutomate Directly block exfiltration using email by setting up controls for connectors: https://docs.microsoft.com/en-us/power-platform/admin/block-forwarded-email-from-power-automate References: What should I do now?",
+        "score": 0.4053
+      },
+      {
+        "sentence": "Follow us on LinkedIn, YouTube, and X (Twitter) for bite-sized insights on all things data security, including DSPM, threat detection, AI security, and more.",
+        "score": 0.3402
+      }
+    ]
+  }
+}

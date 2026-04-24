@@ -1,0 +1,322 @@
+{
+  "original_txt": "Summary\nRedLine is a stealer distributed as cracked games, applications, and services. The malware steals information from web browsers, cryptocurrency wallets, and applications such as FileZilla, Discord, Steam, Telegram, and VPN clients. The binary also gathers data about the infected machine, such as the running processes, antivirus products, installed programs, the Windows product name, the processor architecture, etc. RedLine also can be used as a malware loader or dropper for extended malicious impact. For instance, it can be used to infect the victim with additional malwares like ransomware.\nThe stealer implements the following actions that extend its functionality: Download, Download, And Execute PE files, Open Link, and Cmd. The extracted information is converted to the XML format and exfiltrated to the C2 server RedLine is considered as one of the most severe threats that are currently in the wild.\nSo I will be describing its utilities and how to prevent it.\nRedLine entrypoint\ndecrypting the c2 server using the key\nc2 Communication\nRedLine will check if it can reach the C&C server using the functions RequestConnection()\nand TryGetConnection()\n.\nThen, The stealer communicates with the c2 server using “SOAP” messages. The following SOAP requests will determine how the malware will act and the malware uses these requests to avoid infection, here are some HTTP requests I have captured using Wireshark\nnetwork communications with the C2 server, We can notice some IP addresses corresponding to VPNs or online sandboxes that the malware wants to avoid\nScanning the victim\nThe malicious process could enable/disable some functionalities based on the SOAP response. For example, by specifying a false value in the ScanWallets field, the binary doesn’t scan the system for crypto wallets, For not taking a lot of time it will skip what isn't here on the victim machine\nAnd will save the result in a structure called ScanResult:\n● An ID that corresponds to the infected machine\n● The Release ID that is hard-coded in the binary\n● The machine name which is in fact the username associated with the process\n● The OS version\n● The culture of the current input language\nLike that :\nIt’s important to know the inner structures of the ScannedFile\nclass which is used to populate the exfiltrated files. As you can see in the screenshot, once a file is being instantiated, nearly all of its important contents are stolen.\none of the interesting functions is the scandetails function which harvests data about the machine like storing data such as the antiviruses, a list of installed input languages, a list of installed programs, a list of running processes, and information about the processors and the graphics device in a class called ScanDetails, as highlighted below:\nThe malware uses the WMI to enumerate any installed security solution. It allows it to get any Antivirus, anti-spyware, and Firewall (third-party) software using the rootSecurityCenter\nstrings.\nOpenSubKey opens the “SOFTWARE\\Clients\\StartMenuInternet” registry key. The name of a browser is obtained by the function call to (GetValue) and then the path from the “shell\\open\\command” registry key:\nopening the “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall” registry key, which contains the installed programs. to get the program name and version:\nour infostealer extracts the serial number of the physical disk drives:\nThe list of running processes is retrieved by running the “SELECT * FROM Win32_Process” query. The malware creates a list that contains the session ID of the current process, the process ID and the name of a process extracted from the query, and the command line:\nThis function is used to make a list of running processes’ names and the path to the executable files:\nif-statements to decide if the infostealer will harm a machine from certain countries or not (Russians don’t play with their citizens) :\nStealing from brwosers\nRedLine is famous for its intelligence from stealing browsers, The stealer targets Chromium-based browsers like :(Chrome and Opera) and Geckobased browsers like :(Mozilla Firefox)\nit also checks the brwoser name, version, and where it has been installed too\nstealing cryptocurrencywallets\nWith their potent combination of advanced hacking techniques and stealthy operations, redline stealing crypto-wallets pose a grave threat to the security and stability of the digital currency ecosystem, RedLine targets many wallets like Armory, Exodus, Ethereum, Monero, Atomic, BinanceChain, Jaxx, Electrum, Guarda\nyou can notice (The AllWallets class)which is used for generic crypto wallets.\nStealing Telegram conversations\nRedLine look uses the GetProcessesByName()\nfunction to get the ExecutablePath\nfor Telegram running process. Then, it looks for the folder tdata\n. This is where Instant Messenger stores its session data, including images and conversations\nStealing Discord\nRedLine extracts the Discord tokens using the Discord.GetTokens()\nfunction and get chat logs from the “.log” and “.ldb” files like that :\nStealing VPN\nRedLine targets the VPN clients of the following services: NordVPN, OpenVPN, and ProtonVPN.\nRedLine stealer searches the filesystem for the “%USERPROFILE%\\AppData\\Local\\NordVPN” directory, which corresponds to the NordVPN,\nThe credentials stored in the “user. config” file are extracted by the malware :\nThen, the credentials are decoded from Base64 and then stored in Account. Username and Account.Password:\nStealing FTP\nA File Transfer Protocol (FTP) client is a software application that enables users to connect to an FTP server and transfer files between their local computer and the remote server. It provides a graphical or command-line interface that allows users to browse, upload, download, and manage files and directories on the FTP server. FTP clients authenticate users with login credentials (username and password) to establish a secure connection and facilitate file transfers using the FTP protocol.RedLine uses the ScanCredentials()\nfunction to extract the required credentials and put them in Account\nclass which will contain the URL + username + password.\nRemote Execution\nRedLine doesn't stop at being just a stealer, it also plays as a loader. RedLine takes the role of a malware loader.\nThe “DownloadAndEx” function downloads an executable and executes it by using the Process.Start function:\nsome dynamic analysis showed that executable being downloaded and executed\nLog files that have been created in hidden paths by RedLine\nIOCS\nc2 = 188.124.36.242:25802\n8.253.95.121 [fg.download.windowsupdate.com.c.footprint.net] [wu-bg-shim.trafficmanager.net] [ctldl.windowsupdate.com]\n192.229.221.95 [fp2e7a.wpc.phicdn.net] [fp2e7a.wpc.2be4.phicdn.net] [ocsp.digicert.com]\n52.40.92.150 [m.stripe.com]\nMD5:74200bd872e0b3d75b1d85332c3be083\nchildMD5:9F325813208D96F9CD73D91555363D26\nTTPS\nCOLLECTION : Data from Information Repositories T1213 |\nDEFENSE EVASION: Obfuscated Files or Information T1027 |\nDISCOVERY : File and Directory Discovery T1083 |\nQuery Registry T1012 |\nSystem Information Discovery T1082\nYARA RULES\nrule redline : infostealer\n{\nmeta:\ndescription = \"redline yara\"\nauthor = \"apophis\"\nstrings:\n$s1 = \"IRemoteEndpoint\"\n$s2 = \"ITaskProcessor\"\n$s3 = \"ScannedFile\"\n$s4 = \"ScanningArgs\"\n$s5 = \"ScanResult\"\n$s6 = \"DownloadAndExecuteUpdate\"\n$s7 = \"CommandLineUpdate\"\n$s8 = \"TryCompleteTask\"\n$s9 = \"TryGetTasks\"\n$s10 = \"TryInitBrowsers\"\n$s11 = \"InstalledBrowsers\"\n$s12 = \"asdk9345asd,asdk8jasd,ылв92р34выа,аловй,ResFac.ыал8р45,ываш9р34,ывал8н34,вал93тфыв,вашу0л34,навева,ащы9р34,ыва83о4тфыв,askd435,sdi845sa,длвап9345\"\n$s13 = \"Chr_0_M_e\"\n$s14 = \"EL3_K_Tr00M\"\n$s15 = \"BCryptSetProperty\"\n$s16 = \"E_x0_d_u_S\"\n$s17 = \"Guarda\"\n$s18 = \"g_E_c_к_0\"\n$s19 = \"C_o1_n0_mи\"\n$s20 = \"%USERPstring.ReplaceROFILE%\\\\Apstring.ReplacepData\\\\Locastring.Replacel\"\n$s21 = \"ScannedCookie\"\ncondition:\nany of them\n}",
+  "sanitized_txt": "Summary RedLine is a stealer distributed as cracked games, applications, and services. The malware steals information from web browsers, cryptocurrency wallets, and applications such as FileZilla, Discord, Steam, Telegram, and VPN clients. The binary also gathers data about the infected machine, such as the running processes, antivirus products, installed programs, the Windows product name, the processor architecture, etc. RedLine also can be used as a malware loader or dropper for extended malicious impact. For instance, it can be used to infect the victim with additional malwares like ransomware.\nThe stealer implements the following actions that extend its functionality: Download, Download, And Execute PE files, Open Link, and Cmd. The extracted information is converted to the XML format and exfiltrated to the C2 server RedLine is considered as one of the most severe threats that are currently in the wild.\nSo I will be describing its utilities and how to prevent it.\nRedLine entrypoint decrypting the c2 server using the key c2 Communication RedLine will check if it can reach the C&C server using the functions RequestConnection() and TryGetConnection() .\nThen, The stealer communicates with the c2 server using “SOAP” messages. The following SOAP requests will determine how the malware will act and the malware uses these requests to avoid infection, here are some HTTP requests I have captured using Wireshark network communications with the C2 server, We can notice some IP addresses corresponding to VPNs or online sandboxes that the malware wants to avoid Scanning the victim The malicious process could enable/disable some functionalities based on the SOAP response. For example, by specifying a false value in the ScanWallets field, the binary doesn’t scan the system for crypto wallets, For not taking a lot of time it will skip what isn't here on the victim machine And will save the result in a structure called ScanResult:\n● An ID that corresponds to the infected machine ● The Release ID that is hard-coded in the binary ● The machine name which is in fact the username associated with the process ● The OS version ● The culture of the current input language Like that :\nIt’s important to know the inner structures of the ScannedFile class which is used to populate the exfiltrated files. As you can see in the screenshot, once a file is being instantiated, nearly all of its important contents are stolen.\none of the interesting functions is the scandetails function which harvests data about the machine like storing data such as the antiviruses, a list of installed input languages, a list of installed programs, a list of running processes, and information about the processors and the graphics device in a class called ScanDetails, as highlighted below:\nThe malware uses the WMI to enumerate any installed security solution. It allows it to get any Antivirus, anti-spyware, and Firewall (third-party) software using the rootSecurityCenter strings.\nOpenSubKey opens the “SOFTWARE\\Clients\\StartMenuInternet” registry key. The name of a browser is obtained by the function call to (GetValue) and then the path from the “shell\\open\\command” registry key:\nopening the “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall” registry key, which contains the installed programs. to get the program name and version:\nour infostealer extracts the serial number of the physical disk drives:\nThe list of running processes is retrieved by running the “SELECT * FROM Win32_Process” query. The malware creates a list that contains the session ID of the current process, the process ID and the name of a process extracted from the query, and the command line:\nThis function is used to make a list of running processes’ names and the path to the executable files:\nif-statements to decide if the infostealer will harm a machine from certain countries or not (Russians don’t play with their citizens) :\nStealing from brwosers RedLine is famous for its intelligence from stealing browsers, The stealer targets Chromium-based browsers like :(Chrome and Opera) and Geckobased browsers like :(Mozilla Firefox) it also checks the brwoser name, version, and where it has been installed too stealing cryptocurrencywallets With their potent combination of advanced hacking techniques and stealthy operations, redline stealing crypto-wallets pose a grave threat to the security and stability of the digital currency ecosystem, RedLine targets many wallets like Armory, Exodus, Ethereum, Monero, Atomic, BinanceChain, Jaxx, Electrum, Guarda you can notice (The AllWallets class)which is used for generic crypto wallets.\nStealing Telegram conversations RedLine look uses the GetProcessesByName() function to get the ExecutablePath for Telegram running process. Then, it looks for the folder tdata . This is where Instant Messenger stores its session data, including images and conversations Stealing Discord RedLine extracts the Discord tokens using the Discord.GetTokens() function and get chat logs from the “.log” and “.ldb” files like that :\nStealing VPN RedLine targets the VPN clients of the following services: NordVPN, OpenVPN, and ProtonVPN.\nRedLine stealer searches the filesystem for the “%USERPROFILE%\\AppData\\Local\\NordVPN” directory, which corresponds to the NordVPN, The credentials stored in the “user. config” file are extracted by the malware :\nThen, the credentials are decoded from Base64 and then stored in Account. Username and Account.Password:\nStealing FTP A File Transfer Protocol (FTP) client is a software application that enables users to connect to an FTP server and transfer files between their local computer and the remote server. It provides a graphical or command-line interface that allows users to browse, upload, download, and manage files and directories on the FTP server. FTP clients authenticate users with login credentials (username and password) to establish a secure connection and facilitate file transfers using the FTP protocol.RedLine uses the ScanCredentials() function to extract the required credentials and put them in Account class which will contain the URL + username + password.\nRemote Execution RedLine doesn't stop at being just a stealer, it also plays as a loader. RedLine takes the role of a malware loader.\nThe “DownloadAndEx” function downloads an executable and executes it by using the Process.Start function:\ndescription = \"redline yara\" author = \"apophis\" strings:\n$s1 = \"IRemoteEndpoint\" $s2 = \"ITaskProcessor\" $s3 = \"ScannedFile\" $s4 = \"ScanningArgs\" $s5 = \"ScanResult\" $s6 = \"DownloadAndExecuteUpdate\" $s7 = \"CommandLineUpdate\" $s8 = \"TryCompleteTask\" $s9 = \"TryGetTasks\" $s10 = \"TryInitBrowsers\" $s11 = \"InstalledBrowsers\" $s12 = \"asdk9345asd,asdk8jasd,ылв92р34выа,аловй,ResFac.ыал8р45,ываш9р34,ывал8н34,вал93тфыв,вашу0л34,навева,ащы9р34,ыва83о4тфыв,askd435,sdi845sa,длвап9345\" $s13 = \"Chr_0_M_e\" $s14 = \"EL3_K_Tr00M\" $s15 = \"BCryptSetProperty\" $s16 = \"E_x0_d_u_S\" $s17 = \"Guarda\" $s18 = \"g_E_c_к_0\" $s19 = \"C_o1_n0_mи\" $s20 = \"%USERPstring.ReplaceROFILE%\\\\Apstring.ReplacepData\\\\Locastring.Replacel\" $s21 = \"ScannedCookie\" condition:\nany of them }",
+  "ID_list": [
+    "T1012",
+    "T1027",
+    "T1082",
+    "T1083",
+    "T1213"
+  ],
+  "Name_list": [
+    "Impact"
+  ],
+  "TTP_sentences": {
+    "T1027": [
+      {
+        "sentence": "Summary RedLine is a stealer distributed as cracked games, applications, and services.",
+        "score": 0.4789
+      },
+      {
+        "sentence": "The malware steals information from web browsers, cryptocurrency wallets, and applications such as FileZilla, Discord, Steam, Telegram, and VPN clients.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "The binary also gathers data about the infected machine, such as the running processes, antivirus products, installed programs, the Windows product name, the processor architecture, etc.",
+        "score": 0.3204
+      },
+      {
+        "sentence": "RedLine also can be used as a malware loader or dropper for extended malicious impact.",
+        "score": 0.548
+      },
+      {
+        "sentence": "For instance, it can be used to infect the victim with additional malwares like ransomware.",
+        "score": 0.4714
+      },
+      {
+        "sentence": "The stealer implements the following actions that extend its functionality: Download, Download, And Execute PE files, Open Link, and Cmd.",
+        "score": 0.5052
+      },
+      {
+        "sentence": "The extracted information is converted to the XML format and exfiltrated to the C2 server RedLine is considered as one of the most severe threats that are currently in the wild.",
+        "score": 0.3618
+      },
+      {
+        "sentence": "So I will be describing its utilities and how to prevent it.",
+        "score": 0.4126
+      },
+      {
+        "sentence": "RedLine entrypoint decrypting the c2 server using the key c2 Communication RedLine will check if it can reach the C&C server using the functions RequestConnection() and TryGetConnection() .",
+        "score": 0.386
+      },
+      {
+        "sentence": "The following SOAP requests will determine how the malware will act and the malware uses these requests to avoid infection, here are some HTTP requests I have captured using Wireshark network communications with the C2 server, We can notice some IP addresses corresponding to VPNs or online sandboxes that the malware wants to avoid Scanning the victim The malicious process could enable/disable some functionalities based on the SOAP response.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "OpenSubKey opens the “SOFTWARE\\Clients\\StartMenuInternet” registry key.",
+        "score": 0.3356
+      },
+      {
+        "sentence": "The name of a browser is obtained by the function call to (GetValue) and then the path from the “shell\\open\\command” registry key: opening the “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall” registry key, which contains the installed programs. to get the program name and version: our infostealer extracts the serial number of the physical disk drives: The list of running processes is retrieved by running the “SELECT * FROM Win32_Process” query.",
+        "score": 0.3679
+      },
+      {
+        "sentence": "Stealing Telegram conversations RedLine look uses the GetProcessesByName() function to get the ExecutablePath for Telegram running process.",
+        "score": 0.3452
+      },
+      {
+        "sentence": "This is where Instant Messenger stores its session data, including images and conversations Stealing Discord RedLine extracts the Discord tokens using the Discord.GetTokens() function and get chat logs from the “.log” and “.ldb” files like that : Stealing VPN RedLine targets the VPN clients of the following services: NordVPN, OpenVPN, and ProtonVPN.",
+        "score": 0.358
+      },
+      {
+        "sentence": "RedLine stealer searches the filesystem for the “%USERPROFILE%\\AppData\\Local\\NordVPN” directory, which corresponds to the NordVPN, The credentials stored in the “user. config” file are extracted by the malware : Then, the credentials are decoded from Base64 and then stored in Account.",
+        "score": 0.5586
+      },
+      {
+        "sentence": "FTP clients authenticate users with login credentials (username and password) to establish a secure connection and facilitate file transfers using the FTP protocol.RedLine uses the ScanCredentials() function to extract the required credentials and put them in Account class which will contain the URL + username + password.",
+        "score": 0.3167
+      },
+      {
+        "sentence": "Remote Execution RedLine doesn't stop at being just a stealer, it also plays as a loader.",
+        "score": 0.3904
+      },
+      {
+        "sentence": "RedLine takes the role of a malware loader.",
+        "score": 0.4867
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "Summary RedLine is a stealer distributed as cracked games, applications, and services.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "The malware steals information from web browsers, cryptocurrency wallets, and applications such as FileZilla, Discord, Steam, Telegram, and VPN clients.",
+        "score": 0.3996
+      },
+      {
+        "sentence": "The binary also gathers data about the infected machine, such as the running processes, antivirus products, installed programs, the Windows product name, the processor architecture, etc.",
+        "score": 0.6675
+      },
+      {
+        "sentence": "For instance, it can be used to infect the victim with additional malwares like ransomware.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "The stealer implements the following actions that extend its functionality: Download, Download, And Execute PE files, Open Link, and Cmd.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "The extracted information is converted to the XML format and exfiltrated to the C2 server RedLine is considered as one of the most severe threats that are currently in the wild.",
+        "score": 0.3184
+      },
+      {
+        "sentence": "RedLine entrypoint decrypting the c2 server using the key c2 Communication RedLine will check if it can reach the C&C server using the functions RequestConnection() and TryGetConnection() .",
+        "score": 0.4294
+      },
+      {
+        "sentence": "Then, The stealer communicates with the c2 server using “SOAP” messages.",
+        "score": 0.3203
+      },
+      {
+        "sentence": "The following SOAP requests will determine how the malware will act and the malware uses these requests to avoid infection, here are some HTTP requests I have captured using Wireshark network communications with the C2 server, We can notice some IP addresses corresponding to VPNs or online sandboxes that the malware wants to avoid Scanning the victim The malicious process could enable/disable some functionalities based on the SOAP response.",
+        "score": 0.3353
+      },
+      {
+        "sentence": "It allows it to get any Antivirus, anti-spyware, and Firewall (third-party) software using the rootSecurityCenter strings.",
+        "score": 0.4252
+      },
+      {
+        "sentence": "The name of a browser is obtained by the function call to (GetValue) and then the path from the “shell\\open\\command” registry key: opening the “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall” registry key, which contains the installed programs. to get the program name and version: our infostealer extracts the serial number of the physical disk drives: The list of running processes is retrieved by running the “SELECT * FROM Win32_Process” query.",
+        "score": 0.7263
+      },
+      {
+        "sentence": "Stealing Telegram conversations RedLine look uses the GetProcessesByName() function to get the ExecutablePath for Telegram running process.",
+        "score": 0.5124
+      },
+      {
+        "sentence": "Then, it looks for the folder tdata .",
+        "score": 0.3581
+      },
+      {
+        "sentence": "This is where Instant Messenger stores its session data, including images and conversations Stealing Discord RedLine extracts the Discord tokens using the Discord.GetTokens() function and get chat logs from the “.log” and “.ldb” files like that : Stealing VPN RedLine targets the VPN clients of the following services: NordVPN, OpenVPN, and ProtonVPN.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "RedLine stealer searches the filesystem for the “%USERPROFILE%\\AppData\\Local\\NordVPN” directory, which corresponds to the NordVPN, The credentials stored in the “user. config” file are extracted by the malware : Then, the credentials are decoded from Base64 and then stored in Account.",
+        "score": 0.4695
+      },
+      {
+        "sentence": "It provides a graphical or command-line interface that allows users to browse, upload, download, and manage files and directories on the FTP server.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "FTP clients authenticate users with login credentials (username and password) to establish a secure connection and facilitate file transfers using the FTP protocol.RedLine uses the ScanCredentials() function to extract the required credentials and put them in Account class which will contain the URL + username + password.",
+        "score": 0.391
+      }
+    ],
+    "T1213": [
+      {
+        "sentence": "Summary RedLine is a stealer distributed as cracked games, applications, and services.",
+        "score": 0.4322
+      },
+      {
+        "sentence": "The malware steals information from web browsers, cryptocurrency wallets, and applications such as FileZilla, Discord, Steam, Telegram, and VPN clients.",
+        "score": 0.5534
+      },
+      {
+        "sentence": "The binary also gathers data about the infected machine, such as the running processes, antivirus products, installed programs, the Windows product name, the processor architecture, etc.",
+        "score": 0.3586
+      },
+      {
+        "sentence": "The stealer implements the following actions that extend its functionality: Download, Download, And Execute PE files, Open Link, and Cmd.",
+        "score": 0.318
+      },
+      {
+        "sentence": "The extracted information is converted to the XML format and exfiltrated to the C2 server RedLine is considered as one of the most severe threats that are currently in the wild.",
+        "score": 0.5656
+      },
+      {
+        "sentence": "RedLine entrypoint decrypting the c2 server using the key c2 Communication RedLine will check if it can reach the C&C server using the functions RequestConnection() and TryGetConnection() .",
+        "score": 0.3409
+      },
+      {
+        "sentence": "Then, The stealer communicates with the c2 server using “SOAP” messages.",
+        "score": 0.359
+      },
+      {
+        "sentence": "The following SOAP requests will determine how the malware will act and the malware uses these requests to avoid infection, here are some HTTP requests I have captured using Wireshark network communications with the C2 server, We can notice some IP addresses corresponding to VPNs or online sandboxes that the malware wants to avoid Scanning the victim The malicious process could enable/disable some functionalities based on the SOAP response.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "The name of a browser is obtained by the function call to (GetValue) and then the path from the “shell\\open\\command” registry key: opening the “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall” registry key, which contains the installed programs. to get the program name and version: our infostealer extracts the serial number of the physical disk drives: The list of running processes is retrieved by running the “SELECT * FROM Win32_Process” query.",
+        "score": 0.3861
+      },
+      {
+        "sentence": "Stealing Telegram conversations RedLine look uses the GetProcessesByName() function to get the ExecutablePath for Telegram running process.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "Then, it looks for the folder tdata .",
+        "score": 0.4545
+      },
+      {
+        "sentence": "This is where Instant Messenger stores its session data, including images and conversations Stealing Discord RedLine extracts the Discord tokens using the Discord.GetTokens() function and get chat logs from the “.log” and “.ldb” files like that : Stealing VPN RedLine targets the VPN clients of the following services: NordVPN, OpenVPN, and ProtonVPN.",
+        "score": 0.6169
+      },
+      {
+        "sentence": "RedLine stealer searches the filesystem for the “%USERPROFILE%\\AppData\\Local\\NordVPN” directory, which corresponds to the NordVPN, The credentials stored in the “user. config” file are extracted by the malware : Then, the credentials are decoded from Base64 and then stored in Account.",
+        "score": 0.5665
+      },
+      {
+        "sentence": "Username and Account.Password: Stealing FTP A File Transfer Protocol (FTP) client is a software application that enables users to connect to an FTP server and transfer files between their local computer and the remote server.",
+        "score": 0.4608
+      },
+      {
+        "sentence": "It provides a graphical or command-line interface that allows users to browse, upload, download, and manage files and directories on the FTP server.",
+        "score": 0.4332
+      },
+      {
+        "sentence": "FTP clients authenticate users with login credentials (username and password) to establish a secure connection and facilitate file transfers using the FTP protocol.RedLine uses the ScanCredentials() function to extract the required credentials and put them in Account class which will contain the URL + username + password.",
+        "score": 0.5488
+      },
+      {
+        "sentence": "Remote Execution RedLine doesn't stop at being just a stealer, it also plays as a loader.",
+        "score": 0.3446
+      }
+    ],
+    "T1012": [
+      {
+        "sentence": "The malware steals information from web browsers, cryptocurrency wallets, and applications such as FileZilla, Discord, Steam, Telegram, and VPN clients.",
+        "score": 0.3821
+      },
+      {
+        "sentence": "The binary also gathers data about the infected machine, such as the running processes, antivirus products, installed programs, the Windows product name, the processor architecture, etc.",
+        "score": 0.5579
+      },
+      {
+        "sentence": "RedLine entrypoint decrypting the c2 server using the key c2 Communication RedLine will check if it can reach the C&C server using the functions RequestConnection() and TryGetConnection() .",
+        "score": 0.3246
+      },
+      {
+        "sentence": "The following SOAP requests will determine how the malware will act and the malware uses these requests to avoid infection, here are some HTTP requests I have captured using Wireshark network communications with the C2 server, We can notice some IP addresses corresponding to VPNs or online sandboxes that the malware wants to avoid Scanning the victim The malicious process could enable/disable some functionalities based on the SOAP response.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "It allows it to get any Antivirus, anti-spyware, and Firewall (third-party) software using the rootSecurityCenter strings.",
+        "score": 0.5143
+      },
+      {
+        "sentence": "OpenSubKey opens the “SOFTWARE\\Clients\\StartMenuInternet” registry key.",
+        "score": 0.6637
+      },
+      {
+        "sentence": "The name of a browser is obtained by the function call to (GetValue) and then the path from the “shell\\open\\command” registry key: opening the “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall” registry key, which contains the installed programs. to get the program name and version: our infostealer extracts the serial number of the physical disk drives: The list of running processes is retrieved by running the “SELECT * FROM Win32_Process” query.",
+        "score": 0.7495
+      },
+      {
+        "sentence": "Stealing Telegram conversations RedLine look uses the GetProcessesByName() function to get the ExecutablePath for Telegram running process.",
+        "score": 0.4284
+      },
+      {
+        "sentence": "Then, it looks for the folder tdata .",
+        "score": 0.3326
+      },
+      {
+        "sentence": "This is where Instant Messenger stores its session data, including images and conversations Stealing Discord RedLine extracts the Discord tokens using the Discord.GetTokens() function and get chat logs from the “.log” and “.ldb” files like that : Stealing VPN RedLine targets the VPN clients of the following services: NordVPN, OpenVPN, and ProtonVPN.",
+        "score": 0.3959
+      },
+      {
+        "sentence": "RedLine stealer searches the filesystem for the “%USERPROFILE%\\AppData\\Local\\NordVPN” directory, which corresponds to the NordVPN, The credentials stored in the “user. config” file are extracted by the malware : Then, the credentials are decoded from Base64 and then stored in Account.",
+        "score": 0.4744
+      }
+    ],
+    "T1083": [
+      {
+        "sentence": "The malware steals information from web browsers, cryptocurrency wallets, and applications such as FileZilla, Discord, Steam, Telegram, and VPN clients.",
+        "score": 0.3614
+      },
+      {
+        "sentence": "The binary also gathers data about the infected machine, such as the running processes, antivirus products, installed programs, the Windows product name, the processor architecture, etc.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "RedLine entrypoint decrypting the c2 server using the key c2 Communication RedLine will check if it can reach the C&C server using the functions RequestConnection() and TryGetConnection() .",
+        "score": 0.359
+      },
+      {
+        "sentence": "It allows it to get any Antivirus, anti-spyware, and Firewall (third-party) software using the rootSecurityCenter strings.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "The name of a browser is obtained by the function call to (GetValue) and then the path from the “shell\\open\\command” registry key: opening the “SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall” registry key, which contains the installed programs. to get the program name and version: our infostealer extracts the serial number of the physical disk drives: The list of running processes is retrieved by running the “SELECT * FROM Win32_Process” query.",
+        "score": 0.5858
+      },
+      {
+        "sentence": "Stealing Telegram conversations RedLine look uses the GetProcessesByName() function to get the ExecutablePath for Telegram running process.",
+        "score": 0.4465
+      },
+      {
+        "sentence": "Then, it looks for the folder tdata .",
+        "score": 0.7028
+      },
+      {
+        "sentence": "This is where Instant Messenger stores its session data, including images and conversations Stealing Discord RedLine extracts the Discord tokens using the Discord.GetTokens() function and get chat logs from the “.log” and “.ldb” files like that : Stealing VPN RedLine targets the VPN clients of the following services: NordVPN, OpenVPN, and ProtonVPN.",
+        "score": 0.3746
+      },
+      {
+        "sentence": "RedLine stealer searches the filesystem for the “%USERPROFILE%\\AppData\\Local\\NordVPN” directory, which corresponds to the NordVPN, The credentials stored in the “user. config” file are extracted by the malware : Then, the credentials are decoded from Base64 and then stored in Account.",
+        "score": 0.5167
+      },
+      {
+        "sentence": "It provides a graphical or command-line interface that allows users to browse, upload, download, and manage files and directories on the FTP server.",
+        "score": 0.6098
+      },
+      {
+        "sentence": "FTP clients authenticate users with login credentials (username and password) to establish a secure connection and facilitate file transfers using the FTP protocol.RedLine uses the ScanCredentials() function to extract the required credentials and put them in Account class which will contain the URL + username + password.",
+        "score": 0.3374
+      }
+    ]
+  }
+}

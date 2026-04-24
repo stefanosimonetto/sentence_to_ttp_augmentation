@@ -1,0 +1,230 @@
+{
+  "original_txt": "The mm-install->macos variant of the Bundlore family of macOS adware has been around for many years in many variations and delivery methods. Recently, a variant with a novel installation method was discovered. Although most of the installation details were the same or similar to the samples analyzed in the blogs above, these new samples modified the sudoers file on the infected system to remove the password requirement for privilege escalation. The malware also utilizes a form of obfuscation not observed before in this family, hiding compressed data in a resource fork on a downloaded script file.\nThese samples were observed to be installed via a malicious chrome extension (crx file). This extension was pulled from an adware site http://download[.]mycouponsmartmac[.]com and was not publicly uploaded at the time of analysis.\nAfter the MyCouponsmart extension is installed, javascript is injected into the browser that displays pop-up ads and redirects the user to a website requiring the user to download a fake Adobe Flash Player update. The software downloaded has a multi-stage installer that, once given authentication from the user, gathers system information and ultimately installs multiple adware programs as root. The installed program demonstrates persistence on the system and the capability to silently download and install software as root at any time.\nFigure 1: Fake Flash Update Page\nInterestingly, this page has a disclaimer included at the bottom informing the user that the installer may suggest installation of additional “free software offers” and that the Flash Player downloaded from the site is not affiliated with Adobe Flash.\nFigure 2: Fake Flash Update Page Disclaimer\nDetails\nThe analyzed samples were manually downloaded from a specially crafted URL from the site http://download[.]mycouponsmartmac[.]com. Each extension download URL uses a unique GUID, and changing this GUID results in the download of a different sample by hash.\nFigure 3: Chrome Extension\nAfter the downloaded MyCouponsmart extension is installed, it injects javascript code from chrome-extension://background.js into the browser which contains code to either pop up an advertisement or redirect the webpage. More details regarding this extension are covered in the Configuration Profiles section below.\nFigure 4: Extension JavaScript\nWhen the URL in the script above is visited, the user is redirected to another site (in this case, http://cshus[.]albertbucket[.]icu/) which at the time was offering a download for a fake Adobe Flash Update, which downloaded the file AdobeFlashPlayer.zip (SHA256: 98bbcced1edf5ee4d781664b8fe722262aefd1cc4e7aa22a271aa9720de56c15).\nImmediately after the Flash zip file is downloaded, the browser is redirected to a site offering the download of another Chrome extension named “Search Manager”\nFigure 5: Search Manager Extension\nThis zip file contained the disk image AdobeFlashPlayer.dmg (SHA256: f425e6b6ac74b2b3b2c8b20b56641dfa8bcdd325b3bcabe023970855cc7f129e) which was automatically mounted. The mounted DMG does not contain an installer; instead it displays an image containing an alias to a script in the mounted volume:\nFigure 6: Flash Installer Script Shortcut\nThe script extracts compressed data containing a macOS .app in a hidden resource known as a resource fork. Resource forks were introduced in the early days of the Macintosh File System (MFS) and are deprecated but are still available, even in macOS Catalina. Resource forks were originally designed to allow an executable to store multiple resources within the file, yet remain separated from the executable data. Much like Alternative Data Streams (ADS) on Windows, the data is hidden from regular file and directory viewers, and multiple “streams” or “forks” are allowed on an individual file.\nOn macOS, these forks are implemented as an extended attribute (xattr) and can be enumerated or visualized using system tools such as ls and xattr. When ls is run with the –l flag on a file that contains extended attributes, an “@” character will appear at the end of the file type and permissions listing:\nFigure 7: Listing Attributes with ls\nThis indicates that the Install.command file has extended attributes, but does not tell us what kind of attributes they are. If we run ls –l@ however, we can see the listed attributes and their sizes, including the ResourceFork:\nFigure 8: Listing Extended Attributes with ls -l@\nWe can also use the tool xattr -p to view the contents of the ResourceFork, which in this case is output in hexadecimal (I have used the system command tail below in order to truncate the results – this shows only the end of the resource contents):\nFigure 9: Printing Extended Attributes with xattr\nThe script from the analyzed sample is shown below. This script creates a temporary directory into which it will copy and execute the mm-install-macos app. The command in the second line of the script takes the last 254kb of the resource fork on the Install.command file, unzips the contents, then further decompresses the data, copying it to the previously created temporary directory. The decompressed data is a macOS .app, which the script then executes in the background.\nFigure 10: Initial Install.Command script\nImmediately after installation of the application extracted by the script, the user’s browser is redirected to another site that claims the Startup Disk is almost full, offering software to “clean” the system:\nFigure 11: Search Manager Extension\nIronically, some of the URL redirects resulting from the browser injection ultimately route through the site mackeeperaffiliates[.]com to the actual MacKeeper download page, the company who wrote up a blog post on this adware last year.\nFigure 12: MacKeeper Affiliates Page\nThe process tree for the installation of this initial script from VMware Carbon Black Cloud Enterprise EDR showing the myriad system noise created by this activity is shown below.\nFigure 13: Process Flow Diagram from Cloud Enterprise EDR\nOnce the mm-install-macos application is installed and granted root privileges, it is able to subsequently download and install additional software without re-authentication or Gatekeeper notifications. A few of the applications observed to be installed by this variant are as follows:\n- MyShopcoupon\n- mediaDownloader\n- UpToDateMac\n- EscrowSecurityAlert\n- Advanced Mac Tuneup\n- PingTrusteer\n- macOSOTA\n- Periodikal\nPingTrusteer – sudo manipulation\nFigure 14: PingTrusteer Update Process Tree (partial)\nPingTrusteer is one of the applications installed by the analyzed Bundlore variant above. This program checks for updates daily using a script pulled from http://request[.]pingtrusteer[.]com/macCheckForUpdates. The malware gains the ability to install programs with root privileges (without requiring a password) by adding the following line to /etc/sudoers file:\n<user> ALL=NOPASSWD: /Users/<user>/Applications/PingTrusteer/PingTrusteer\nSimilar to previous variants, the script as pulled from http://request[.]pingtrusteer[.]com on 2 Jun 2020 exhibited the following functionality:\n- Checks the user account to see if it is either root or has sudo (root) privileges\n- Checks the domain request[.]pingtrusteer[.]com for any updates to the software\n- Creates MD5 hash of the system’s serial number to use as a unique ID\n- Pulls the versions of the OS and installed web browsers\n- Downloads additional components to the temporary directory mmtmp=”/private/tmp/.mmupdatescripts_$(date +%Y%m%d%H%M%S)” (outlined in the table below)\n- Modifies the sudoers file to grant passwordless execution for the specified programs (PingTrusteer in this case, as seen above)\n- Compiles lists of all installed applications, profiles, LaunchAgents, and LaunchDaemons\n- Checks version of the macOS Malware Removal Tool (MRT)\n- Posts system-specific json data to the server mmp[.]myshopcouponmac[.]com\nThis script runs daily to check for updates, and will download and install additional software if offered by the update server, as discussed below.\n| File Name | Application | Description |\n| pwr.zip | mm-install-macos.app | Main Bundlore app |\n| wt.zip | webtools.app | Webtools Application |\n| imsearch.tar.gz | SearchMine | Browser search tool |\n| profile.mobileconfig | SearchMine | Configuration Profile |\n| install-nwt.bin | iwt.bin | Webtools Installer |\nConfiguration Profiles\nHighlighted in the table above, one of the methods of persistence and infection used by this variant is the creation of a custom configuration profile. Configuration profiles are typically used in enterprise, educational, or other distributed environments requiring centralized management and deployment of customized system configurations. In the case of this variant of Bundlore, the SearchMine component installed by mm-install-macos uses the configuration profile to lock several browser settings such as the default search page.\nBecause it installs these profiles from the command line with root privileges, the user is never notified. However, Apple announced this week at WWDC that they will be revoking the ability to silently install configuration profiles from the command line without user input, which will disable this ability of the malware.\nThis post from MalwareBytes details a related malware sample called Crossrider that installs a similar profile, as well as how to list and remove any malicious profiles installed. In both this Bundlore and the Crossrider samples, the configuration profile was named AdminPrefs. However, the malicious actors could easily change this name at any time by pushing a new installation script during the daily update check.\nFor example, the script originally downloads an “AdminPrefs” configuration profile template (also seen in the post referenced above) which it dynamically populates with system-specific information on the victim machine.\nThis script is configured to install different products depending on what is retrieved from the server. This allows the malware authors to dynamically change the malware installed on the system, which is all installed with root permissions due to the configuration during initial setup.\nBelow is a sample of the analyzed script which shows the download and population of the profile template. In red, the base URL parameters are shown, along with the search domain that the browser will be configured to use. In blue, the script replaces the fields in the profile template with the custom parameters, and then installs the custom profile as seen in green.\nFigure 15: Update Script Template Creation\nOnce a profile is successfully installed, there will be a new icon in the System Preferences dialog as seen below:\nFigure 16: Profiles Option Added To Preferences\nThe profiles installed depend on the browsers installed on the system, and which browser is set to default. On the analyzed system configured with Chrome as the default browser, the malware installed a profile that sets the home page, search provider, and new tab default page. As mentioned before and described in more detail below, it also installs the MyCouponsmart extension via means that render the user unable to remove it.\nThis profile configuration information is stored in plists on the system after loading. These per-user profile plists are located under a user directory under /Library/ManagedPreferences/<user>/ and define browser defaults such as the default search and home page. As mentioned, this script additionally installed a Chrome extension that is unable to be removed by the user, even with administrative privileges. This is accomplished by using the Chrome ExtensionInstallForceList key which is provided for managed enterprise computers. According to Chrome documentation:\n[ExtensionInstallForceList] Specifies a list of apps and extensions that are installed silently, without user interaction, and which cannot be uninstalled nor disabled by the user. All permissions requested by the apps/extensions are granted implicitly, without user interaction, including any additional permissions requested by future versions of the app/extension.\nThis can be seen in the script below as highlighted in red, where the extension ID is lfbenaabfliihodeianphjhhhcjgddlh and points to the URL http://download[.]shoptimizelymac[.]com for updates:\nFigure 17: Chrome ExtensionInstallForceList\nThe installed MyCouponsmart extension can be seen in the Chrome extension management page:\nFigure 18: Chrome Management\nInstalled policy information seen in the plist above can also be viewed in the Chrome policy page:\nFigure 19: Chrome Policy\nInterestingly, this installer sets the dock to “hidden” mode during install and all of the desktop items disappear while it is running as seen in the screenshot below. When this installer script was run again a week after the initial infection, two additional components were installed – macOSOTA and Periodikal, which appear to be additional Bundlore samples (not covered here, but may be analyzed for a future blog post).\nFigure 20: Installation Desktop View\nFurthermore, unlike other adware families like Smokyashan, these additional components are not installed in the usual Applications folder, but instead are installed into the user’s Application directory located in /Users/<user>/Applications. This folder is not readily visible to the user unless they navigate directly to the directory in Finder.\nFigure 21: User Applications Directory\nAlthough this variant of Bundlore is not significantly different than others seen over the last year, the additional features of manipulating the sudoers file and installation of Configuration Profiles are less commonly seen. The main takeaway however is that adware is often dismissed, but samples like the Bundlore variant analyzed in this post are able to install anything as root without any notification to the user after initial authentication. Although the only programs observed to be installed by Bundlore thus far have been adware, with root access and no additional authentication required from the user, any software could be installed with full access to the file system.\nExisting customers can learn more about how VMware Carbon Black products protect against this variant of Bundlore by visiting our “Bundlore (macOS) mm-install-macos” TAU-TIN hosted on the User Exchange.\nReferences\n“New macOS Bundlore Loader Analysis” – Confiant\n“macOS Bundlore: Mac Virus Bypassing macOS Security Features” – MacKeeper\n“New Crossrider variant installs configuration profiles on Macs” – MalwareBytes\nIndicators of Compromise\n| Indicator | Type | Context |\n| 5bbdf331b270973e9987e0163a319ef8c12bb3421e69018629cdd85bee77ff3d | SHA256 | Sample .crx |\n| 98bbcced1edf5ee4d781664b8fe722262aefd1cc4e7aa22a271aa9720de56c15 | SHA256 | Sample Flash zip file |\n| f425e6b6ac74b2b3b2c8b20b56641dfa8bcdd325b3bcabe023970855cc7f129e | SHA256 | Sample Flash DMG |\n| 2ffe27f6e3ad0af3b90cf8010d32346b | MD5 | Sample Flash DMG |\n| d44e579ca410fbe04a15e7f10c7c4fffbc758ebb589e8bfd93e7a455ef631490 | SHA256 | Sample mach-o binary |\n| 59fed4536a17b5dc39f2d81c04dfbcf1 | MD5 | Sample mach-o binary |\n| http://download[.]mycouponsmartmac[.]com | domain | URL hosting .crx |\n| http://software[.]macsoftwareserver05[.]com | domain | URL hosting mediaDownloader |\n| http://request[.]pingtrusteer[.]com | domain | PingTrusteer update server |\n| http://events[.]blitzbarbara[.]win | domain | Webtools installation server |\n| http://service[.]macinstallerinfo[.]com/ | domain | Webtools installation server |\n| http://dl[.]searchmine[.]net/ | domain | Searchmine update server |\nMITRE ATT&CK Techniques and Tactics\n| ID | Techniques | Tactics |\n| T1083 | Discovery | File and Directory Discovery |\n| T1064 | Defense Evasion, Execution | Scripting |\n| T1204 | Execution | User Execution |\n| T1176 | Persistence | Browser Extensions |\n| T1514 | Privilege Escalation | Elevated Execution with Prompt |\n| T1222 | Defense Evasion | File and Directory Permissions Modification |\n| T1158 | Defense Evasion | Hidden Files and Directories |\n| T1027 | Defense Evasion | Obfuscated Files or Information |\n| T1005 | Collection | Data from Local System |\n| T1105 | Command and Control | Remote File Copy |",
+  "sanitized_txt": "The mm-install->macos variant of the Bundlore family of macOS adware has been around for many years in many variations and delivery methods. Recently, a variant with a novel installation method was discovered. Although most of the installation details were the same or similar to the samples analyzed in the blogs above, these new samples modified the sudoers file on the infected system to remove the password requirement for privilege escalation. The malware also utilizes a form of obfuscation not observed before in this family, hiding compressed data in a resource fork on a downloaded script file.\nThese samples were observed to be installed via a malicious chrome extension (crx file). This extension was pulled from an adware site http://download[.]mycouponsmartmac[.]com and was not publicly uploaded at the time of analysis.\nAfter the MyCouponsmart extension is installed, javascript is injected into the browser that displays pop-up ads and redirects the user to a website requiring the user to download a fake Adobe Flash Player update. The software downloaded has a multi-stage installer that, once given authentication from the user, gathers system information and ultimately installs multiple adware programs as root. The installed program demonstrates persistence on the system and the capability to silently download and install software as root at any time.\nFigure 1: Fake Flash Update Page Interestingly, this page has a disclaimer included at the bottom informing the user that the installer may suggest installation of additional “free software offers” and that the Flash Player downloaded from the site is not affiliated with Adobe Flash.\nFigure 2: Fake Flash Update Page Disclaimer Details The analyzed samples were manually downloaded from a specially crafted URL from the site http://download[.]mycouponsmartmac[.]com. Each extension download URL uses a unique GUID, and changing this GUID results in the download of a different sample by hash.\nFigure 3: Chrome Extension After the downloaded MyCouponsmart extension is installed, it injects javascript code from chrome-extension://background.js into the browser which contains code to either pop up an advertisement or redirect the webpage. More details regarding this extension are covered in the Configuration Profiles section below.\nFigure 4: Extension JavaScript When the URL in the script above is visited, the user is redirected to another site (in this case, http://cshus[.]albertbucket[.]icu/) which at the time was offering a download for a fake Adobe Flash Update, which downloaded the file AdobeFlashPlayer.zip (SHA256: 98bbcced1edf5ee4d781664b8fe722262aefd1cc4e7aa22a271aa9720de56c15).\nImmediately after the Flash zip file is downloaded, the browser is redirected to a site offering the download of another Chrome extension named “Search Manager” Figure 5: Search Manager Extension This zip file contained the disk image AdobeFlashPlayer.dmg (SHA256: f425e6b6ac74b2b3b2c8b20b56641dfa8bcdd325b3bcabe023970855cc7f129e) which was automatically mounted. The mounted DMG does not contain an installer; instead it displays an image containing an alias to a script in the mounted volume:\nFigure 6: Flash Installer Script Shortcut The script extracts compressed data containing a macOS .app in a hidden resource known as a resource fork. Resource forks were introduced in the early days of the Macintosh File System (MFS) and are deprecated but are still available, even in macOS Catalina. Resource forks were originally designed to allow an executable to store multiple resources within the file, yet remain separated from the executable data. Much like Alternative Data Streams (ADS) on Windows, the data is hidden from regular file and directory viewers, and multiple “streams” or “forks” are allowed on an individual file.\nOn macOS, these forks are implemented as an extended attribute (xattr) and can be enumerated or visualized using system tools such as ls and xattr. When ls is run with the –l flag on a file that contains extended attributes, an “@” character will appear at the end of the file type and permissions listing:\nFigure 7: Listing Attributes with ls This indicates that the Install.command file has extended attributes, but does not tell us what kind of attributes they are. If we run ls –l@ however, we can see the listed attributes and their sizes, including the ResourceFork:\nFigure 8: Listing Extended Attributes with ls -l@ We can also use the tool xattr -p to view the contents of the ResourceFork, which in this case is output in hexadecimal (I have used the system command tail below in order to truncate the results – this shows only the end of the resource contents):\nFigure 9: Printing Extended Attributes with xattr The script from the analyzed sample is shown below. This script creates a temporary directory into which it will copy and execute the mm-install-macos app. The command in the second line of the script takes the last 254kb of the resource fork on the Install.command file, unzips the contents, then further decompresses the data, copying it to the previously created temporary directory. The decompressed data is a macOS .app, which the script then executes in the background.\nFigure 10: Initial Install.Command script Immediately after installation of the application extracted by the script, the user’s browser is redirected to another site that claims the Startup Disk is almost full, offering software to “clean” the system:\nFigure 11: Search Manager Extension Ironically, some of the URL redirects resulting from the browser injection ultimately route through the site mackeeperaffiliates[.]com to the actual MacKeeper download page, the company who wrote up a blog post on this adware last year.\nFigure 12: MacKeeper Affiliates Page The process tree for the installation of this initial script from VMware Carbon Black Cloud Enterprise EDR showing the myriad system noise created by this activity is shown below.\nFigure 13: Process Flow Diagram from Cloud Enterprise EDR Once the mm-install-macos application is installed and granted root privileges, it is able to subsequently download and install additional software without re-authentication or Gatekeeper notifications. A few of the applications observed to be installed by this variant are as follows:\n- MyShopcoupon - mediaDownloader - UpToDateMac - EscrowSecurityAlert - Advanced Mac Tuneup - PingTrusteer - macOSOTA - Periodikal PingTrusteer – sudo manipulation Figure 14: PingTrusteer Update Process Tree (partial) PingTrusteer is one of the applications installed by the analyzed Bundlore variant above. This program checks for updates daily using a script pulled from http://request[.]pingtrusteer[.]com/macCheckForUpdates. The malware gains the ability to install programs with root privileges (without requiring a password) by adding the following line to /etc/sudoers file:\n<user> ALL=NOPASSWD: /Users/<user>/Applications/PingTrusteer/PingTrusteer Similar to previous variants, the script as pulled from http://request[.]pingtrusteer[.]com on 2 Jun 2020 exhibited the following functionality:\n- Checks the user account to see if it is either root or has sudo (root) privileges - Checks the domain request[.]pingtrusteer[.]com for any updates to the software - Creates MD5 hash of the system’s serial number to use as a unique ID - Pulls the versions of the OS and installed web browsers - Downloads additional components to the temporary directory mmtmp=”/private/tmp/.mmupdatescripts_$(date +%Y%m%d%H%M%S)” (outlined in the table below) - Modifies the sudoers file to grant passwordless execution for the specified programs (PingTrusteer in this case, as seen above) - Compiles lists of all installed applications, profiles, LaunchAgents, and LaunchDaemons - Checks version of the macOS Malware Removal Tool (MRT) - Posts system-specific json data to the server mmp[.]myshopcouponmac[.]com This script runs daily to check for updates, and will download and install additional software if offered by the update server, as discussed below.\n| File Name | Application | Description | | pwr.zip | mm-install-macos.app | Main Bundlore app | | wt.zip | webtools.app | Webtools Application | | imsearch.tar.gz | SearchMine | Browser search tool | | profile.mobileconfig | SearchMine | Configuration Profile | | install-nwt.bin | iwt.bin | Webtools Installer | Configuration Profiles Highlighted in the table above, one of the methods of persistence and infection used by this variant is the creation of a custom configuration profile. Configuration profiles are typically used in enterprise, educational, or other distributed environments requiring centralized management and deployment of customized system configurations. In the case of this variant of Bundlore, the SearchMine component installed by mm-install-macos uses the configuration profile to lock several browser settings such as the default search page.\nBecause it installs these profiles from the command line with root privileges, the user is never notified. However, Apple announced this week at WWDC that they will be revoking the ability to silently install configuration profiles from the command line without user input, which will disable this ability of the malware.\nThis post from MalwareBytes details a related malware sample called Crossrider that installs a similar profile, as well as how to list and remove any malicious profiles installed. In both this Bundlore and the Crossrider samples, the configuration profile was named AdminPrefs. However, the malicious actors could easily change this name at any time by pushing a new installation script during the daily update check.\nFor example, the script originally downloads an “AdminPrefs” configuration profile template (also seen in the post referenced above) which it dynamically populates with system-specific information on the victim machine.\nThis script is configured to install different products depending on what is retrieved from the server. This allows the malware authors to dynamically change the malware installed on the system, which is all installed with root permissions due to the configuration during initial setup.\nBelow is a sample of the analyzed script which shows the download and population of the profile template. In red, the base URL parameters are shown, along with the search domain that the browser will be configured to use. In blue, the script replaces the fields in the profile template with the custom parameters, and then installs the custom profile as seen in green.\nFigure 15: Update Script Template Creation Once a profile is successfully installed, there will be a new icon in the System Preferences dialog as seen below:\nFigure 16: Profiles Option Added To Preferences The profiles installed depend on the browsers installed on the system, and which browser is set to default. On the analyzed system configured with Chrome as the default browser, the malware installed a profile that sets the home page, search provider, and new tab default page. As mentioned before and described in more detail below, it also installs the MyCouponsmart extension via means that render the user unable to remove it.\nThis profile configuration information is stored in plists on the system after loading. These per-user profile plists are located under a user directory under /Library/ManagedPreferences/<user>/ and define browser defaults such as the default search and home page. As mentioned, this script additionally installed a Chrome extension that is unable to be removed by the user, even with administrative privileges. This is accomplished by using the Chrome ExtensionInstallForceList key which is provided for managed enterprise computers. According to Chrome documentation:\n[ExtensionInstallForceList] Specifies a list of apps and extensions that are installed silently, without user interaction, and which cannot be uninstalled nor disabled by the user. All permissions requested by the apps/extensions are granted implicitly, without user interaction, including any additional permissions requested by future versions of the app/extension.\nThis can be seen in the script below as highlighted in red, where the extension ID is lfbenaabfliihodeianphjhhhcjgddlh and points to the URL http://download[.]shoptimizelymac[.]com for updates:\nFigure 17: Chrome ExtensionInstallForceList The installed MyCouponsmart extension can be seen in the Chrome extension management page:\nFigure 18: Chrome Management Installed policy information seen in the plist above can also be viewed in the Chrome policy page:\nFigure 19: Chrome Policy Interestingly, this installer sets the dock to “hidden” mode during install and all of the desktop items disappear while it is running as seen in the screenshot below. When this installer script was run again a week after the initial infection, two additional components were installed – macOSOTA and Periodikal, which appear to be additional Bundlore samples (not covered here, but may be analyzed for a future blog post).\nFigure 20: Installation Desktop View Furthermore, unlike other adware families like Smokyashan, these additional components are not installed in the usual Applications folder, but instead are installed into the user’s Application directory located in /Users/<user>/Applications. This folder is not readily visible to the user unless they navigate directly to the directory in Finder.\nFigure 21: User Applications Directory Although this variant of Bundlore is not significantly different than others seen over the last year, the additional features of manipulating the sudoers file and installation of Configuration Profiles are less commonly seen. The main takeaway however is that adware is often dismissed, but samples like the Bundlore variant analyzed in this post are able to install anything as root without any notification to the user after initial authentication. Although the only programs observed to be installed by Bundlore thus far have been adware, with root access and no additional authentication required from the user, any software could be installed with full access to the file system.\nExisting customers can learn more about how VMware Carbon Black products protect against this variant of Bundlore by visiting our “Bundlore (macOS) mm-install-macos” TAU-TIN hosted on the User Exchange.",
+  "ID_list": [
+    "T1564.009"
+  ],
+  "Name_list": [
+    "Execution",
+    "Persistence",
+    "Privilege Escalation",
+    "Source",
+    "Sudo"
+  ],
+  "TTP_sentences": {
+    "T1564.009": [
+      {
+        "sentence": "The mm-install->macos variant of the Bundlore family of macOS adware has been around for many years in many variations and delivery methods.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "Recently, a variant with a novel installation method was discovered.",
+        "score": 0.4163
+      },
+      {
+        "sentence": "Although most of the installation details were the same or similar to the samples analyzed in the blogs above, these new samples modified the sudoers file on the infected system to remove the password requirement for privilege escalation.",
+        "score": 0.3403
+      },
+      {
+        "sentence": "The malware also utilizes a form of obfuscation not observed before in this family, hiding compressed data in a resource fork on a downloaded script file.",
+        "score": 0.705
+      },
+      {
+        "sentence": "These samples were observed to be installed via a malicious chrome extension (crx file).",
+        "score": 0.5275
+      },
+      {
+        "sentence": "This extension was pulled from an adware site http://download[.]mycouponsmartmac[.]com and was not publicly uploaded at the time of analysis.",
+        "score": 0.4915
+      },
+      {
+        "sentence": "After the MyCouponsmart extension is installed, javascript is injected into the browser that displays pop-up ads and redirects the user to a website requiring the user to download a fake Adobe Flash Player update.",
+        "score": 0.415
+      },
+      {
+        "sentence": "The software downloaded has a multi-stage installer that, once given authentication from the user, gathers system information and ultimately installs multiple adware programs as root.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "The installed program demonstrates persistence on the system and the capability to silently download and install software as root at any time.",
+        "score": 0.3527
+      },
+      {
+        "sentence": "Figure 1: Fake Flash Update Page Interestingly, this page has a disclaimer included at the bottom informing the user that the installer may suggest installation of additional “free software offers” and that the Flash Player downloaded from the site is not affiliated with Adobe Flash.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "Figure 2: Fake Flash Update Page Disclaimer Details The analyzed samples were manually downloaded from a specially crafted URL from the site http://download[.]mycouponsmartmac[.]com.",
+        "score": 0.4503
+      },
+      {
+        "sentence": "Each extension download URL uses a unique GUID, and changing this GUID results in the download of a different sample by hash.",
+        "score": 0.4887
+      },
+      {
+        "sentence": "Figure 3: Chrome Extension After the downloaded MyCouponsmart extension is installed, it injects javascript code from chrome-extension://background.js into the browser which contains code to either pop up an advertisement or redirect the webpage.",
+        "score": 0.497
+      },
+      {
+        "sentence": "More details regarding this extension are covered in the Configuration Profiles section below.",
+        "score": 0.3275
+      },
+      {
+        "sentence": "Figure 4: Extension JavaScript When the URL in the script above is visited, the user is redirected to another site (in this case, http://cshus[.]albertbucket[.]icu/) which at the time was offering a download for a fake Adobe Flash Update, which downloaded the file AdobeFlashPlayer.zip (SHA256: 98bbcced1edf5ee4d781664b8fe722262aefd1cc4e7aa22a271aa9720de56c15).",
+        "score": 0.5416
+      },
+      {
+        "sentence": "Immediately after the Flash zip file is downloaded, the browser is redirected to a site offering the download of another Chrome extension named “Search Manager” Figure 5: Search Manager Extension This zip file contained the disk image AdobeFlashPlayer.dmg (SHA256: f425e6b6ac74b2b3b2c8b20b56641dfa8bcdd325b3bcabe023970855cc7f129e) which was automatically mounted.",
+        "score": 0.682
+      },
+      {
+        "sentence": "The mounted DMG does not contain an installer; instead it displays an image containing an alias to a script in the mounted volume: Figure 6: Flash Installer Script Shortcut The script extracts compressed data containing a macOS .app in a hidden resource known as a resource fork.",
+        "score": 0.7426
+      },
+      {
+        "sentence": "Resource forks were introduced in the early days of the Macintosh File System (MFS) and are deprecated but are still available, even in macOS Catalina.",
+        "score": 0.6035
+      },
+      {
+        "sentence": "Resource forks were originally designed to allow an executable to store multiple resources within the file, yet remain separated from the executable data.",
+        "score": 0.7628
+      },
+      {
+        "sentence": "Much like Alternative Data Streams (ADS) on Windows, the data is hidden from regular file and directory viewers, and multiple “streams” or “forks” are allowed on an individual file.",
+        "score": 0.5991
+      },
+      {
+        "sentence": "On macOS, these forks are implemented as an extended attribute (xattr) and can be enumerated or visualized using system tools such as ls and xattr.",
+        "score": 0.4967
+      },
+      {
+        "sentence": "When ls is run with the –l flag on a file that contains extended attributes, an “@” character will appear at the end of the file type and permissions listing: Figure 7: Listing Attributes with ls This indicates that the Install.command file has extended attributes, but does not tell us what kind of attributes they are.",
+        "score": 0.5686
+      },
+      {
+        "sentence": "This script creates a temporary directory into which it will copy and execute the mm-install-macos app.",
+        "score": 0.5187
+      },
+      {
+        "sentence": "The command in the second line of the script takes the last 254kb of the resource fork on the Install.command file, unzips the contents, then further decompresses the data, copying it to the previously created temporary directory.",
+        "score": 0.5844
+      },
+      {
+        "sentence": "The decompressed data is a macOS .app, which the script then executes in the background.",
+        "score": 0.5244
+      },
+      {
+        "sentence": "Figure 12: MacKeeper Affiliates Page The process tree for the installation of this initial script from VMware Carbon Black Cloud Enterprise EDR showing the myriad system noise created by this activity is shown below.",
+        "score": 0.4168
+      },
+      {
+        "sentence": "Figure 13: Process Flow Diagram from Cloud Enterprise EDR Once the mm-install-macos application is installed and granted root privileges, it is able to subsequently download and install additional software without re-authentication or Gatekeeper notifications.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "A few of the applications observed to be installed by this variant are as follows: - MyShopcoupon - mediaDownloader - UpToDateMac - EscrowSecurityAlert - Advanced Mac Tuneup - PingTrusteer - macOSOTA - Periodikal PingTrusteer – sudo manipulation Figure 14: PingTrusteer Update Process Tree (partial) PingTrusteer is one of the applications installed by the analyzed Bundlore variant above.",
+        "score": 0.4488
+      },
+      {
+        "sentence": "In the case of this variant of Bundlore, the SearchMine component installed by mm-install-macos uses the configuration profile to lock several browser settings such as the default search page.",
+        "score": 0.422
+      },
+      {
+        "sentence": "This post from MalwareBytes details a related malware sample called Crossrider that installs a similar profile, as well as how to list and remove any malicious profiles installed.",
+        "score": 0.3397
+      },
+      {
+        "sentence": "In both this Bundlore and the Crossrider samples, the configuration profile was named AdminPrefs.",
+        "score": 0.3424
+      },
+      {
+        "sentence": "However, the malicious actors could easily change this name at any time by pushing a new installation script during the daily update check.",
+        "score": 0.3398
+      },
+      {
+        "sentence": "For example, the script originally downloads an “AdminPrefs” configuration profile template (also seen in the post referenced above) which it dynamically populates with system-specific information on the victim machine.",
+        "score": 0.3124
+      },
+      {
+        "sentence": "This allows the malware authors to dynamically change the malware installed on the system, which is all installed with root permissions due to the configuration during initial setup.",
+        "score": 0.4029
+      },
+      {
+        "sentence": "Below is a sample of the analyzed script which shows the download and population of the profile template.",
+        "score": 0.3923
+      },
+      {
+        "sentence": "In red, the base URL parameters are shown, along with the search domain that the browser will be configured to use.",
+        "score": 0.4397
+      },
+      {
+        "sentence": "In blue, the script replaces the fields in the profile template with the custom parameters, and then installs the custom profile as seen in green.",
+        "score": 0.4065
+      },
+      {
+        "sentence": "Figure 15: Update Script Template Creation Once a profile is successfully installed, there will be a new icon in the System Preferences dialog as seen below: Figure 16: Profiles Option Added To Preferences The profiles installed depend on the browsers installed on the system, and which browser is set to default.",
+        "score": 0.4271
+      },
+      {
+        "sentence": "On the analyzed system configured with Chrome as the default browser, the malware installed a profile that sets the home page, search provider, and new tab default page.",
+        "score": 0.3968
+      },
+      {
+        "sentence": "As mentioned before and described in more detail below, it also installs the MyCouponsmart extension via means that render the user unable to remove it.",
+        "score": 0.4873
+      },
+      {
+        "sentence": "This profile configuration information is stored in plists on the system after loading.",
+        "score": 0.4222
+      },
+      {
+        "sentence": "These per-user profile plists are located under a user directory under /Library/ManagedPreferences/<user>/ and define browser defaults such as the default search and home page.",
+        "score": 0.4299
+      },
+      {
+        "sentence": "As mentioned, this script additionally installed a Chrome extension that is unable to be removed by the user, even with administrative privileges.",
+        "score": 0.4134
+      },
+      {
+        "sentence": "This is accomplished by using the Chrome ExtensionInstallForceList key which is provided for managed enterprise computers.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "According to Chrome documentation: [ExtensionInstallForceList] Specifies a list of apps and extensions that are installed silently, without user interaction, and which cannot be uninstalled nor disabled by the user.",
+        "score": 0.4373
+      },
+      {
+        "sentence": "All permissions requested by the apps/extensions are granted implicitly, without user interaction, including any additional permissions requested by future versions of the app/extension.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "When this installer script was run again a week after the initial infection, two additional components were installed – macOSOTA and Periodikal, which appear to be additional Bundlore samples (not covered here, but may be analyzed for a future blog post).",
+        "score": 0.4672
+      },
+      {
+        "sentence": "Figure 20: Installation Desktop View Furthermore, unlike other adware families like Smokyashan, these additional components are not installed in the usual Applications folder, but instead are installed into the user’s Application directory located in /Users/<user>/Applications.",
+        "score": 0.5782
+      },
+      {
+        "sentence": "This folder is not readily visible to the user unless they navigate directly to the directory in Finder.",
+        "score": 0.6065
+      },
+      {
+        "sentence": "Figure 21: User Applications Directory Although this variant of Bundlore is not significantly different than others seen over the last year, the additional features of manipulating the sudoers file and installation of Configuration Profiles are less commonly seen.",
+        "score": 0.4367
+      },
+      {
+        "sentence": "The main takeaway however is that adware is often dismissed, but samples like the Bundlore variant analyzed in this post are able to install anything as root without any notification to the user after initial authentication.",
+        "score": 0.39
+      },
+      {
+        "sentence": "Although the only programs observed to be installed by Bundlore thus far have been adware, with root access and no additional authentication required from the user, any software could be installed with full access to the file system.",
+        "score": 0.4361
+      },
+      {
+        "sentence": "Existing customers can learn more about how VMware Carbon Black products protect against this variant of Bundlore by visiting our “Bundlore (macOS) mm-install-macos” TAU-TIN hosted on the User Exchange.",
+        "score": 0.3927
+      }
+    ]
+  }
+}

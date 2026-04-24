@@ -1,0 +1,292 @@
+{
+  "original_txt": "Any application-defined hook procedure on my machine? | My infected computer My infected computer something strange happens inside it About Challenges Specific malware analysis Tools Any application-defined hook procedure on my\\xc2 machine? Posted by zairon on December 6, 2006 Posted in: Reverse Engineering. 9 Comments Some times ago my antivirus didn\\xe2\\x80\\x99t recognize a malware on my machine; the malware installed a keylogger and it did run silently in background for some hours. In general, you can discover the presence of a keylogger looking at the net traffic log or looking for some suspicious file name inside the task manager list but sometimes an application able to find out hooks will come in handy. At first I tried to find some informations browsing the net without luck. Hmm, no one has written such a program before? Is it possible or am I unable to use google??? I only got one usefull hint about the problem, nothing else. Well, I decided to take a look at the problem. All my investigations are done under Windows XP/SP1. Before starting with the analysis I want to show you the declaration of the function used to set a windows hook: HHOOK SetWindowsHookEx( int idHook, // Specifies the type of hook procedure to be installed. HOOKPROC lpfn, // Pointer to the hook procedure HINSTANCE hMod, // Handle to the DLL containing the hook procedure pointed to by the lpfn parameter DWORD dwThreadId // Specifies the identifier of the thread with which the hook procedure is to be associated ); It\\xe2\\x80\\x99s always good to know which parameters are passed to the function because you\\xe2\\x80\\x99ll have to deal with them later. Ok, time to start\\xe2\\x80\\xa6 A possible starting point is represented by win32k.sys file, it\\xe2\\x80\\x99s everything inside it. Looking at the implementation of SetWindowsHookEx I\\xe2\\x80\\x99ve seen a call to HMAllocObject. This function is not really known but if you have ever read \\xe2\\x80\\x98Using Softice\\xe2\\x80\\x99 help file you surely read the phrase: \\xe2\\x80\\x9cThe routine HMAllocObject creates USER object types\\xe2\\x80\\xa6\\xe2\\x80\\x9d. Interesting, setting a bpx over the function I got the following informations: .text:BF853AAB push 34h ; nBytes .text:BF853AAD push 5 ; TYPE_HOOK .text:BF853AAF push dword ptr [edi+3Ch] ; PTHREADINFO.rpdesk .text:BF853AB2 push edi ; PTHREADINFO .text:BF853AB3 call _HMAllocObject@16 ; HMAllocObject(x,x,x,x) The function takes four parameters and the 3\\xc2\\xb0 parameter is related with the type of object that is created. In this specific case I\\xe2\\x80\\x99m dealing with hook so the type is TYPE_HOOK and HMAllocObject returns a pointer to a structure named HOOK, it contains general informations about the new object and it looks like: typedef struct _HOOK { ULONG hHook; ULONG cLockObj; PTHREADINFO pti; ULONG rpdesk; ULONG pSelf; struct _HOOK *phkNext; int iHook; ULONG offPfn; unsigned int flags; int ihmod; PTHREADINFO ptiHooked; PDESKTOP rpdesk; } HOOK, *PHOOK; Fields: \\xe2\\x80\\x93 hHook Handle to the hook procedure, it\\xe2\\x80\\x99s the value returned by SetWindowsHookEx and it comes from HMAllocObject \\xe2\\x80\\x93 clockObj !?! \\xe2\\x80\\x93 pti Pointer to THREADINFO structure of the process which sets the hook \\xe2\\x80\\x93 rpdesk !?! \\xe2\\x80\\x93 pSelf Pointer to this HOOK structure \\xe2\\x80\\x93 phkNext Next structure in the hook chain \\xe2\\x80\\x93 iHook Hook type (i.e. WH_MOUSE or WH_KEYBOARD). This is the first parameter passed to SetWindowsHookEx \\xe2\\x80\\x93 offPfn Offset of the filter procedure, it is obtained by a simple substration between the address of the hook procedure and the initial address of the dll \\xe2\\x80\\x93 flags HF_xxx flags (HF_GLOBALS, HF_LOCAL, HF_DESTROYED\\xe2\\x80\\xa6) \\xe2\\x80\\x93 ihmod Number of hooks set into the module \\xe2\\x80\\x93 ptiHooked Pointer to THREADINFO structure of the hooked thread. If HF_GLOBAL is setted the pointer is setted to NULL because the hook works for every running thread \\xe2\\x80\\x93 rpdesk !?! As you can see the fields are not all explained, I\\xe2\\x80\\x99ll try to gain more informations. Some of the fields are filled by HMAllocObject itself and they are non TYPE_HOOK related field; I mean, the HOOK structure contains informations about the hook you want to install (i.e. the hook type, the offset of the filter procedure) and informations not so strictly related with the hook (i.e. phkNext, pSelf). Since of all the work is done trying to understand if there are global hooks installed on the system I\\xe2\\x80\\x99m only interested in TYPE_HOOK related fields and these are: 1. pti pti is really usefull because it gives me the possibility to access the process that has installed the hook. The first dword of THREADINFO structure is the pointer to ETHREAD structure which contains a pointer to EPROCESS structure. Once you have EPROCESS you can read the image file name (Imagfilename field) and the pid (UniqueProcessId) of the process that has setted the hook. At this point you can also read which dlls are loaded by the process or get any other usefull informations about it, especially which dll has the filter procedure inside. If you are not totally confident with undocumented structures you can even retrieve the informations using functions from Psapi library (i.e. EnumProcessModules/GetModuleFileNameEx to obtain a loaded dll\\xe2\\x80\\xa6). 2. iHook without it you won\\xe2\\x80\\x99t be able to know which hook was installed. 3. offPfn only necessary if you want to know where the filter procedure is located at. Starting from the HOOK structure I can retrieve all the needed informations about the HOOK but I need a fundamental information, maybe the most important one. Where can I find the HOOK structure? As I said before I only got an hint about the problem, it comes from an old thread at sysinternals forum (htt://forum.sysinternals.com/); I don\\xe2\\x80\\x99t remember the name of the user, thanks to him btw. The hint sounds like: \\xe2\\x80\\x9clook at aphkStart\\xe2\\x80\\x9d, nothing else. aphkStart is defined as: PHOOK aphkStart[CWINHOOKS]; It\\xe2\\x80\\x99s an array of pointers to HOOK structure, one for each possible WH_xxx hook; the pointer at index \\xe2\\x80\\x98i\\xe2\\x80\\x99 is NULL if you are not under the hook. As far as I have seen there are two aphkStart arrays, one for local hooks (inside THREADINFO structure) and one for global hooks (inside DESKTOPINFO structure). To find out if a global hook has been installed you only have to scan the entire aphkStart array (the one inside DESKTOPINFO) looking for a not NULL entry, if you find it you are under a global hook. The picture below represents a little sum-up. You start from the TEB of the current process, the process that check the installed hooks. When you have the TEB you can pass through some structures: 1. From TEB.Win32ThreadInfo you get THREADINFO structure 2. From THREADINFO.pDeskInfo you get DESKTOPINFO structure 3. If DESKTOPINFO.aphkStart[i] is not NULL you get HOOK structure of WH_i hook otherwise WH_i hook is not installed and you can check the next one, WH_i+1 4. From HOOK.pti you get THREADINFO structure of the process that has setted the hook 5. From THREADINFO.pEthread you get ETHREAD structure 6. From ETHREAD.ThreadsProcess you get EPROCESS structure Inside EPROCESS there are many informations about the process, just read the necessary ones. Advertisements Share this: Twitter LinkedIn Facebook Reddit Like this: Like Loading... Related Posts navigation \\xe2\\x86\\x90 My little hook\\xc2 analyzer Original anti Ollydbg \\xe2\\x86\\x92 9 comments on \\xe2\\x80\\x9cAny application-defined hook procedure on my\\xc2 machine?\\xe2\\x80\\x9d Chris Hall on December 20, 2007 at 1:35 pm said: Where can I find information relating to the various structs you refer to? e.g. THREADINFO, DESKTOPINFO Thanks Reply zairon on December 20, 2007 at 4:43 pm said: I usually use WinDbg or .h file I have on my machine, but the net is a good alternative way. I don\\xe2\\x80\\x99t remember where I got the information about the structure you mentioned, and I don\\xe2\\x80\\x99t have on my hard disk anymore (it\\xe2\\x80\\x99s dead\\xe2\\x80\\xa6). If you want to know something more about these specific structures you can use Windbg starting from _TEB (which is visible from Windbg for sure). In case I\\xe2\\x80\\x99ll find the structure\\xe2\\x80\\x99s definitions I\\xe2\\x80\\x99ll tell you. Reply Ermac on December 30, 2007 at 4:17 am said: Hello Zairon, Great article! Is there any way you could please post a source code example that you can share to list these hooks on Windows XP? I\\xe2\\x80\\x99m finding that these structures are rather confusing because most of the struct member names are very similar. Reply Hejo on September 8, 2008 at 1:57 pm said: Hello Zairon, stumbled over this old article of yours and I\\xe2\\x80\\x99m trying to construct a HookExplorer but keep finding my self in the deep end of the pool\\xe2\\x80\\xa6. might be in over my head\\xe2\\x80\\xa6 You couldn\\xe2\\x80\\x99t by any chance post a complete example or mail me some source? Regards Reply kalimako on September 10, 2008 at 8:55 pm said: I finally get the HOOK struct, I\\xe2\\x80\\x99m interested on global hooks only. I get all information about my machine\\xe2\\x80\\x99s global hooks, but I have no idea how to get the module of the hook procedure, I mean, in the hook struct typedef struct tagHOOK { /* hk */ THRDESKHEAD head; struct tagHOOK* pNext; int iHook; PVOID pfn; UINT flags; int imod; PTHREADINFO ptiHooked; PDESKTOP rpdesk; } HOOK; pfn -> is the offset of the procedure in the module\\xe2\\x80\\xa6 imod -> I assume that points to a module, but I have no idea how to translate that to a real dll path. help! Reply mateus on March 30, 2010 at 12:54 am said: Hello, great article and great info! I\\xe2\\x80\\x99m not sure what I\\xe2\\x80\\x99m doing wrong. Or maybe I\\xe2\\x80\\x99m missing something. I have gotten all the code to compile, and (using kernel debugger) am able to look at the structure for THREADINFO. The address all look good (refCount of_W32THREAD, pETHREAD, etc\\xe2\\x80\\xa6 However, my THREADINFO.pDeskInfo has an address of:0xbc640650. At which point, when i try to look at that memory address, i get a bunch of ????. Any clues as to what I could be doing wrong? Reply TBFisher on December 16, 2010 at 2:39 am said: THANKS! You have saved the day!! I have an app that depends heavily on a thread-specific hook in a listview control in a native C++ app. The OS(XP SP3) was arbitrarily dumping my HookProc and I had no way of easily detecting when the problem occurred. I used the methods in your code to build a DLL that allows me to monitor the status of my HookProc and reset it when necessary. Thanks again\\xe2\\x80\\xa6 TF Reply zairon on January 10, 2011 at 3:42 pm said: Glad to see someone finds it usefull! Thanks to you :) Reply Alexander on March 20, 2011 at 1:08 pm said: TBFisher, could you PLEASE share sourcecode of the function that checks status of the hook? I have the same problem\\xe2\\x80\\xa6 Reply Leave a Reply Cancel reply Enter your comment here... Fill in your details below or click an icon to log in: Email (required) (Address never made public) Name (required) Website You are commenting using your WordPress.com account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Google account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Twitter account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Facebook account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) Cancel Connecting to %s Notify me of new comments via email. Notify me of new posts via email. Recent Posts Prothemus1: Python script creates malicious\\xc2 document From RTF to Cobalt Strike passing via\\xc2 Flash Quick post: GlblcntUsage\\xc2 value Another CTB-Locker related e-mail inside my junk\\xc2 box Snippet Detector Archives August 2017 February 2017 April 2015 March 2015 February 2015 January 2015 November 2014 July 2014 June 2014 May 2014 April 2014 March 2014 February 2014 December 2013 November 2013 October 2013 September 2013 August 2013 July 2013 June 2013 April 2013 January 2013 December 2012 November 2012 June 2011 January 2011 October 2010 September 2010 February 2009 December 2008 November 2008 August 2008 July 2008 June 2008 May 2008 April 2008 February 2008 January 2008 December 2007 November 2007 October 2007 September 2007 August 2007 July 2007 June 2007 May 2007 April 2007 March 2007 February 2007 December 2006 November 2006 October 2006 Categories Android (3) Blogroll (10) Book (1) Bug (3) C&C (1) Challenge (7) Cryptography (7) CTF (1) Exploit (2) Forensics (4) General (58) Malware (45) Ollydbg plugin (1) Programming (21) Question/Answer (1) reverse code engineering (14) Reverse Engineering (76) rootkit (1) Snippet Detector (1) Uncategorized (1) Blogroll Crackmes.de R136a1 RCE Messageboard\\xe2\\x80\\x99s Regroupment Follow me on Twitter My Tweets Advertisements Blog at WordPress.com. Privacy & Cookies: This site uses cookies. By continuing to use this website, you agree to their use. To find out more, including how to control cookies, see here: Cookie Policy %d bloggers like this:",
+  "sanitized_txt": "Any application-defined hook procedure on my machine? | My infected computer My infected computer something strange happens inside it About Challenges Specific malware analysis Tools Any application-defined hook procedure on my\\xc2 machine? Posted by zairon on December 6, 2006 Posted in: Reverse Engineering. 9 Comments Some times ago my antivirus didn\\xe2\\x80\\x99t recognize a malware on my machine; the malware installed a keylogger and it did run silently in background for some hours. In general, you can discover the presence of a keylogger looking at the net traffic log or looking for some suspicious file name inside the task manager list but sometimes an application able to find out hooks will come in handy. At first I tried to find some informations browsing the net without luck. Hmm, no one has written such a program before? Is it possible or am I unable to use google??? I only got one usefull hint about the problem, nothing else. Well, I decided to take a look at the problem. All my investigations are done under Windows XP/SP1. Before starting with the analysis I want to show you the declaration of the function used to set a windows hook: HHOOK SetWindowsHookEx( int idHook, // Specifies the type of hook procedure to be installed. HOOKPROC lpfn, // Pointer to the hook procedure HINSTANCE hMod, // Handle to the DLL containing the hook procedure pointed to by the lpfn parameter DWORD dwThreadId // Specifies the identifier of the thread with which the hook procedure is to be associated ); It\\xe2\\x80\\x99s always good to know which parameters are passed to the function because you\\xe2\\x80\\x99ll have to deal with them later. Ok, time to start\\xe2\\x80\\xa6 A possible starting point is represented by win32k.sys file, it\\xe2\\x80\\x99s everything inside it. Looking at the implementation of SetWindowsHookEx I\\xe2\\x80\\x99ve seen a call to HMAllocObject. This function is not really known but if you have ever read \\xe2\\x80\\x98Using Softice\\xe2\\x80\\x99 help file you surely read the phrase: \\xe2\\x80\\x9cThe routine HMAllocObject creates USER object types\\xe2\\x80\\xa6\\xe2\\x80\\x9d. Interesting, setting a bpx over the function I got the following informations: .text:BF853AAB push 34h ; nBytes .text:BF853AAD push 5 ; TYPE_HOOK .text:BF853AAF push dword ptr [edi+3Ch] ; PTHREADINFO.rpdesk .text:BF853AB2 push edi ; PTHREADINFO .text:BF853AB3 call _HMAllocObject@16 ; HMAllocObject(x,x,x,x) The function takes four parameters and the 3\\xc2\\xb0 parameter is related with the type of object that is created. In this specific case I\\xe2\\x80\\x99m dealing with hook so the type is TYPE_HOOK and HMAllocObject returns a pointer to a structure named HOOK, it contains general informations about the new object and it looks like: typedef struct _HOOK { ULONG hHook; ULONG cLockObj; PTHREADINFO pti; ULONG rpdesk; ULONG pSelf; struct _HOOK *phkNext; int iHook; ULONG offPfn; unsigned int flags; int ihmod; PTHREADINFO ptiHooked; PDESKTOP rpdesk; } HOOK, *PHOOK; Fields: \\xe2\\x80\\x93 hHook Handle to the hook procedure, it\\xe2\\x80\\x99s the value returned by SetWindowsHookEx and it comes from HMAllocObject \\xe2\\x80\\x93 clockObj !?! \\xe2\\x80\\x93 pti Pointer to THREADINFO structure of the process which sets the hook \\xe2\\x80\\x93 rpdesk !?! \\xe2\\x80\\x93 pSelf Pointer to this HOOK structure \\xe2\\x80\\x93 phkNext Next structure in the hook chain \\xe2\\x80\\x93 iHook Hook type (i.e. WH_MOUSE or WH_KEYBOARD). This is the first parameter passed to SetWindowsHookEx \\xe2\\x80\\x93 offPfn Offset of the filter procedure, it is obtained by a simple substration between the address of the hook procedure and the initial address of the dll \\xe2\\x80\\x93 flags HF_xxx flags (HF_GLOBALS, HF_LOCAL, HF_DESTROYED\\xe2\\x80\\xa6) \\xe2\\x80\\x93 ihmod Number of hooks set into the module \\xe2\\x80\\x93 ptiHooked Pointer to THREADINFO structure of the hooked thread. If HF_GLOBAL is setted the pointer is setted to NULL because the hook works for every running thread \\xe2\\x80\\x93 rpdesk !?! As you can see the fields are not all explained, I\\xe2\\x80\\x99ll try to gain more informations. Some of the fields are filled by HMAllocObject itself and they are non TYPE_HOOK related field; I mean, the HOOK structure contains informations about the hook you want to install (i.e. the hook type, the offset of the filter procedure) and informations not so strictly related with the hook (i.e. phkNext, pSelf). Since of all the work is done trying to understand if there are global hooks installed on the system I\\xe2\\x80\\x99m only interested in TYPE_HOOK related fields and these are: 1. pti pti is really usefull because it gives me the possibility to access the process that has installed the hook. The first dword of THREADINFO structure is the pointer to ETHREAD structure which contains a pointer to EPROCESS structure. Once you have EPROCESS you can read the image file name (Imagfilename field) and the pid (UniqueProcessId) of the process that has setted the hook. At this point you can also read which dlls are loaded by the process or get any other usefull informations about it, especially which dll has the filter procedure inside. If you are not totally confident with undocumented structures you can even retrieve the informations using functions from Psapi library (i.e. EnumProcessModules/GetModuleFileNameEx to obtain a loaded dll\\xe2\\x80\\xa6). 2. iHook without it you won\\xe2\\x80\\x99t be able to know which hook was installed. 3. offPfn only necessary if you want to know where the filter procedure is located at. Starting from the HOOK structure I can retrieve all the needed informations about the HOOK but I need a fundamental information, maybe the most important one. Where can I find the HOOK structure? As I said before I only got an hint about the problem, it comes from an old thread at sysinternals forum (htt://forum.sysinternals.com/); I don\\xe2\\x80\\x99t remember the name of the user, thanks to him btw. The hint sounds like: \\xe2\\x80\\x9clook at aphkStart\\xe2\\x80\\x9d, nothing else. aphkStart is defined as: PHOOK aphkStart[CWINHOOKS]; It\\xe2\\x80\\x99s an array of pointers to HOOK structure, one for each possible WH_xxx hook; the pointer at index \\xe2\\x80\\x98i\\xe2\\x80\\x99 is NULL if you are not under the hook. As far as I have seen there are two aphkStart arrays, one for local hooks (inside THREADINFO structure) and one for global hooks (inside DESKTOPINFO structure). To find out if a global hook has been installed you only have to scan the entire aphkStart array (the one inside DESKTOPINFO) looking for a not NULL entry, if you find it you are under a global hook. The picture below represents a little sum-up. You start from the TEB of the current process, the process that check the installed hooks. When you have the TEB you can pass through some structures: 1. From TEB.Win32ThreadInfo you get THREADINFO structure 2. From THREADINFO.pDeskInfo you get DESKTOPINFO structure 3. If DESKTOPINFO.aphkStart[i] is not NULL you get HOOK structure of WH_i hook otherwise WH_i hook is not installed and you can check the next one, WH_i+1 4. From HOOK.pti you get THREADINFO structure of the process that has setted the hook 5. From THREADINFO.pEthread you get ETHREAD structure 6. From ETHREAD.ThreadsProcess you get EPROCESS structure Inside EPROCESS there are many informations about the process, just read the necessary ones. Advertisements Share this: Twitter LinkedIn Facebook Reddit Like this: Like Loading... Related Posts navigation \\xe2\\x86\\x90 My little hook\\xc2 analyzer Original anti Ollydbg \\xe2\\x86\\x92 9 comments on \\xe2\\x80\\x9cAny application-defined hook procedure on my\\xc2 machine?\\xe2\\x80\\x9d Chris Hall on December 20, 2007 at 1:35 pm said: Where can I find information relating to the various structs you refer to? e.g. THREADINFO, DESKTOPINFO Thanks Reply zairon on December 20, 2007 at 4:43 pm said: I usually use WinDbg or .h file I have on my machine, but the net is a good alternative way. I don\\xe2\\x80\\x99t remember where I got the information about the structure you mentioned, and I don\\xe2\\x80\\x99t have on my hard disk anymore (it\\xe2\\x80\\x99s dead\\xe2\\x80\\xa6). If you want to know something more about these specific structures you can use Windbg starting from _TEB (which is visible from Windbg for sure). In case I\\xe2\\x80\\x99ll find the structure\\xe2\\x80\\x99s definitions I\\xe2\\x80\\x99ll tell you. Reply Ermac on December 30, 2007 at 4:17 am said: Hello Zairon, Great article! Is there any way you could please post a source code example that you can share to list these hooks on Windows XP? I\\xe2\\x80\\x99m finding that these structures are rather confusing because most of the struct member names are very similar. Reply Hejo on September 8, 2008 at 1:57 pm said: Hello Zairon, stumbled over this old article of yours and I\\xe2\\x80\\x99m trying to construct a HookExplorer but keep finding my self in the deep end of the pool\\xe2\\x80\\xa6. might be in over my head\\xe2\\x80\\xa6 You couldn\\xe2\\x80\\x99t by any chance post a complete example or mail me some source? Regards Reply kalimako on September 10, 2008 at 8:55 pm said: I finally get the HOOK struct, I\\xe2\\x80\\x99m interested on global hooks only. I get all information about my machine\\xe2\\x80\\x99s global hooks, but I have no idea how to get the module of the hook procedure, I mean, in the hook struct typedef struct tagHOOK { /* hk */ THRDESKHEAD head; struct tagHOOK* pNext; int iHook; PVOID pfn; UINT flags; int imod; PTHREADINFO ptiHooked; PDESKTOP rpdesk; } HOOK; pfn -> is the offset of the procedure in the module\\xe2\\x80\\xa6 imod -> I assume that points to a module, but I have no idea how to translate that to a real dll path. help! Reply mateus on March 30, 2010 at 12:54 am said: Hello, great article and great info! I\\xe2\\x80\\x99m not sure what I\\xe2\\x80\\x99m doing wrong. Or maybe I\\xe2\\x80\\x99m missing something. I have gotten all the code to compile, and (using kernel debugger) am able to look at the structure for THREADINFO. The address all look good (refCount of_W32THREAD, pETHREAD, etc\\xe2\\x80\\xa6 However, my THREADINFO.pDeskInfo has an address of:0xbc640650. At which point, when i try to look at that memory address, i get a bunch of ????. Any clues as to what I could be doing wrong? Reply TBFisher on December 16, 2010 at 2:39 am said: THANKS! You have saved the day!! I have an app that depends heavily on a thread-specific hook in a listview control in a native C++ app. The OS(XP SP3) was arbitrarily dumping my HookProc and I had no way of easily detecting when the problem occurred. I used the methods in your code to build a DLL that allows me to monitor the status of my HookProc and reset it when necessary. Thanks again\\xe2\\x80\\xa6 TF Reply zairon on January 10, 2011 at 3:42 pm said: Glad to see someone finds it usefull! Thanks to you :) Reply Alexander on March 20, 2011 at 1:08 pm said: TBFisher, could you PLEASE share sourcecode of the function that checks status of the hook? I have the same problem\\xe2\\x80\\xa6 Reply Leave a Reply Cancel reply Enter your comment here... Fill in your details below or click an icon to log in: Email (required) (Address never made public) Name (required) Website You are commenting using your WordPress.com account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Google account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Twitter account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Facebook account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) Cancel Connecting to %s Notify me of new comments via email. Notify me of new posts via email. Recent Posts Prothemus1: Python script creates malicious\\xc2 document From RTF to Cobalt Strike passing via\\xc2 Flash Quick post: GlblcntUsage\\xc2 value Another CTB-Locker related e-mail inside my junk\\xc2 box Snippet Detector Archives August 2017 February 2017 April 2015 March 2015 February 2015 January 2015 November 2014 July 2014 June 2014 May 2014 April 2014 March 2014 February 2014 December 2013 November 2013 October 2013 September 2013 August 2013 July 2013 June 2013 April 2013 January 2013 December 2012 November 2012 June 2011 January 2011 October 2010 September 2010 February 2009 December 2008 November 2008 August 2008 July 2008 June 2008 May 2008 April 2008 February 2008 January 2008 December 2007 November 2007 October 2007 September 2007 August 2007 July 2007 June 2007 May 2007 April 2007 March 2007 February 2007 December 2006 November 2006 October 2006 Categories Android (3) Blogroll (10) Book (1) Bug (3) C&C (1) Challenge (7) Cryptography (7) CTF (1) Exploit (2) Forensics (4) General (58) Malware (45) Ollydbg plugin (1) Programming (21) Question/Answer (1) reverse code engineering (14) Reverse Engineering (76) rootkit (1) Snippet Detector (1) Uncategorized (1) Blogroll Crackmes.de R136a1 RCE Messageboard\\xe2\\x80\\x99s Regroupment Follow me on Twitter My Tweets Advertisements Blog at WordPress.com. Privacy & Cookies: This site uses cookies. By continuing to use this website, you agree to their use. To find out more, including how to control cookies, see here: Cookie Policy %d bloggers like this:",
+  "ID_list": [
+    "T1179",
+    "TA0003",
+    "TA0004",
+    "TA0006"
+  ],
+  "Name_list": [
+    "At",
+    "Malware",
+    "Rootkit",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1179": [
+      {
+        "sentence": "Any application-defined hook procedure on my machine? | My infected computer My infected computer something strange happens inside it About Challenges Specific malware analysis Tools Any application-defined hook procedure on my\\xc2 machine?",
+        "score": 0.6784
+      },
+      {
+        "sentence": "Posted by zairon on December 6, 2006 Posted in: Reverse Engineering.",
+        "score": 0.4145
+      },
+      {
+        "sentence": "9 Comments Some times ago my antivirus didn\\xe2\\x80\\x99t recognize a malware on my machine; the malware installed a keylogger and it did run silently in background for some hours.",
+        "score": 0.4415
+      },
+      {
+        "sentence": "In general, you can discover the presence of a keylogger looking at the net traffic log or looking for some suspicious file name inside the task manager list but sometimes an application able to find out hooks will come in handy.",
+        "score": 0.3692
+      },
+      {
+        "sentence": "Hmm, no one has written such a program before?",
+        "score": 0.4389
+      },
+      {
+        "sentence": "I only got one usefull hint about the problem, nothing else.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "All my investigations are done under Windows XP/SP1.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "Before starting with the analysis I want to show you the declaration of the function used to set a windows hook: HHOOK SetWindowsHookEx( int idHook, // Specifies the type of hook procedure to be installed.",
+        "score": 0.7151
+      },
+      {
+        "sentence": "HOOKPROC lpfn, // Pointer to the hook procedure HINSTANCE hMod, // Handle to the DLL containing the hook procedure pointed to by the lpfn parameter DWORD dwThreadId // Specifies the identifier of the thread with which the hook procedure is to be associated ); It\\xe2\\x80\\x99s always good to know which parameters are passed to the function because you\\xe2\\x80\\x99ll have to deal with them later.",
+        "score": 0.7482
+      },
+      {
+        "sentence": "Ok, time to start\\xe2\\x80\\xa6 A possible starting point is represented by win32k.sys file, it\\xe2\\x80\\x99s everything inside it.",
+        "score": 0.4895
+      },
+      {
+        "sentence": "Looking at the implementation of SetWindowsHookEx I\\xe2\\x80\\x99ve seen a call to HMAllocObject.",
+        "score": 0.6943
+      },
+      {
+        "sentence": "This function is not really known but if you have ever read \\xe2\\x80\\x98Using Softice\\xe2\\x80\\x99 help file you surely read the phrase: \\xe2\\x80\\x9cThe routine HMAllocObject creates USER object types\\xe2\\x80\\xa6\\xe2\\x80\\x9d.",
+        "score": 0.5729
+      },
+      {
+        "sentence": "Interesting, setting a bpx over the function I got the following informations: .text:BF853AAB push 34h ; nBytes .text:BF853AAD push 5 ; TYPE_HOOK .text:BF853AAF push dword ptr [edi+3Ch] ; PTHREADINFO.rpdesk .text:BF853AB2 push edi ; PTHREADINFO .text:BF853AB3 call _HMAllocObject@16 ; HMAllocObject(x,x,x,x) The function takes four parameters and the 3\\xc2\\xb0 parameter is related with the type of object that is created.",
+        "score": 0.6701
+      },
+      {
+        "sentence": "WH_MOUSE or WH_KEYBOARD).",
+        "score": 0.3288
+      },
+      {
+        "sentence": "This is the first parameter passed to SetWindowsHookEx \\xe2\\x80\\x93 offPfn Offset of the filter procedure, it is obtained by a simple substration between the address of the hook procedure and the initial address of the dll \\xe2\\x80\\x93 flags HF_xxx flags (HF_GLOBALS, HF_LOCAL, HF_DESTROYED\\xe2\\x80\\xa6) \\xe2\\x80\\x93 ihmod Number of hooks set into the module \\xe2\\x80\\x93 ptiHooked Pointer to THREADINFO structure of the hooked thread.",
+        "score": 0.7134
+      },
+      {
+        "sentence": "If HF_GLOBAL is setted the pointer is setted to NULL because the hook works for every running thread \\xe2\\x80\\x93 rpdesk !?!",
+        "score": 0.623
+      },
+      {
+        "sentence": "As you can see the fields are not all explained, I\\xe2\\x80\\x99ll try to gain more informations.",
+        "score": 0.3232
+      },
+      {
+        "sentence": "Some of the fields are filled by HMAllocObject itself and they are non TYPE_HOOK related field; I mean, the HOOK structure contains informations about the hook you want to install (i.e. the hook type, the offset of the filter procedure) and informations not so strictly related with the hook (i.e. phkNext, pSelf).",
+        "score": 0.5948
+      },
+      {
+        "sentence": "Since of all the work is done trying to understand if there are global hooks installed on the system I\\xe2\\x80\\x99m only interested in TYPE_HOOK related fields and these are: 1. pti pti is really usefull because it gives me the possibility to access the process that has installed the hook.",
+        "score": 0.5164
+      },
+      {
+        "sentence": "The first dword of THREADINFO structure is the pointer to ETHREAD structure which contains a pointer to EPROCESS structure.",
+        "score": 0.5294
+      },
+      {
+        "sentence": "Once you have EPROCESS you can read the image file name (Imagfilename field) and the pid (UniqueProcessId) of the process that has setted the hook.",
+        "score": 0.4526
+      },
+      {
+        "sentence": "At this point you can also read which dlls are loaded by the process or get any other usefull informations about it, especially which dll has the filter procedure inside.",
+        "score": 0.5589
+      },
+      {
+        "sentence": "If you are not totally confident with undocumented structures you can even retrieve the informations using functions from Psapi library (i.e.",
+        "score": 0.5932
+      },
+      {
+        "sentence": "EnumProcessModules/GetModuleFileNameEx to obtain a loaded dll\\xe2\\x80\\xa6).",
+        "score": 0.5839
+      },
+      {
+        "sentence": "2. iHook without it you won\\xe2\\x80\\x99t be able to know which hook was installed.",
+        "score": 0.5208
+      },
+      {
+        "sentence": "3. offPfn only necessary if you want to know where the filter procedure is located at.",
+        "score": 0.5006
+      },
+      {
+        "sentence": "Starting from the HOOK structure I can retrieve all the needed informations about the HOOK but I need a fundamental information, maybe the most important one.",
+        "score": 0.4362
+      },
+      {
+        "sentence": "Where can I find the HOOK structure?",
+        "score": 0.3642
+      },
+      {
+        "sentence": "As I said before I only got an hint about the problem, it comes from an old thread at sysinternals forum (htt://forum.sysinternals.com/); I don\\xe2\\x80\\x99t remember the name of the user, thanks to him btw.",
+        "score": 0.374
+      },
+      {
+        "sentence": "The hint sounds like: \\xe2\\x80\\x9clook at aphkStart\\xe2\\x80\\x9d, nothing else. aphkStart is defined as: PHOOK aphkStart[CWINHOOKS]; It\\xe2\\x80\\x99s an array of pointers to HOOK structure, one for each possible WH_xxx hook; the pointer at index \\xe2\\x80\\x98i\\xe2\\x80\\x99 is NULL if you are not under the hook.",
+        "score": 0.6472
+      },
+      {
+        "sentence": "As far as I have seen there are two aphkStart arrays, one for local hooks (inside THREADINFO structure) and one for global hooks (inside DESKTOPINFO structure).",
+        "score": 0.5869
+      },
+      {
+        "sentence": "To find out if a global hook has been installed you only have to scan the entire aphkStart array (the one inside DESKTOPINFO) looking for a not NULL entry, if you find it you are under a global hook.",
+        "score": 0.5553
+      },
+      {
+        "sentence": "The picture below represents a little sum-up.",
+        "score": 0.3164
+      },
+      {
+        "sentence": "You start from the TEB of the current process, the process that check the installed hooks.",
+        "score": 0.5289
+      },
+      {
+        "sentence": "When you have the TEB you can pass through some structures: 1.",
+        "score": 0.5078
+      },
+      {
+        "sentence": "From TEB.Win32ThreadInfo you get THREADINFO structure 2.",
+        "score": 0.5729
+      },
+      {
+        "sentence": "From THREADINFO.pDeskInfo you get DESKTOPINFO structure 3.",
+        "score": 0.4212
+      },
+      {
+        "sentence": "If DESKTOPINFO.aphkStart[i] is not NULL you get HOOK structure of WH_i hook otherwise WH_i hook is not installed and you can check the next one, WH_i+1 4.",
+        "score": 0.5526
+      },
+      {
+        "sentence": "From HOOK.pti you get THREADINFO structure of the process that has setted the hook 5.",
+        "score": 0.557
+      },
+      {
+        "sentence": "From THREADINFO.pEthread you get ETHREAD structure 6.",
+        "score": 0.5054
+      },
+      {
+        "sentence": "From ETHREAD.ThreadsProcess you get EPROCESS structure Inside EPROCESS there are many informations about the process, just read the necessary ones.",
+        "score": 0.55
+      },
+      {
+        "sentence": "Related Posts navigation \\xe2\\x86\\x90 My little hook\\xc2 analyzer Original anti Ollydbg \\xe2\\x86\\x92 9 comments on \\xe2\\x80\\x9cAny application-defined hook procedure on my\\xc2 machine?\\xe2\\x80\\x9d Chris Hall on December 20, 2007 at 1:35 pm said: Where can I find information relating to the various structs you refer to? e.g.",
+        "score": 0.6544
+      },
+      {
+        "sentence": "THREADINFO, DESKTOPINFO Thanks Reply zairon on December 20, 2007 at 4:43 pm said: I usually use WinDbg or .h file I have on my machine, but the net is a good alternative way.",
+        "score": 0.4984
+      },
+      {
+        "sentence": "I don\\xe2\\x80\\x99t remember where I got the information about the structure you mentioned, and I don\\xe2\\x80\\x99t have on my hard disk anymore (it\\xe2\\x80\\x99s dead\\xe2\\x80\\xa6).",
+        "score": 0.4311
+      },
+      {
+        "sentence": "If you want to know something more about these specific structures you can use Windbg starting from _TEB (which is visible from Windbg for sure).",
+        "score": 0.5564
+      },
+      {
+        "sentence": "In case I\\xe2\\x80\\x99ll find the structure\\xe2\\x80\\x99s definitions I\\xe2\\x80\\x99ll tell you.",
+        "score": 0.363
+      },
+      {
+        "sentence": "Reply Ermac on December 30, 2007 at 4:17 am said: Hello Zairon, Great article!",
+        "score": 0.3678
+      },
+      {
+        "sentence": "Is there any way you could please post a source code example that you can share to list these hooks on Windows XP?",
+        "score": 0.4661
+      },
+      {
+        "sentence": "I\\xe2\\x80\\x99m finding that these structures are rather confusing because most of the struct member names are very similar.",
+        "score": 0.4772
+      },
+      {
+        "sentence": "Reply Hejo on September 8, 2008 at 1:57 pm said: Hello Zairon, stumbled over this old article of yours and I\\xe2\\x80\\x99m trying to construct a HookExplorer but keep finding my self in the deep end of the pool\\xe2\\x80\\xa6. might be in over my head\\xe2\\x80\\xa6 You couldn\\xe2\\x80\\x99t by any chance post a complete example or mail me some source?",
+        "score": 0.4739
+      },
+      {
+        "sentence": "Regards Reply kalimako on September 10, 2008 at 8:55 pm said: I finally get the HOOK struct, I\\xe2\\x80\\x99m interested on global hooks only.",
+        "score": 0.542
+      },
+      {
+        "sentence": "I get all information about my machine\\xe2\\x80\\x99s global hooks, but I have no idea how to get the module of the hook procedure, I mean, in the hook struct typedef struct tagHOOK { /* hk */ THRDESKHEAD head; struct tagHOOK* pNext; int iHook; PVOID pfn; UINT flags; int imod; PTHREADINFO ptiHooked; PDESKTOP rpdesk; } HOOK; pfn -> is the offset of the procedure in the module\\xe2\\x80\\xa6 imod -> I assume that points to a module, but I have no idea how to translate that to a real dll path. help!",
+        "score": 0.6246
+      },
+      {
+        "sentence": "Reply mateus on March 30, 2010 at 12:54 am said: Hello, great article and great info!",
+        "score": 0.3633
+      },
+      {
+        "sentence": "I\\xe2\\x80\\x99m not sure what I\\xe2\\x80\\x99m doing wrong.",
+        "score": 0.3869
+      },
+      {
+        "sentence": "I have gotten all the code to compile, and (using kernel debugger) am able to look at the structure for THREADINFO.",
+        "score": 0.5637
+      },
+      {
+        "sentence": "The address all look good (refCount of_W32THREAD, pETHREAD, etc\\xe2\\x80\\xa6 However, my THREADINFO.pDeskInfo has an address of:0xbc640650.",
+        "score": 0.5348
+      },
+      {
+        "sentence": "At which point, when i try to look at that memory address, i get a bunch of ????.",
+        "score": 0.4856
+      },
+      {
+        "sentence": "Any clues as to what I could be doing wrong?",
+        "score": 0.3404
+      },
+      {
+        "sentence": "Reply TBFisher on December 16, 2010 at 2:39 am said: THANKS!",
+        "score": 0.3632
+      },
+      {
+        "sentence": "You have saved the day!!",
+        "score": 0.305
+      },
+      {
+        "sentence": "I have an app that depends heavily on a thread-specific hook in a listview control in a native C++ app.",
+        "score": 0.5863
+      },
+      {
+        "sentence": "The OS(XP SP3) was arbitrarily dumping my HookProc and I had no way of easily detecting when the problem occurred.",
+        "score": 0.5403
+      },
+      {
+        "sentence": "I used the methods in your code to build a DLL that allows me to monitor the status of my HookProc and reset it when necessary.",
+        "score": 0.5973
+      },
+      {
+        "sentence": "Thanks again\\xe2\\x80\\xa6 TF Reply zairon on January 10, 2011 at 3:42 pm said: Glad to see someone finds it usefull!",
+        "score": 0.4095
+      },
+      {
+        "sentence": "Thanks to you :) Reply Alexander on March 20, 2011 at 1:08 pm said: TBFisher, could you PLEASE share sourcecode of the function that checks status of the hook?",
+        "score": 0.516
+      },
+      {
+        "sentence": "I have the same problem\\xe2\\x80\\xa6 Reply Leave a Reply Cancel reply Enter your comment here...",
+        "score": 0.3244
+      },
+      {
+        "sentence": "By continuing to use this website, you agree to their use.",
+        "score": 0.3208
+      },
+      {
+        "sentence": "To find out more, including how to control cookies, see here: Cookie Policy %d bloggers like this:",
+        "score": 0.3765
+      }
+    ]
+  }
+}

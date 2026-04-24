@@ -1,0 +1,387 @@
+{
+  "original_txt": "Windows Access Tokens and Alternate Credentials | Strategic Cyber LLC Strategic Cyber LLC A blog about Armitage, Cobalt Strike, and Red Teaming \\xc2\\xab Post-Exploitation Only (Not\\xc2 Really) Cobalt Strike 2015: An Offensive Platform is\\xc2 Born \\xc2\\xbb Windows Access Tokens and Alternate\\xc2 Credentials December 16, 2015 I\\xe2\\x80\\x99d like to call your attention to the humble runas.exe program on Windows. This program allows a Windows user to spawn another program with another user\\xe2\\x80\\x99s credentials. It\\xe2\\x80\\x99s a little painful to use runas.exe from a remote access tool. This program doesn\\xe2\\x80\\x99t accept a password as an argument. Cobalt Strike\\xe2\\x80\\x99s Beacon has a built-in runas command to give you similar functionality. The process that runas starts has an access token populated with the same single sign-on information you would expect from access tokens made by a normal login. You can steal a token from a program started by\\xc2 runas and use that token to interact with local and remote resources. The runas capability is great for situations where you want to create a process as a local user on the current system or as a domain user from a trusted domain. This covers a lot of situations, but not all. What happens if you need to interact with a remote resource as a local user on another system? How do you interact with a remote resource as a domain user when there\\xe2\\x80\\x99s no trust relationship with that domain? These problems have a solution. The Curious /NETONLY Flag The runas program has a /NETONLY flag. This flag tells runas that the specified credentials are for remote access only. Windows will not try to validate these credentials. Instead, Windows will create a copy of your current access token and update it to use the new credentials when Windows interacts with a remote resource. Windows will then create the new process with this doctored token. This has a curious effect. The new program is run as the current user. On the current system, there is no change in your rights, permissions, or identity. But, when you interact with a remote resource, you are the specified user. Logon Sessions and other Access Token Trivia I hope I\\xe2\\x80\\x99ve raised some questions so far. Questions like, how does runas.exe /NETONLY work? Windows manages identity and security information in a structure known as an Access Token. These data structures contain things like: your username, groups, privileges, and other information. An Access Token may also contain information to restrict your rights. When working with Windows, it\\xe2\\x80\\x99s important to understand that an access token isn\\xe2\\x80\\x99t a single thing that represents a user\\xe2\\x80\\x99s identity. An access token is an instantiation of an identity with a lot of variables thrown in. An easy example of this is User Account Control. A local administrator user may run most processes in a medium integrity context. The tokens associated with their processes have an Integrity level field set to 0x2000 which is SECURITY_MANDATORY_MEDIUM_RID. Processes run by the same local administrator in a high integrity context have access tokens with their Integrity level set to 0x3000. These tokens represent the same user, but different rights. The point here is that Windows may have multiple access tokens, with different configurations, for a user and that\\xe2\\x80\\x99s normal. This blog post isn\\xe2\\x80\\x99t a deep dive into access tokens though. It\\xe2\\x80\\x99s a walk down the garden path about single sign-on information. Let\\xe2\\x80\\x99s jump into that. An Access Token contains your identity on the current system and it states what you can and can\\xe2\\x80\\x99t do on the current system. An Access Token also references the information Windows uses to automatically authenticate to remote systems. Now I hope you\\xe2\\x80\\x99re asking: what part of an Access Token determines who you are on a remote system? This question is the whole point of this blog post. Each Access Token references a Logon Session. The Logon Session references credential material for single sign-on purposes. When Windows authenticates to a remote system, it uses the Logon Session\\xe2\\x80\\x99s credential material to authenticate. A Logon Session is made after authentication is successful. Logon Sessions go away when there are no more tokens that reference them. When you use the /NETONLY flag with runas.exe, Windows will create a new Logon Session with the credential material you provide. It will then copy your current token and substitute the default logon session for the new one. The specified program is then run with this new token. The program run by runas looks like it\\xe2\\x80\\x99s running as your current user. That\\xe2\\x80\\x99s because it is. The new program was run with a copy of your user\\xe2\\x80\\x99s access token! When you interact with a network resource, Windows does not authenticate as your Access Token\\xe2\\x80\\x99s user. Windows uses the credential information referred to by the new Logon Session. In this case, the credential material in this new Logon Session does not necessarily match the identity in your current Access Token. If you\\xe2\\x80\\x99d like to see a list of Logon Sessions on your current system, take a look at the logonsessions utility by Mark Russinovich. Implications for Beacon Users Beacon\\xe2\\x80\\x99s runas command is similar to the default behavior of the runas program built into Windows. What about the /NETONLY flag? Beacon has something like this too. It\\xe2\\x80\\x99s the make_token command. The make_token command uses the LogonUser\\xc2 function in Windows with the LOGON32_LOGON_NEW_CREDENTIALS flag. This API creates a Logon Session from the specified credentials, copies your Access Token, associates the new Logon Session with the new Access Token, and makes this new Access Token available. Beacon then impersonates this new token. What\\xe2\\x80\\x99s the effect of this? You have a new token that is locally indistinguishable from your previous token. When you use Beacon\\xe2\\x80\\x99s getuid command to query your token\\xe2\\x80\\x99s identity, you get back the current user. When you type shell whoami, you get back the current user. What happens when you interact with a network resource? Windows authenticates with the credentials you specified to make_token. Why? Because the Logon Session in the current Access Token references the credentials you provided to make_token. In this case, the Logon Session information does not match the local identity of your current token. The make_token command in Beacon works this way to allow you to use a local account from another system to interact with it. This mechanism also allows you to authenticate to a system as a domain user when there\\xe2\\x80\\x99s no trust relationship with that domain. The pth command in Beacon is a similar story. The pth command asks mimikatz to: (1) create a new Logon Session, (2) update the credential material in that Logon Session with the domain, username, and password hash you provided, and (3) copy your Access Token and make the copy refer to the new Logon Session. Beacon then impersonates the token made by these steps and you\\xe2\\x80\\x99re ready to pass-the-hash. Again, with pass-the-hash, the side effects are similar. The new token is locally indistinguishable from your current user. That\\xe2\\x80\\x99s because you are your current user! When you interact with a network resource, Windows uses the material from the Logon Session to authenticate. In this case, it\\xe2\\x80\\x99s the information you provided to the pth command. Frequently Asked Questions This blog post is the result of many questions I\\xe2\\x80\\x99ve had about the make_token and pth commands in Beacon. Common questions include:\\xc2 Do pth and make_token work with local accounts? Yes.\\xc2 Do pth and make_token work with domain user credentials when there\\xe2\\x80\\x99s no trust relationship with the specified domain? Yes.\\xc2 Why do the make_token and pth\\xc2 tokens report themselves as the current user? That\\xe2\\x80\\x99s just the way it is. Windows is a complicated animal. I appreciate that its design sometimes results in non-obvious or confusing behavior. I hope this blog post clears up some of the confusion about the make_token and pth commands for you. If you\\xe2\\x80\\x99d like to learn more about this topic, to include how to use make_token and pth in an operation, consult the Lateral Movement lecture from the Advanced Threat Tactics course. Share this: Click to share on Facebook (Opens in new window) Click to share on LinkedIn (Opens in new window) Click to share on Twitter (Opens in new window) Click to share on Reddit (Opens in new window) Related Posted in Red Team | 6 comments Maybe a bit off topic but can you please explain the relevance of \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d and \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d from intruder\\xe2\\x80\\x99s point of view ? How an intruder can benefit from this information ? Also, what is the difference between the context of output of these commands ? Thanks \\xc2 \\xc2 \\xc2 \\xc2 by jd December 17, 2015 at 3:24 am Reply I\\xe2\\x80\\x99m going to assume you\\xe2\\x80\\x99re referring to the \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d and \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d commands from Beacon\\xe2\\x80\\x99s net module. The net module is a light wrapper around the Network Management and Network Share Management APIs in Windows. The \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d command gives you a list of users logged onto a workstation (according to the API docs, it\\xe2\\x80\\x99s interactive, service, and batch logons). This is useful when you\\xe2\\x80\\x99re hunting for tokens. You may have a trust relationship that lets you jump to a few systems. You don\\xe2\\x80\\x99t want to install an agent on all of them. So, you see who is logged onto these systems, and you jump to the system where you will find the user with rights that are valuable to the next steps of your engagement. The \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d command gives you a list of users who have sessions with the targeted system. By sessions, I mean remote users who are interacting with a share, IPC$, or some other resource on that system. Besides a list of users, this command also provides where they\\xe2\\x80\\x99re accessing that resource from. This is useful against say, a file server, to map workstations to network users. This information helps you hunt for valuable data and execute your lateral movement actions in a far more targeted way. \\xc2 \\xc2 \\xc2 \\xc2 by rsmudge December 17, 2015 at 5:11 pm Reply Thanks for detailed explanation. \\xc2 \\xc2 \\xc2 \\xc2 by jd December 18, 2015 at 3:37 am Maybe it would be good to emphasize that make_token command doesn\\xe2\\x80\\x99t need administrative privileges to run while pth command does. Think about finding Unattend.xml on the first landing PC after a successful phish\\xe2\\x80\\xa6 \\xf0\\x9f\\x99\\x82 \\xc2 \\xc2 \\xc2 \\xc2 by jd December 18, 2015 at 9:11 am Reply That\\xe2\\x80\\x99s a tough one. spawnas and runas don\\xe2\\x80\\x99t require admin privileges at all. The make_token command doesn\\xe2\\x80\\x99t require admin privileges either, but\\xe2\\x80\\xa6 \\xe2\\x80\\xa6 Beacon does take on the token made by make_token as its thread token. It also uses this token to create processes. When you create a process with that token, it fails unless you\\xe2\\x80\\x99re an admin. The shell and powershell commands are out if you\\xe2\\x80\\x99re not an admin. Beacon\\xe2\\x80\\x99s psexec and psexec_psh commands just use APIs, so they\\xe2\\x80\\x99ll work fine without elevation. \\xc2 \\xc2 \\xc2 \\xc2 by rsmudge December 18, 2015 at 7:11 pm Reply Hey Raphael. How\\xe2\\x80\\x99s it going? This explanation is exactly what I was looking for. Do you know, by any chance, why exactly shell/powershell fail when you are not an admin? Congrats on SpecterOps! \\xc2 \\xc2 \\xc2 \\xc2 by Antonio Quina (@st3r30byt3) July 21, 2017 at 5:21 pm Leave a Reply Cancel reply Enter your comment here... Fill in your details below or click an icon to log in: Email (required) (Address never made public) Name (required) Website You are commenting using your WordPress.com account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Google account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Twitter account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Facebook account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) Cancel Connecting to %s Notify me of new comments via email. Notify me of new posts via email. Welcome\\xe2\\x80\\xa6 Welcome to the Cobalt Strike blog by Strategic Cyber LLC's Raphael Mudge Contents Adversary Simulation Announcements Armitage Cobalt Strike Interviews Links metasploit framework Red Team Scripting Strategic Cyber LLC Uncategorized Subscribe RSS - Posts RSS - Comments Enter your email address to find out about new posts by email. I won't use your email for any other reason. Subscribe Let\\xe2\\x80\\x99s Connect Twitter Contact Information Conferences 2017 Want to meet in person? I'll have a vendor table at these conferences: \\xc2 ShmooCon Blog at WordPress.com. Entries (RSS) and Comments (RSS).",
+  "sanitized_txt": "Windows Access Tokens and Alternate Credentials | Strategic Cyber LLC Strategic Cyber LLC A blog about Armitage, Cobalt Strike, and Red Teaming \\xc2\\xab Post-Exploitation Only (Not\\xc2 Really) Cobalt Strike 2015: An Offensive Platform is\\xc2 Born \\xc2\\xbb Windows Access Tokens and Alternate\\xc2 Credentials December 16, 2015 I\\xe2\\x80\\x99d like to call your attention to the humble runas.exe program on Windows. This program allows a Windows user to spawn another program with another user\\xe2\\x80\\x99s credentials. It\\xe2\\x80\\x99s a little painful to use runas.exe from a remote access tool. This program doesn\\xe2\\x80\\x99t accept a password as an argument. Cobalt Strike\\xe2\\x80\\x99s Beacon has a built-in runas command to give you similar functionality. The process that runas starts has an access token populated with the same single sign-on information you would expect from access tokens made by a normal login. You can steal a token from a program started by\\xc2 runas and use that token to interact with local and remote resources. The runas capability is great for situations where you want to create a process as a local user on the current system or as a domain user from a trusted domain. This covers a lot of situations, but not all. What happens if you need to interact with a remote resource as a local user on another system? How do you interact with a remote resource as a domain user when there\\xe2\\x80\\x99s no trust relationship with that domain? These problems have a solution. The Curious /NETONLY Flag The runas program has a /NETONLY flag. This flag tells runas that the specified credentials are for remote access only. Windows will not try to validate these credentials. Instead, Windows will create a copy of your current access token and update it to use the new credentials when Windows interacts with a remote resource. Windows will then create the new process with this doctored token. This has a curious effect. The new program is run as the current user. On the current system, there is no change in your rights, permissions, or identity. But, when you interact with a remote resource, you are the specified user. Logon Sessions and other Access Token Trivia I hope I\\xe2\\x80\\x99ve raised some questions so far. Questions like, how does runas.exe /NETONLY work? Windows manages identity and security information in a structure known as an Access Token. These data structures contain things like: your username, groups, privileges, and other information. An Access Token may also contain information to restrict your rights. When working with Windows, it\\xe2\\x80\\x99s important to understand that an access token isn\\xe2\\x80\\x99t a single thing that represents a user\\xe2\\x80\\x99s identity. An access token is an instantiation of an identity with a lot of variables thrown in. An easy example of this is User Account Control. A local administrator user may run most processes in a medium integrity context. The tokens associated with their processes have an Integrity level field set to 0x2000 which is SECURITY_MANDATORY_MEDIUM_RID. Processes run by the same local administrator in a high integrity context have access tokens with their Integrity level set to 0x3000. These tokens represent the same user, but different rights. The point here is that Windows may have multiple access tokens, with different configurations, for a user and that\\xe2\\x80\\x99s normal. This blog post isn\\xe2\\x80\\x99t a deep dive into access tokens though. It\\xe2\\x80\\x99s a walk down the garden path about single sign-on information. Let\\xe2\\x80\\x99s jump into that. An Access Token contains your identity on the current system and it states what you can and can\\xe2\\x80\\x99t do on the current system. An Access Token also references the information Windows uses to automatically authenticate to remote systems. Now I hope you\\xe2\\x80\\x99re asking: what part of an Access Token determines who you are on a remote system? This question is the whole point of this blog post. Each Access Token references a Logon Session. The Logon Session references credential material for single sign-on purposes. When Windows authenticates to a remote system, it uses the Logon Session\\xe2\\x80\\x99s credential material to authenticate. A Logon Session is made after authentication is successful. Logon Sessions go away when there are no more tokens that reference them. When you use the /NETONLY flag with runas.exe, Windows will create a new Logon Session with the credential material you provide. It will then copy your current token and substitute the default logon session for the new one. The specified program is then run with this new token. The program run by runas looks like it\\xe2\\x80\\x99s running as your current user. That\\xe2\\x80\\x99s because it is. The new program was run with a copy of your user\\xe2\\x80\\x99s access token! When you interact with a network resource, Windows does not authenticate as your Access Token\\xe2\\x80\\x99s user. Windows uses the credential information referred to by the new Logon Session. In this case, the credential material in this new Logon Session does not necessarily match the identity in your current Access Token. If you\\xe2\\x80\\x99d like to see a list of Logon Sessions on your current system, take a look at the logonsessions utility by Mark Russinovich. Implications for Beacon Users Beacon\\xe2\\x80\\x99s runas command is similar to the default behavior of the runas program built into Windows. What about the /NETONLY flag? Beacon has something like this too. It\\xe2\\x80\\x99s the make_token command. The make_token command uses the LogonUser\\xc2 function in Windows with the LOGON32_LOGON_NEW_CREDENTIALS flag. This API creates a Logon Session from the specified credentials, copies your Access Token, associates the new Logon Session with the new Access Token, and makes this new Access Token available. Beacon then impersonates this new token. What\\xe2\\x80\\x99s the effect of this? You have a new token that is locally indistinguishable from your previous token. When you use Beacon\\xe2\\x80\\x99s getuid command to query your token\\xe2\\x80\\x99s identity, you get back the current user. When you type shell whoami, you get back the current user. What happens when you interact with a network resource? Windows authenticates with the credentials you specified to make_token. Why? Because the Logon Session in the current Access Token references the credentials you provided to make_token. In this case, the Logon Session information does not match the local identity of your current token. The make_token command in Beacon works this way to allow you to use a local account from another system to interact with it. This mechanism also allows you to authenticate to a system as a domain user when there\\xe2\\x80\\x99s no trust relationship with that domain. The pth command in Beacon is a similar story. The pth command asks mimikatz to: (1) create a new Logon Session, (2) update the credential material in that Logon Session with the domain, username, and password hash you provided, and (3) copy your Access Token and make the copy refer to the new Logon Session. Beacon then impersonates the token made by these steps and you\\xe2\\x80\\x99re ready to pass-the-hash. Again, with pass-the-hash, the side effects are similar. The new token is locally indistinguishable from your current user. That\\xe2\\x80\\x99s because you are your current user! When you interact with a network resource, Windows uses the material from the Logon Session to authenticate. In this case, it\\xe2\\x80\\x99s the information you provided to the pth command. Frequently Asked Questions This blog post is the result of many questions I\\xe2\\x80\\x99ve had about the make_token and pth commands in Beacon. Common questions include:\\xc2 Do pth and make_token work with local accounts? Yes.\\xc2 Do pth and make_token work with domain user credentials when there\\xe2\\x80\\x99s no trust relationship with the specified domain? Yes.\\xc2 Why do the make_token and pth\\xc2 tokens report themselves as the current user? That\\xe2\\x80\\x99s just the way it is. Windows is a complicated animal. I appreciate that its design sometimes results in non-obvious or confusing behavior. I hope this blog post clears up some of the confusion about the make_token and pth commands for you. If you\\xe2\\x80\\x99d like to learn more about this topic, to include how to use make_token and pth in an operation, consult the Lateral Movement lecture from the Advanced Threat Tactics course. Share this: Click to share on Facebook (Opens in new window) Click to share on LinkedIn (Opens in new window) Click to share on Twitter (Opens in new window) Click to share on Reddit (Opens in new window) Related Posted in Red Team | 6 comments Maybe a bit off topic but can you please explain the relevance of \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d and \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d from intruder\\xe2\\x80\\x99s point of view ? How an intruder can benefit from this information ? Also, what is the difference between the context of output of these commands ? Thanks \\xc2 \\xc2 \\xc2 \\xc2 by jd December 17, 2015 at 3:24 am Reply I\\xe2\\x80\\x99m going to assume you\\xe2\\x80\\x99re referring to the \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d and \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d commands from Beacon\\xe2\\x80\\x99s net module. The net module is a light wrapper around the Network Management and Network Share Management APIs in Windows. The \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d command gives you a list of users logged onto a workstation (according to the API docs, it\\xe2\\x80\\x99s interactive, service, and batch logons). This is useful when you\\xe2\\x80\\x99re hunting for tokens. You may have a trust relationship that lets you jump to a few systems. You don\\xe2\\x80\\x99t want to install an agent on all of them. So, you see who is logged onto these systems, and you jump to the system where you will find the user with rights that are valuable to the next steps of your engagement. The \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d command gives you a list of users who have sessions with the targeted system. By sessions, I mean remote users who are interacting with a share, IPC$, or some other resource on that system. Besides a list of users, this command also provides where they\\xe2\\x80\\x99re accessing that resource from. This is useful against say, a file server, to map workstations to network users. This information helps you hunt for valuable data and execute your lateral movement actions in a far more targeted way. \\xc2 \\xc2 \\xc2 \\xc2 by rsmudge December 17, 2015 at 5:11 pm Reply Thanks for detailed explanation. \\xc2 \\xc2 \\xc2 \\xc2 by jd December 18, 2015 at 3:37 am Maybe it would be good to emphasize that make_token command doesn\\xe2\\x80\\x99t need administrative privileges to run while pth command does. Think about finding Unattend.xml on the first landing PC after a successful phish\\xe2\\x80\\xa6 \\xf0\\x9f\\x99\\x82 \\xc2 \\xc2 \\xc2 \\xc2 by jd December 18, 2015 at 9:11 am Reply That\\xe2\\x80\\x99s a tough one. spawnas and runas don\\xe2\\x80\\x99t require admin privileges at all. The make_token command doesn\\xe2\\x80\\x99t require admin privileges either, but\\xe2\\x80\\xa6 \\xe2\\x80\\xa6 Beacon does take on the token made by make_token as its thread token. It also uses this token to create processes. When you create a process with that token, it fails unless you\\xe2\\x80\\x99re an admin. The shell and powershell commands are out if you\\xe2\\x80\\x99re not an admin. Beacon\\xe2\\x80\\x99s psexec and psexec_psh commands just use APIs, so they\\xe2\\x80\\x99ll work fine without elevation. \\xc2 \\xc2 \\xc2 \\xc2 by rsmudge December 18, 2015 at 7:11 pm Reply Hey Raphael. How\\xe2\\x80\\x99s it going? This explanation is exactly what I was looking for. Do you know, by any chance, why exactly shell/powershell fail when you are not an admin? Congrats on SpecterOps! \\xc2 \\xc2 \\xc2 \\xc2 by Antonio Quina (@st3r30byt3) July 21, 2017 at 5:21 pm Leave a Reply Cancel reply Enter your comment here... Fill in your details below or click an icon to log in: Email (required) (Address never made public) Name (required) Website You are commenting using your WordPress.com account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Google account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Twitter account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Facebook account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) Cancel Connecting to %s Notify me of new comments via email. Notify me of new posts via email. Welcome\\xe2\\x80\\xa6 Welcome to the Cobalt Strike blog by Strategic Cyber LLC's Raphael Mudge Contents Adversary Simulation Announcements Armitage Cobalt Strike Interviews Links metasploit framework Red Team Scripting Strategic Cyber LLC Uncategorized Subscribe RSS - Posts RSS - Comments Enter your email address to find out about new posts by email. I won't use your email for any other reason. Subscribe Let\\xe2\\x80\\x99s Connect Twitter Contact Information Conferences 2017 Want to meet in person? I'll have a vendor table at these conferences: \\xc2 ShmooCon Blog at WordPress.com. Entries (RSS) and Comments (RSS).",
+  "ID_list": [
+    "T1134",
+    "TA0004",
+    "TA0005"
+  ],
+  "Name_list": [
+    "At",
+    "Credentials",
+    "Local Account",
+    "Local Accounts",
+    "PowerShell",
+    "Server",
+    "Source",
+    "Tool"
+  ],
+  "TTP_sentences": {
+    "T1134": [
+      {
+        "sentence": "Windows Access Tokens and Alternate Credentials | Strategic Cyber LLC Strategic Cyber LLC A blog about Armitage, Cobalt Strike, and Red Teaming \\xc2\\xab Post-Exploitation Only (Not\\xc2 Really) Cobalt Strike 2015: An Offensive Platform is\\xc2 Born \\xc2\\xbb Windows Access Tokens and Alternate\\xc2 Credentials December 16, 2015 I\\xe2\\x80\\x99d like to call your attention to the humble runas.exe program on Windows.",
+        "score": 0.5437
+      },
+      {
+        "sentence": "This program allows a Windows user to spawn another program with another user\\xe2\\x80\\x99s credentials.",
+        "score": 0.5674
+      },
+      {
+        "sentence": "This program doesn\\xe2\\x80\\x99t accept a password as an argument.",
+        "score": 0.3444
+      },
+      {
+        "sentence": "Cobalt Strike\\xe2\\x80\\x99s Beacon has a built-in runas command to give you similar functionality.",
+        "score": 0.3325
+      },
+      {
+        "sentence": "The process that runas starts has an access token populated with the same single sign-on information you would expect from access tokens made by a normal login.",
+        "score": 0.7048
+      },
+      {
+        "sentence": "You can steal a token from a program started by\\xc2 runas and use that token to interact with local and remote resources.",
+        "score": 0.7456
+      },
+      {
+        "sentence": "The runas capability is great for situations where you want to create a process as a local user on the current system or as a domain user from a trusted domain.",
+        "score": 0.6588
+      },
+      {
+        "sentence": "What happens if you need to interact with a remote resource as a local user on another system?",
+        "score": 0.5218
+      },
+      {
+        "sentence": "How do you interact with a remote resource as a domain user when there\\xe2\\x80\\x99s no trust relationship with that domain?",
+        "score": 0.475
+      },
+      {
+        "sentence": "This flag tells runas that the specified credentials are for remote access only.",
+        "score": 0.4119
+      },
+      {
+        "sentence": "Windows will not try to validate these credentials.",
+        "score": 0.4893
+      },
+      {
+        "sentence": "Instead, Windows will create a copy of your current access token and update it to use the new credentials when Windows interacts with a remote resource.",
+        "score": 0.6432
+      },
+      {
+        "sentence": "Windows will then create the new process with this doctored token.",
+        "score": 0.7167
+      },
+      {
+        "sentence": "The new program is run as the current user.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "On the current system, there is no change in your rights, permissions, or identity.",
+        "score": 0.5757
+      },
+      {
+        "sentence": "But, when you interact with a remote resource, you are the specified user.",
+        "score": 0.4766
+      },
+      {
+        "sentence": "Logon Sessions and other Access Token Trivia I hope I\\xe2\\x80\\x99ve raised some questions so far.",
+        "score": 0.4808
+      },
+      {
+        "sentence": "Questions like, how does runas.exe /NETONLY work?",
+        "score": 0.4066
+      },
+      {
+        "sentence": "Windows manages identity and security information in a structure known as an Access Token.",
+        "score": 0.6548
+      },
+      {
+        "sentence": "These data structures contain things like: your username, groups, privileges, and other information.",
+        "score": 0.49
+      },
+      {
+        "sentence": "An Access Token may also contain information to restrict your rights.",
+        "score": 0.5716
+      },
+      {
+        "sentence": "When working with Windows, it\\xe2\\x80\\x99s important to understand that an access token isn\\xe2\\x80\\x99t a single thing that represents a user\\xe2\\x80\\x99s identity.",
+        "score": 0.6842
+      },
+      {
+        "sentence": "An access token is an instantiation of an identity with a lot of variables thrown in.",
+        "score": 0.6038
+      },
+      {
+        "sentence": "An easy example of this is User Account Control.",
+        "score": 0.4532
+      },
+      {
+        "sentence": "A local administrator user may run most processes in a medium integrity context.",
+        "score": 0.5672
+      },
+      {
+        "sentence": "The tokens associated with their processes have an Integrity level field set to 0x2000 which is SECURITY_MANDATORY_MEDIUM_RID.",
+        "score": 0.6248
+      },
+      {
+        "sentence": "Processes run by the same local administrator in a high integrity context have access tokens with their Integrity level set to 0x3000.",
+        "score": 0.703
+      },
+      {
+        "sentence": "These tokens represent the same user, but different rights.",
+        "score": 0.6515
+      },
+      {
+        "sentence": "The point here is that Windows may have multiple access tokens, with different configurations, for a user and that\\xe2\\x80\\x99s normal.",
+        "score": 0.684
+      },
+      {
+        "sentence": "This blog post isn\\xe2\\x80\\x99t a deep dive into access tokens though.",
+        "score": 0.5559
+      },
+      {
+        "sentence": "It\\xe2\\x80\\x99s a walk down the garden path about single sign-on information.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "An Access Token contains your identity on the current system and it states what you can and can\\xe2\\x80\\x99t do on the current system.",
+        "score": 0.6277
+      },
+      {
+        "sentence": "An Access Token also references the information Windows uses to automatically authenticate to remote systems.",
+        "score": 0.5381
+      },
+      {
+        "sentence": "Now I hope you\\xe2\\x80\\x99re asking: what part of an Access Token determines who you are on a remote system?",
+        "score": 0.5684
+      },
+      {
+        "sentence": "Each Access Token references a Logon Session.",
+        "score": 0.4019
+      },
+      {
+        "sentence": "The Logon Session references credential material for single sign-on purposes.",
+        "score": 0.4405
+      },
+      {
+        "sentence": "When Windows authenticates to a remote system, it uses the Logon Session\\xe2\\x80\\x99s credential material to authenticate.",
+        "score": 0.5146
+      },
+      {
+        "sentence": "A Logon Session is made after authentication is successful.",
+        "score": 0.4148
+      },
+      {
+        "sentence": "Logon Sessions go away when there are no more tokens that reference them.",
+        "score": 0.5188
+      },
+      {
+        "sentence": "When you use the /NETONLY flag with runas.exe, Windows will create a new Logon Session with the credential material you provide.",
+        "score": 0.4796
+      },
+      {
+        "sentence": "It will then copy your current token and substitute the default logon session for the new one.",
+        "score": 0.6428
+      },
+      {
+        "sentence": "The specified program is then run with this new token.",
+        "score": 0.5642
+      },
+      {
+        "sentence": "The program run by runas looks like it\\xe2\\x80\\x99s running as your current user.",
+        "score": 0.4472
+      },
+      {
+        "sentence": "The new program was run with a copy of your user\\xe2\\x80\\x99s access token!",
+        "score": 0.6814
+      },
+      {
+        "sentence": "When you interact with a network resource, Windows does not authenticate as your Access Token\\xe2\\x80\\x99s user.",
+        "score": 0.4919
+      },
+      {
+        "sentence": "Windows uses the credential information referred to by the new Logon Session.",
+        "score": 0.5332
+      },
+      {
+        "sentence": "In this case, the credential material in this new Logon Session does not necessarily match the identity in your current Access Token.",
+        "score": 0.5969
+      },
+      {
+        "sentence": "If you\\xe2\\x80\\x99d like to see a list of Logon Sessions on your current system, take a look at the logonsessions utility by Mark Russinovich.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "Implications for Beacon Users Beacon\\xe2\\x80\\x99s runas command is similar to the default behavior of the runas program built into Windows.",
+        "score": 0.3621
+      },
+      {
+        "sentence": "It\\xe2\\x80\\x99s the make_token command.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "The make_token command uses the LogonUser\\xc2 function in Windows with the LOGON32_LOGON_NEW_CREDENTIALS flag.",
+        "score": 0.5134
+      },
+      {
+        "sentence": "This API creates a Logon Session from the specified credentials, copies your Access Token, associates the new Logon Session with the new Access Token, and makes this new Access Token available.",
+        "score": 0.6085
+      },
+      {
+        "sentence": "Beacon then impersonates this new token.",
+        "score": 0.5716
+      },
+      {
+        "sentence": "You have a new token that is locally indistinguishable from your previous token.",
+        "score": 0.5781
+      },
+      {
+        "sentence": "When you use Beacon\\xe2\\x80\\x99s getuid command to query your token\\xe2\\x80\\x99s identity, you get back the current user.",
+        "score": 0.4565
+      },
+      {
+        "sentence": "When you type shell whoami, you get back the current user.",
+        "score": 0.4183
+      },
+      {
+        "sentence": "Windows authenticates with the credentials you specified to make_token.",
+        "score": 0.5711
+      },
+      {
+        "sentence": "Because the Logon Session in the current Access Token references the credentials you provided to make_token.",
+        "score": 0.6019
+      },
+      {
+        "sentence": "In this case, the Logon Session information does not match the local identity of your current token.",
+        "score": 0.5946
+      },
+      {
+        "sentence": "The make_token command in Beacon works this way to allow you to use a local account from another system to interact with it.",
+        "score": 0.6352
+      },
+      {
+        "sentence": "This mechanism also allows you to authenticate to a system as a domain user when there\\xe2\\x80\\x99s no trust relationship with that domain.",
+        "score": 0.5851
+      },
+      {
+        "sentence": "The pth command asks mimikatz to: (1) create a new Logon Session, (2) update the credential material in that Logon Session with the domain, username, and password hash you provided, and (3) copy your Access Token and make the copy refer to the new Logon Session.",
+        "score": 0.5601
+      },
+      {
+        "sentence": "Beacon then impersonates the token made by these steps and you\\xe2\\x80\\x99re ready to pass-the-hash.",
+        "score": 0.5614
+      },
+      {
+        "sentence": "The new token is locally indistinguishable from your current user.",
+        "score": 0.6313
+      },
+      {
+        "sentence": "That\\xe2\\x80\\x99s because you are your current user!",
+        "score": 0.4725
+      },
+      {
+        "sentence": "When you interact with a network resource, Windows uses the material from the Logon Session to authenticate.",
+        "score": 0.4569
+      },
+      {
+        "sentence": "Frequently Asked Questions This blog post is the result of many questions I\\xe2\\x80\\x99ve had about the make_token and pth commands in Beacon.",
+        "score": 0.3658
+      },
+      {
+        "sentence": "Common questions include:\\xc2 Do pth and make_token work with local accounts?",
+        "score": 0.519
+      },
+      {
+        "sentence": "Yes.\\xc2 Do pth and make_token work with domain user credentials when there\\xe2\\x80\\x99s no trust relationship with the specified domain?",
+        "score": 0.5612
+      },
+      {
+        "sentence": "Yes.\\xc2 Why do the make_token and pth\\xc2 tokens report themselves as the current user?",
+        "score": 0.6296
+      },
+      {
+        "sentence": "I hope this blog post clears up some of the confusion about the make_token and pth commands for you.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "If you\\xe2\\x80\\x99d like to learn more about this topic, to include how to use make_token and pth in an operation, consult the Lateral Movement lecture from the Advanced Threat Tactics course.",
+        "score": 0.5287
+      },
+      {
+        "sentence": "Share this: Click to share on Facebook (Opens in new window) Click to share on LinkedIn (Opens in new window) Click to share on Twitter (Opens in new window) Click to share on Reddit (Opens in new window) Related Posted in Red Team | 6 comments Maybe a bit off topic but can you please explain the relevance of \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d and \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d from intruder\\xe2\\x80\\x99s point of view ?",
+        "score": 0.4157
+      },
+      {
+        "sentence": "How an intruder can benefit from this information ?",
+        "score": 0.3747
+      },
+      {
+        "sentence": "Thanks \\xc2 \\xc2 \\xc2 \\xc2 by jd December 17, 2015 at 3:24 am Reply I\\xe2\\x80\\x99m going to assume you\\xe2\\x80\\x99re referring to the \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d and \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d commands from Beacon\\xe2\\x80\\x99s net module.",
+        "score": 0.3233
+      },
+      {
+        "sentence": "The net module is a light wrapper around the Network Management and Network Share Management APIs in Windows.",
+        "score": 0.3343
+      },
+      {
+        "sentence": "The \\xe2\\x80\\x9cnet logons\\xe2\\x80\\x9d command gives you a list of users logged onto a workstation (according to the API docs, it\\xe2\\x80\\x99s interactive, service, and batch logons).",
+        "score": 0.4452
+      },
+      {
+        "sentence": "This is useful when you\\xe2\\x80\\x99re hunting for tokens.",
+        "score": 0.4206
+      },
+      {
+        "sentence": "So, you see who is logged onto these systems, and you jump to the system where you will find the user with rights that are valuable to the next steps of your engagement.",
+        "score": 0.5391
+      },
+      {
+        "sentence": "The \\xe2\\x80\\x9cnet sessions\\xe2\\x80\\x9d command gives you a list of users who have sessions with the targeted system.",
+        "score": 0.3877
+      },
+      {
+        "sentence": "By sessions, I mean remote users who are interacting with a share, IPC$, or some other resource on that system.",
+        "score": 0.4278
+      },
+      {
+        "sentence": "Besides a list of users, this command also provides where they\\xe2\\x80\\x99re accessing that resource from.",
+        "score": 0.3382
+      },
+      {
+        "sentence": "This is useful against say, a file server, to map workstations to network users.",
+        "score": 0.302
+      },
+      {
+        "sentence": "This information helps you hunt for valuable data and execute your lateral movement actions in a far more targeted way. \\xc2 \\xc2 \\xc2 \\xc2 by rsmudge December 17, 2015 at 5:11 pm Reply Thanks for detailed explanation. \\xc2 \\xc2 \\xc2 \\xc2 by jd December 18, 2015 at 3:37 am Maybe it would be good to emphasize that make_token command doesn\\xe2\\x80\\x99t need administrative privileges to run while pth command does.",
+        "score": 0.4519
+      },
+      {
+        "sentence": "Think about finding Unattend.xml on the first landing PC after a successful phish\\xe2\\x80\\xa6 \\xf0\\x9f\\x99\\x82 \\xc2 \\xc2 \\xc2 \\xc2 by jd December 18, 2015 at 9:11 am Reply That\\xe2\\x80\\x99s a tough one. spawnas and runas don\\xe2\\x80\\x99t require admin privileges at all.",
+        "score": 0.4384
+      },
+      {
+        "sentence": "The make_token command doesn\\xe2\\x80\\x99t require admin privileges either, but\\xe2\\x80\\xa6 \\xe2\\x80\\xa6 Beacon does take on the token made by make_token as its thread token.",
+        "score": 0.7125
+      },
+      {
+        "sentence": "It also uses this token to create processes.",
+        "score": 0.7351
+      },
+      {
+        "sentence": "When you create a process with that token, it fails unless you\\xe2\\x80\\x99re an admin.",
+        "score": 0.7
+      },
+      {
+        "sentence": "The shell and powershell commands are out if you\\xe2\\x80\\x99re not an admin.",
+        "score": 0.335
+      },
+      {
+        "sentence": "Beacon\\xe2\\x80\\x99s psexec and psexec_psh commands just use APIs, so they\\xe2\\x80\\x99ll work fine without elevation. \\xc2 \\xc2 \\xc2 \\xc2 by rsmudge December 18, 2015 at 7:11 pm Reply Hey Raphael.",
+        "score": 0.4321
+      },
+      {
+        "sentence": "Do you know, by any chance, why exactly shell/powershell fail when you are not an admin?",
+        "score": 0.3224
+      }
+    ]
+  }
+}

@@ -1,0 +1,207 @@
+{
+  "original_txt": "Splunk is committed to using inclusive and unbiased language. This blog post might contain terminology that we no longer use. For more information on our updated terminology and our stance on biased language, please visit our blog post. We appreciate your understanding as we work towards making our community more inclusive for everyone.\nThe ransomware campaign against the Colonial Pipeline highlights the dangers and real-life consequences of cyberattacks. If you want to understand how to use Splunk to find activity related to the DarkSide Ransomware, we highly recommend you first read “The DarkSide of the Ransomware Pipeline” from Splunk’s Security Strategist team. In short, according to the FBI, the actors behind this campaign are part of the “DarkSide” group. The effects of this campaign against Colonial Pipeline are remarkable. Colonial Pipeline voluntarily shut down its operations, and some estimates indicate around 45% of the East Coast of the United States fuel supply is affected.\nA regional state of emergency has been declared, it is important to note that this pipeline not only supplies automotive vehicles fuel but jet fuel as well, so not only land transportation is affected but air transportation as well. Another possible effect of this cyberattack is the increase of fuel prices all along the chain of affected goods and services.\nhttps://twitter.com/GasBuddy/status/1392107671889850370\nThe Splunk Threat Research Team (STRT) has addressed this threat and produced an Analytic Story with several detection searches directed at community shared IOCs. STRT was able to replicate the execution of this payload via the attack range. The following screens show the initial execution of this malicious payload.\nThe execution of this file as many other ransomware payloads creates a note where it explains to the victim what happened, demands a ransom payment, and also threatens to publish sensitive information extracted during the attack in what is known as double extortion.\nThe ransomware note also presents a personal leak page where partial exfiltrated information is shown and presents a web page to input a key to receive further instructions.\nThis ransomware payload also includes a log that shows current execution items as the following screenshot shows.\nOne of the TOR URI addresses presented in the note appears to be targeted to the victim, we found that the site to input key was similar in different samples. The DarkSide group had a website on the dark web accessible via TOR or TOR Proxy. Several company logos were found on this site and in what appears to be sensitive information made public from their campaigns.\nThis ransomware is capable of encrypting files in the network shares and local drive of the compromised host.\nEnumerates network shares\nEnumerates local and removable drives\nThis ransomware payload has a configuration feature consisting of a list of folder names, files, and file extensions it skips during encryption.\nFolder names skipped during the encryption process\nFiles and File Extensions skipped during the encryption process\nSimilar to other ransomware payloads it also tries to kill processes or services that may cause access failure to the files targeted for encryption. Below is the decrypted list of strings related to the process name and service name targeted for termination.\nProcess names list targeted for termination\nService name it terminates:\nThis ransomware checks if its process instance is running under admin privileges, if not, it will try to elevate privileges by using cmstplua.dll COM OBJECT CLSID to elevate its privileges.\nAside from encrypting files, killing processes, services, and elevating privileges it will also delete files in the recycle bin, as seen in the following screenshot.\nIt also has a feature where it runs a hex-encoded PowerShell script to delete the shadow copy in the compromised machine. Below is the screen capture of the decrypted PowerShell command.\nThe DarkSide Ransomware also used the machine guid of the compromised host to generate a (4 rounds) crc32 checksum that will be used as a file extension of the encrypted files.\nAs seen above in the replication of this threat via the attack range, we used a specific sysmon configuration to get the data needed to create these detections. The new Analytic Story “DarkSide Ransomware” is composed of the following searches from current analytical stories and new detection searches:\nModified Ransomware Notes Bulk Creation\n`sysmon` EventCode=11 file_name IN (\"*\\.txt\",\"*\\.html\",\"*\\.hta\") |bin _time\nspan=10s | stats min(_time) as firstTime max(_time) as lastTime dc(TargetFilename)\nas unique_readme_path_count values(TargetFilename) as list_of_readme_path by Computer\nImage file_name | where unique_readme_path_count >= 15 | `security_content_ctime(firstTime)`\n| `security_content_ctime(lastTime)`\npowershell` EventCode=4104 Message= \"*ShadowCopy*\" Message = \"*Delete*\"\nstats count min(_time) as firstTime max(_time) as lastTime by EventCode Message ComputerName User\n| `security_content_ctime(firstTime)`\n| `security_content_ctime(lastTime)`\n`sysmon` EventCode=7 ImageLoaded IN (\"*\\\\CMLUA.dll\", \"*\\\\CMSTPLUA.dll\", \"*\\\\CMLUAUTIL.dll\") NOT(process_name IN(\"CMSTP.exe\", \"CMMGR32.exe\"))\nNOT(Image IN(\"*\\\\windows\\\\*\", \"*\\\\program files*\"))\n| stats count min(_time) as firstTime max(_time) as lastTime by Image ImageLoaded process_name Computer EventCode Signed ProcessId\n| `security_content_ctime(firstTime)`\n| `security_content_ctime(lastTime)`\n| tstats `security_content_summariesonly` count min(_time) as firstTime\nmax(_time) as lastTime from datamodel=Endpoint.Processes where Processes.process IN (\"*copy*\", \"*mega*\", \"*pcloud*\", \"*ftp*\", \"*--config*\", \"*--progress*\", \"*--no-check-certificate*\", \"*--ignore-existing*\", \"*--auto-confirm*\", \"*--transfers*\", \"*--multi-thread-streams*\") by Processes.dest Processes.user Processes.parent_process Processes.process_name\nProcesses.process Processes.process_id Processes.parent_process_id\n| `drop_dm_object_name(Processes)` | `security_content_ctime(firstTime)`| `security_content_ctime(lastTime)`\n`sysmon` EventID=1 OriginalFileName=rclone.exe NOT process_name=rclone.exe | stats\ncount min(_time) as firstTime max(_time) as lastTime by Computer, User, parent_process_name,\nprocess_name, OriginalFileName, process_path, CommandLine | rename Computer as dest\n| `security_content_ctime(firstTime)` | `security_content_ctime(lastTime)`\n| tstats `security_content_summariesonly` count min(_time) as firstTime max(_time)\nas lastTime from datamodel=Endpoint.Processes where Processes.process_name=reg.exe (Processes.process=*save* OR Processes.process=*export*) AND (Processes.process=*sam* OR Processes.process=*system* OR Processes.process=*security*) by Processes.dest Processes.user Processes.parent_process Processes.process_name Processes.process Processes.process_id Processes.parent_process_id\n| `drop_dm_object_name(Processes)`\n| `security_content_ctime(firstTime)`\n| `security_content_ctime(lastTime)`\n| tstats `security_content_summariesonly` count min(_time) as firstTime max(_time)\nas lastTime from datamodel=Endpoint.Processes where Processes.process_name=slui.exe\n(Processes.process=*-verb* Processes.process=*runas*) by Processes.dest\nProcesses.user Processes.parent_process Processes.process_name Processes.process\nProcesses.process_id Processes.parent_process_id | `drop_dm_object_name(Processes)`\n| `security_content_ctime(firstTime)`| `security_content_ctime(lastTime)`\n| tstats `security_content_summariesonly` count min(_time) as firstTime max(_time)\nas lastTime from datamodel=Endpoint.Processes where Processes.parent_process_name=slui.exe\n(Processes.process_name!=*slui* OR Processes.process_name=!firefox.exe OR Processes.process_name!=chrome.exe OR Processes.process_name!=iexplore.exe OR Processes.process_name!=msedge.exe) by Processes.dest\nProcesses.user Processes.parent_process Processes.process_name Processes.process\nProcesses.process_id Processes.parent_process_id | `drop_dm_object_name(Processes)`\n| `security_content_ctime(firstTime)`| `security_content_ctime(lastTime)`\nDetection | Technique ID | Tactic(s) | Notes |\nImpact | Detects bulk creation of ransomware notes | ||\nImpact | Detects high frequency of process termination, associated with ransomware execution | ||\nCommand And Control | Detects Download files by using Certutils | ||\nExecution | Detects download file using PowerShell | ||\nExecution | Detects PowerShell processes started with parameters used to bypass the local execution policy for scripts. | ||\n| Process Deleting Its Process File Path | Impact | Detects process deleting its related process file path. | |\nDefense Evasion | Detects a UAC Bypassed using cmstp and cmlua com object. | ||\nExtract SAM from Registry (New) | T1003.002 | Credential Dumping | Detections the use of reg.exe extracting SAM from the registry. |\nSLUI RunAs Elevated (New) | T1548.002 | Privilege Escalation | Detects the usage of SLUI.exe with the verb RunAs used to elevate permissions. |\nSLUI Spawning a Process (New) | T1548.002 | Privilege Escalation | Detects SLUI.exe spawning a process, indicative of UAC Bypass. |\nDetect Renamed RClone (New) | T1020 | Exfiltration | Detects the usage of rclone.exe renamed. |\nDetect RClone Command-Line Usage (New) | T1020 | Exfiltration | Detects common command-line arguments used by Rclone.exe. |\nSeveral | Several |\nHashes:\nSample A:\nSha1: 03c1f7458f3983c03a0f8124a01891242c3cc5df\nSha256: 6931b124d38d52bd7cdef48121fda457d407b63b59bb4e6ead4ce548f4bbb971\nSample B:\nSha1: d1dfe82775c1d698dd7861d6dfa1352a74551d35\nSha256: 9cee5522a7ca2bfca7cd3d9daba23e9a30deb6205f56c12045839075f7627297\nThe Splunk Threat Research Team will continue updating our detection content and addressing the threat of ransomware payloads as these campaigns continue affecting different verticals, especially those involving critical infrastructure. For our newest content please download Splunk Security Essentials, Splunk ES Content Update application, or visit Splunk Threat Research page.\nThe world’s leading organizations rely on Splunk, a Cisco company, to continuously strengthen digital resilience with our unified security and observability platform, powered by industry-leading AI.\nOur customers trust Splunk’s award-winning security and observability solutions to secure and improve the reliability of their complex digital environments, at any scale.",
+  "sanitized_txt": "Splunk is committed to using inclusive and unbiased language. This blog post might contain terminology that we no longer use. For more information on our updated terminology and our stance on biased language, please visit our blog post. We appreciate your understanding as we work towards making our community more inclusive for everyone.\nThe ransomware campaign against the Colonial Pipeline highlights the dangers and real-life consequences of cyberattacks. If you want to understand how to use Splunk to find activity related to the DarkSide Ransomware, we highly recommend you first read “The DarkSide of the Ransomware Pipeline” from Splunk’s Security Strategist team. In short, according to the FBI, the actors behind this campaign are part of the “DarkSide” group. The effects of this campaign against Colonial Pipeline are remarkable. Colonial Pipeline voluntarily shut down its operations, and some estimates indicate around 45% of the East Coast of the United States fuel supply is affected.\nA regional state of emergency has been declared, it is important to note that this pipeline not only supplies automotive vehicles fuel but jet fuel as well, so not only land transportation is affected but air transportation as well. Another possible effect of this cyberattack is the increase of fuel prices all along the chain of affected goods and services.\nhttps://twitter.com/GasBuddy/status/1392107671889850370 The Splunk Threat Research Team (STRT) has addressed this threat and produced an Analytic Story with several detection searches directed at community shared IOCs. STRT was able to replicate the execution of this payload via the attack range. The following screens show the initial execution of this malicious payload.\nThe execution of this file as many other ransomware payloads creates a note where it explains to the victim what happened, demands a ransom payment, and also threatens to publish sensitive information extracted during the attack in what is known as double extortion.\nThe ransomware note also presents a personal leak page where partial exfiltrated information is shown and presents a web page to input a key to receive further instructions.\nThis ransomware payload also includes a log that shows current execution items as the following screenshot shows.\nOne of the TOR URI addresses presented in the note appears to be targeted to the victim, we found that the site to input key was similar in different samples. The DarkSide group had a website on the dark web accessible via TOR or TOR Proxy. Several company logos were found on this site and in what appears to be sensitive information made public from their campaigns.\nThis ransomware is capable of encrypting files in the network shares and local drive of the compromised host.\nEnumerates network shares Enumerates local and removable drives This ransomware payload has a configuration feature consisting of a list of folder names, files, and file extensions it skips during encryption.\nFolder names skipped during the encryption process Files and File Extensions skipped during the encryption process Similar to other ransomware payloads it also tries to kill processes or services that may cause access failure to the files targeted for encryption. Below is the decrypted list of strings related to the process name and service name targeted for termination.\nProcess names list targeted for termination Service name it terminates:\nThis ransomware checks if its process instance is running under admin privileges, if not, it will try to elevate privileges by using cmstplua.dll COM OBJECT CLSID to elevate its privileges.\nAside from encrypting files, killing processes, services, and elevating privileges it will also delete files in the recycle bin, as seen in the following screenshot.\nIt also has a feature where it runs a hex-encoded PowerShell script to delete the shadow copy in the compromised machine. Below is the screen capture of the decrypted PowerShell command.\nThe DarkSide Ransomware also used the machine guid of the compromised host to generate a (4 rounds) crc32 checksum that will be used as a file extension of the encrypted files.\nAs seen above in the replication of this threat via the attack range, we used a specific sysmon configuration to get the data needed to create these detections. The new Analytic Story “DarkSide Ransomware” is composed of the following searches from current analytical stories and new detection searches:\nSample A:\nSha1: 03c1f7458f3983c03a0f8124a01891242c3cc5df Sha256: 6931b124d38d52bd7cdef48121fda457d407b63b59bb4e6ead4ce548f4bbb971 Sample B:\nSha1: d1dfe82775c1d698dd7861d6dfa1352a74551d35 Sha256: 9cee5522a7ca2bfca7cd3d9daba23e9a30deb6205f56c12045839075f7627297 The Splunk Threat Research Team will continue updating our detection content and addressing the threat of ransomware payloads as these campaigns continue affecting different verticals, especially those involving critical infrastructure. For our newest content please download Splunk Security Essentials, Splunk ES Content Update application, or visit Splunk Threat Research page.\nThe world’s leading organizations rely on Splunk, a Cisco company, to continuously strengthen digital resilience with our unified security and observability platform, powered by industry-leading AI.\nOur customers trust Splunk’s award-winning security and observability solutions to secure and improve the reliability of their complex digital environments, at any scale.",
+  "ID_list": [
+    "T1003.002",
+    "T1020",
+    "T1548.002"
+  ],
+  "Name_list": [
+    "CMSTP",
+    "Execution",
+    "PowerShell",
+    "Screen Capture"
+  ],
+  "TTP_sentences": {
+    "T1003.002": [
+      {
+        "sentence": "This blog post might contain terminology that we no longer use.",
+        "score": 0.328
+      },
+      {
+        "sentence": "For more information on our updated terminology and our stance on biased language, please visit our blog post.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "If you want to understand how to use Splunk to find activity related to the DarkSide Ransomware, we highly recommend you first read “The DarkSide of the Ransomware Pipeline” from Splunk’s Security Strategist team.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "Another possible effect of this cyberattack is the increase of fuel prices all along the chain of affected goods and services. https://twitter.com/GasBuddy/status/1392107671889850370 The Splunk Threat Research Team (STRT) has addressed this threat and produced an Analytic Story with several detection searches directed at community shared IOCs.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "The ransomware note also presents a personal leak page where partial exfiltrated information is shown and presents a web page to input a key to receive further instructions.",
+        "score": 0.3617
+      },
+      {
+        "sentence": "One of the TOR URI addresses presented in the note appears to be targeted to the victim, we found that the site to input key was similar in different samples.",
+        "score": 0.3148
+      },
+      {
+        "sentence": "Several company logos were found on this site and in what appears to be sensitive information made public from their campaigns.",
+        "score": 0.3404
+      },
+      {
+        "sentence": "This ransomware is capable of encrypting files in the network shares and local drive of the compromised host.",
+        "score": 0.3027
+      },
+      {
+        "sentence": "Enumerates network shares Enumerates local and removable drives This ransomware payload has a configuration feature consisting of a list of folder names, files, and file extensions it skips during encryption.",
+        "score": 0.3652
+      },
+      {
+        "sentence": "Folder names skipped during the encryption process Files and File Extensions skipped during the encryption process Similar to other ransomware payloads it also tries to kill processes or services that may cause access failure to the files targeted for encryption.",
+        "score": 0.3643
+      },
+      {
+        "sentence": "Below is the decrypted list of strings related to the process name and service name targeted for termination.",
+        "score": 0.368
+      },
+      {
+        "sentence": "Process names list targeted for termination Service name it terminates: This ransomware checks if its process instance is running under admin privileges, if not, it will try to elevate privileges by using cmstplua.dll COM OBJECT CLSID to elevate its privileges.",
+        "score": 0.4708
+      },
+      {
+        "sentence": "Aside from encrypting files, killing processes, services, and elevating privileges it will also delete files in the recycle bin, as seen in the following screenshot.",
+        "score": 0.3579
+      },
+      {
+        "sentence": "It also has a feature where it runs a hex-encoded PowerShell script to delete the shadow copy in the compromised machine.",
+        "score": 0.4694
+      },
+      {
+        "sentence": "Below is the screen capture of the decrypted PowerShell command.",
+        "score": 0.387
+      },
+      {
+        "sentence": "The DarkSide Ransomware also used the machine guid of the compromised host to generate a (4 rounds) crc32 checksum that will be used as a file extension of the encrypted files.",
+        "score": 0.3967
+      },
+      {
+        "sentence": "As seen above in the replication of this threat via the attack range, we used a specific sysmon configuration to get the data needed to create these detections.",
+        "score": 0.39
+      }
+    ],
+    "T1020": [
+      {
+        "sentence": "This blog post might contain terminology that we no longer use.",
+        "score": 0.3858
+      },
+      {
+        "sentence": "For more information on our updated terminology and our stance on biased language, please visit our blog post.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "We appreciate your understanding as we work towards making our community more inclusive for everyone.",
+        "score": 0.313
+      },
+      {
+        "sentence": "If you want to understand how to use Splunk to find activity related to the DarkSide Ransomware, we highly recommend you first read “The DarkSide of the Ransomware Pipeline” from Splunk’s Security Strategist team.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "In short, according to the FBI, the actors behind this campaign are part of the “DarkSide” group.",
+        "score": 0.3993
+      },
+      {
+        "sentence": "The effects of this campaign against Colonial Pipeline are remarkable.",
+        "score": 0.3147
+      },
+      {
+        "sentence": "Colonial Pipeline voluntarily shut down its operations, and some estimates indicate around 45% of the East Coast of the United States fuel supply is affected.",
+        "score": 0.3591
+      },
+      {
+        "sentence": "A regional state of emergency has been declared, it is important to note that this pipeline not only supplies automotive vehicles fuel but jet fuel as well, so not only land transportation is affected but air transportation as well.",
+        "score": 0.3512
+      },
+      {
+        "sentence": "Another possible effect of this cyberattack is the increase of fuel prices all along the chain of affected goods and services. https://twitter.com/GasBuddy/status/1392107671889850370 The Splunk Threat Research Team (STRT) has addressed this threat and produced an Analytic Story with several detection searches directed at community shared IOCs.",
+        "score": 0.452
+      },
+      {
+        "sentence": "The execution of this file as many other ransomware payloads creates a note where it explains to the victim what happened, demands a ransom payment, and also threatens to publish sensitive information extracted during the attack in what is known as double extortion.",
+        "score": 0.4734
+      },
+      {
+        "sentence": "The ransomware note also presents a personal leak page where partial exfiltrated information is shown and presents a web page to input a key to receive further instructions.",
+        "score": 0.635
+      },
+      {
+        "sentence": "This ransomware payload also includes a log that shows current execution items as the following screenshot shows.",
+        "score": 0.4072
+      },
+      {
+        "sentence": "One of the TOR URI addresses presented in the note appears to be targeted to the victim, we found that the site to input key was similar in different samples.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "Several company logos were found on this site and in what appears to be sensitive information made public from their campaigns.",
+        "score": 0.452
+      },
+      {
+        "sentence": "This ransomware is capable of encrypting files in the network shares and local drive of the compromised host.",
+        "score": 0.3255
+      },
+      {
+        "sentence": "Enumerates network shares Enumerates local and removable drives This ransomware payload has a configuration feature consisting of a list of folder names, files, and file extensions it skips during encryption.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "Below is the decrypted list of strings related to the process name and service name targeted for termination.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "Aside from encrypting files, killing processes, services, and elevating privileges it will also delete files in the recycle bin, as seen in the following screenshot.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "It also has a feature where it runs a hex-encoded PowerShell script to delete the shadow copy in the compromised machine.",
+        "score": 0.3823
+      },
+      {
+        "sentence": "Below is the screen capture of the decrypted PowerShell command.",
+        "score": 0.3599
+      },
+      {
+        "sentence": "The DarkSide Ransomware also used the machine guid of the compromised host to generate a (4 rounds) crc32 checksum that will be used as a file extension of the encrypted files.",
+        "score": 0.3357
+      },
+      {
+        "sentence": "As seen above in the replication of this threat via the attack range, we used a specific sysmon configuration to get the data needed to create these detections.",
+        "score": 0.4691
+      }
+    ],
+    "T1548.002": [
+      {
+        "sentence": "Folder names skipped during the encryption process Files and File Extensions skipped during the encryption process Similar to other ransomware payloads it also tries to kill processes or services that may cause access failure to the files targeted for encryption.",
+        "score": 0.3614
+      },
+      {
+        "sentence": "Below is the decrypted list of strings related to the process name and service name targeted for termination.",
+        "score": 0.3345
+      },
+      {
+        "sentence": "Process names list targeted for termination Service name it terminates: This ransomware checks if its process instance is running under admin privileges, if not, it will try to elevate privileges by using cmstplua.dll COM OBJECT CLSID to elevate its privileges.",
+        "score": 0.5507
+      },
+      {
+        "sentence": "Aside from encrypting files, killing processes, services, and elevating privileges it will also delete files in the recycle bin, as seen in the following screenshot.",
+        "score": 0.3578
+      },
+      {
+        "sentence": "It also has a feature where it runs a hex-encoded PowerShell script to delete the shadow copy in the compromised machine.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "Below is the screen capture of the decrypted PowerShell command.",
+        "score": 0.3438
+      },
+      {
+        "sentence": "For our newest content please download Splunk Security Essentials, Splunk ES Content Update application, or visit Splunk Threat Research page.",
+        "score": 0.32
+      }
+    ]
+  }
+}

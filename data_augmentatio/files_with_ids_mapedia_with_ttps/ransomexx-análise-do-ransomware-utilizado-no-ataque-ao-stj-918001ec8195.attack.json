@@ -1,0 +1,166 @@
+{
+  "original_txt": "RansomEXX — Análise do Ransomware Utilizado no Ataque ao STJ\nAcreditamos que a grande maioria dos brasileiros souberam de um ataque cibernético que infelizmente ocorreu no Supremo Tribunal de Justiça recentemente. De acordo com a nota oficial:\n“O Superior Tribunal de Justiça (STJ) comunica que a rede de tecnologia da informação do tribunal sofreu um ataque hacker, nessa terça-feira (3), durante o período da tarde, quando aconteciam as sessões de julgamento dos colegiados das seis turmas. A presidência do tribunal já acionou a Polícia Federal para a investigação do ataque cibernético.”\nAlém da nota oficial, o Departamento de Segurança da Informação (DSI), publicou duas notas com informações técnicas sobre o ataque, incluindo o hash (MD5/SHA1) de dois arquivos:\n(notepad.exe) — 9df15f471083698b818575c381e49c914dee69de\n(svc-new/svc-new) — 3bf79cc3ed82edd6bfe1950b7612a20853e28b09\nApesar dos detalhes técnicos da nota, pouco sabe-se sobre o ataque e sobre o funcionamento dos artefatos acima.\nO primeiro deles (notepad.exe) é um loader conhecido por Vatet, que deixaremos de fora do artigo, pois ele está sendo analisado no canal Papo Binário, confere lá!\nAinda sobre a nota, o incidente teve proporções críticas, a área de TI do STJ recomendou aos usuários — ministros, servidores, estagiários e terceirizados — que não utilizem computadores, ainda que os pessoais, que estejam conectados com algum dos sistemas informatizados da Corte, até que seja garantida a segurança do procedimento.\nCom isso em mente, eu e mais dois amigos, Ialle Teixeira e Felipe Duarte, fizemos uma análise do segundo arquivo e resolvemos publicar aqui, com o único intuito de mostrar a engenharia reversa do malware e talvez ajudar as pessoas a entenderem seu funcionamento e de alguma forma, contribuir com mais informações úteis para os órgãos de interesse.\nRansomEXX\nO arquivo pertence a uma família de ransomware conhecida por RansomEXX, ou Defray777. Ao longo do ano de 2020, este ransomware ficou conhecido devido a grandes ataques, como o que ocorreu no Departamento de Transporte do Texas (TxDOT).\nAté o começo de novembro de 2020, somente versões Windows do RansomEXX haviam sido detectadas, contudo, uma variante para Linux foi recentemente descoberta e publicada pela Kaspersky.\nO arquivo publicado pelo DSI é justamente uma versão do RansomEXX para Linux, sendo um binário ELF de 64-bits compilado com GCC, como indica a imagem acima.\nA primeira coisa a se notar é que o malware não possui técnicas anti-análise e nem ofuscação no código ou nas strings.\nOutro ponto é que o arquivo foi compilado com as informações de debug, ou seja, através de engenharia reversa, podemos obter detalhes interessantes como nome de variáveis e métodos utilizado pelo atacante.\nNas próximas seções, iremos mostrar os detalhes das principais funções do RansomEXX.\nmain()\nA função “main” do malware é responsável por:\n- Chamar a função “GeneratePreData”, que cria o contexto de criptografia;\n- Criar uma thread que executa a mesma função a cada 0.18 segundos, gerando novas chaves de criptografia;\n- Encriptar os arquivos de um determinado path, que foi passado via argumento na linha de comando de execução.\nGeneratePreData\nEssa função é responsável por gerar a chave de criptografia que será utilizada pelo malware. Para isso, ele utiliza uma biblioteca open-source chamada mbedtls.\nNa primeira etapa da função, o malware gera um valor que é utilizado no parâmetro “custom” da função “mbedtls_ctr_drbg_seed”.\nPara isso, ele chama a função “time”, que retorna a data atual representada em um valor de 4 bytes, por exemplo:\nEste valor é então passado para a função srand, que alimentará as quatro chamadas subsequentes da função rand. O resultado destas chamadas são então concatenados em uma string de 32 caracteres, parecido com um hash MD5.\nEste valor é utilizado para garantir que a inicialização da chave de criptografia sempre tenha um ponto de partida diferente, a própria biblioteca possui um tutorial mostrando a utilização deste valor na função “mbedtls_ctr_drbg_seed”.\nPara finalizar, o autor do malware utilizou a função “mbedtls_ctr_drbg_random” para gerar uma chave de criptografia aleatória de 256 bits.\nA criação da chave de criptografia pode ser resumida com a seguinte representação em C:\nComo vamos mostrar mais pra frente, este ransomware faz a utilização de múltiplas threads para acelerar o processo de criptografia. Enquanto uma thread gera a chave, a outra é responsável por encriptar os arquivos. Para ler a chave, o malware faz a utilização de mutex, através da função pthread_mutex_lock e pthread_mutex_unlock.\n- O mutex é travado, indicando para as outras threads que a chave de criptografia não pode ser acessada ainda;\n- A chave de criptografia nova é copiada para uma variável, que será lida por outras threads;\n- O mutex é destravado, indicando que o valor já pode ser acessado.\nJá na função responsável por encriptar os arquivos, que mostraremos ao longo do post, a mesma lógica é utilizada:\n- O mutex é travado, indicando que a chave está sendo lida pela função;\n- A chave de criptografia é utilizada;\n- O mutex é destravado, indicando que o endereço está livre para receber novas chaves.\nEsta lógica permite que tanto na hora de gerar a chave quanto na hora de utilizá-la, nenhum valor seja corrompido, pois ela só poderá ser lida/alterada quando o mutex estiver liberado.\nEm resumo, para encriptar os arquivos, o malware gera uma chave aleatória de 256-bit a cada 0.18 segundos, que é lida por uma outra thread, que está encriptando os arquivos.\nOk, mas se a chave de criptografia é gerada dinamicamente e possui um valor novo a cada 0.18 segundos, como o atacante sabe qual chave utilizar na hora de descriptografar os arquivos?\nPara recuperar a chave utilizada, o malware encripta o valor utilizando uma chave RSA-4096 pública que está presente no binário:\nApós encriptar a chave, o valor é salvo junto com o arquivo encriptado, garantindo que somente o atacante possa saber qual foi o valor utilizado na criptografia, para então decifrá-lo.\nEnumFiles\nConforme mostramos na imagem do pseudocode da “main”, esta função recebe como parâmetro o caminho de onde estão os arquivos a serem encriptados.\nEm primeiro lugar, a função cria múltiplas threads que chamam a função “encrypt_worker”, que contém o código responsável por encriptar os arquivos.\nAlém disso, ele também chama a função “list_dir”, que lista todo o diretório e executa a função “ReadMeStoreForDir”, que cria a nota de resgate no mesmo local, com o nome de “!NEWS_FOR_STJ!.txt”.\nApós criar o arquivo, o conteúdo é escrito usando a função “fwrite”.\nA nota de resgate possui informações para que o STJ entre em contato com o atacante. Vale ressaltar que o email deixado para contato foi reportado como abuse e removido pela ProtonMail, o que possivelmente pode dificultar o contato com o autor do ataque, como podemos ver no teste abaixo:\nCryptOneFile / CryptOneBlock\nConforme mencionado acima, a função “encrypt_worker” será executada em uma thread separada e será responsável por executar o código que irá efetivamente encriptar o arquivo. Para cada arquivo, a função “CryptOneFile” é chamada.\nDentro da “CryptOneFile”, a chave gerada pela outra thread é acessada conforme mostramos nas etapas acima, inicializando uma criptografia AES, com as funções mbedtls_aes_init e mbedtls_aes_setkey_enc.\nUma vez inicializada, o arquivo é encriptado em blocos pela função “CryptOneBlock”, que encripta o arquivo utilizando AES no modo ECB.\nSTJ x Departamento de Transportes do Texas\nVale ressaltar também a comparação entre o ransomware utilizado no ataque ao Departamento de Transporte do Texas (TxDOT), pois existe uma grande similaridade entre os binários, que são da mesma família:\nAlém de levantar diversas hipóteses, também podemos perceber a importância do uso da inteligência gerada a partir de outros incidentes, como possibilidade e melhoria de novos mecanismos de proteção, como uma simples regra via YARA ou qualquer outra tecnologia.\nComo podemos ver abaixo, os dois executáveis possuem 99% de similaridade:\nDemonstração\nPara demonstrar o funcionamento do ransomware, gravamos um pequeno vídeo executando-o em uma VM Linux (Ubuntu).\nConclusão\nNeste post mostramos os principais detalhes técnicos do ransomware utilizado no ataque ao STJ. O principal objetivo do malware é somente a criptografia dos arquivos, o que é uma operação incomum se compararmos com as famílias de ransomware mais recentes, onde há comunicação com C2 e funcionalidades adicionais.\nLamentamos muito o ocorrido com o STJ e esperamos ter contribuído com alguma informação útil, vale ressaltar que estamos à disposição do governo para auxiliar em qualquer análise adicional.\nVale lembrar que tanto a análise do arquivo e o artigo foram produzidos no dia de hoje, 15 de Novembro de 2020, caso o artigo possua algum erro, por gentileza, agradecemos qualquer feedback.\nIOCs\nArquivo:\nNome: svc-new/svc-new\nSHA256: 08113ca015468d6c29af4e4e4754c003dacc194ce4a254e15f38060854f18867\nMITRE:\nData Encrypted for Impact https://attack.mitre.org/techniques/T1486/\nID: T1486\nFontes\nhttp://www.stf.jus.br/portal/cms/verNoticiaDetalhe.asp?idConteudo=454634\nhttps://www.ctir.gov.br/arquivos/alertas/2020/alerta_especial_2020_07_atualizacao_ataques_de_ransomware.pdf\nhttps://attack.mitre.org/techniques/T1486/\nhttps://attack.mitre.org/mitigations/M1053/\nhttps://www.ctir.gov.br/arquivos/alertas/2020/alerta_2020_03_ataques_de_ransomware.pdf\nTexto revisado pela Jornalista Aline Palazolo Eiras.",
+  "sanitized_txt": "RansomEXX — Análise do Ransomware Utilizado no Ataque ao STJ Acreditamos que a grande maioria dos brasileiros souberam de um ataque cibernético que infelizmente ocorreu no Supremo Tribunal de Justiça recentemente. De acordo com a nota oficial:\n“O Superior Tribunal de Justiça (STJ) comunica que a rede de tecnologia da informação do tribunal sofreu um ataque hacker, nessa terça-feira (3), durante o período da tarde, quando aconteciam as sessões de julgamento dos colegiados das seis turmas. A presidência do tribunal já acionou a Polícia Federal para a investigação do ataque cibernético.” Além da nota oficial, o Departamento de Segurança da Informação (DSI), publicou duas notas com informações técnicas sobre o ataque, incluindo o hash (MD5/SHA1) de dois arquivos:\n(notepad.exe) — 9df15f471083698b818575c381e49c914dee69de (svc-new/svc-new) — 3bf79cc3ed82edd6bfe1950b7612a20853e28b09 Apesar dos detalhes técnicos da nota, pouco sabe-se sobre o ataque e sobre o funcionamento dos artefatos acima.\nO primeiro deles (notepad.exe) é um loader conhecido por Vatet, que deixaremos de fora do artigo, pois ele está sendo analisado no canal Papo Binário, confere lá!\nAinda sobre a nota, o incidente teve proporções críticas, a área de TI do STJ recomendou aos usuários — ministros, servidores, estagiários e terceirizados — que não utilizem computadores, ainda que os pessoais, que estejam conectados com algum dos sistemas informatizados da Corte, até que seja garantida a segurança do procedimento.\nCom isso em mente, eu e mais dois amigos, Ialle Teixeira e Felipe Duarte, fizemos uma análise do segundo arquivo e resolvemos publicar aqui, com o único intuito de mostrar a engenharia reversa do malware e talvez ajudar as pessoas a entenderem seu funcionamento e de alguma forma, contribuir com mais informações úteis para os órgãos de interesse.\nRansomEXX O arquivo pertence a uma família de ransomware conhecida por RansomEXX, ou Defray777. Ao longo do ano de 2020, este ransomware ficou conhecido devido a grandes ataques, como o que ocorreu no Departamento de Transporte do Texas (TxDOT).\nAté o começo de novembro de 2020, somente versões Windows do RansomEXX haviam sido detectadas, contudo, uma variante para Linux foi recentemente descoberta e publicada pela Kaspersky.\nO arquivo publicado pelo DSI é justamente uma versão do RansomEXX para Linux, sendo um binário ELF de 64-bits compilado com GCC, como indica a imagem acima.\nA primeira coisa a se notar é que o malware não possui técnicas anti-análise e nem ofuscação no código ou nas strings.\nOutro ponto é que o arquivo foi compilado com as informações de debug, ou seja, através de engenharia reversa, podemos obter detalhes interessantes como nome de variáveis e métodos utilizado pelo atacante.\nNas próximas seções, iremos mostrar os detalhes das principais funções do RansomEXX.\nmain() A função “main” do malware é responsável por:\n- Chamar a função “GeneratePreData”, que cria o contexto de criptografia;\n- Criar uma thread que executa a mesma função a cada 0.18 segundos, gerando novas chaves de criptografia;\n- Encriptar os arquivos de um determinado path, que foi passado via argumento na linha de comando de execução.\nGeneratePreData Essa função é responsável por gerar a chave de criptografia que será utilizada pelo malware. Para isso, ele utiliza uma biblioteca open-source chamada mbedtls.\nNa primeira etapa da função, o malware gera um valor que é utilizado no parâmetro “custom” da função “mbedtls_ctr_drbg_seed”.\nPara isso, ele chama a função “time”, que retorna a data atual representada em um valor de 4 bytes, por exemplo:\nEste valor é então passado para a função srand, que alimentará as quatro chamadas subsequentes da função rand. O resultado destas chamadas são então concatenados em uma string de 32 caracteres, parecido com um hash MD5.\nEste valor é utilizado para garantir que a inicialização da chave de criptografia sempre tenha um ponto de partida diferente, a própria biblioteca possui um tutorial mostrando a utilização deste valor na função “mbedtls_ctr_drbg_seed”.\nPara finalizar, o autor do malware utilizou a função “mbedtls_ctr_drbg_random” para gerar uma chave de criptografia aleatória de 256 bits.\nA criação da chave de criptografia pode ser resumida com a seguinte representação em C:\nComo vamos mostrar mais pra frente, este ransomware faz a utilização de múltiplas threads para acelerar o processo de criptografia. Enquanto uma thread gera a chave, a outra é responsável por encriptar os arquivos. Para ler a chave, o malware faz a utilização de mutex, através da função pthread_mutex_lock e pthread_mutex_unlock.\n- O mutex é travado, indicando para as outras threads que a chave de criptografia não pode ser acessada ainda;\n- A chave de criptografia nova é copiada para uma variável, que será lida por outras threads;\n- O mutex é destravado, indicando que o valor já pode ser acessado.\nJá na função responsável por encriptar os arquivos, que mostraremos ao longo do post, a mesma lógica é utilizada:\n- O mutex é travado, indicando que a chave está sendo lida pela função;\n- A chave de criptografia é utilizada;\n- O mutex é destravado, indicando que o endereço está livre para receber novas chaves.\nEsta lógica permite que tanto na hora de gerar a chave quanto na hora de utilizá-la, nenhum valor seja corrompido, pois ela só poderá ser lida/alterada quando o mutex estiver liberado.\nEm resumo, para encriptar os arquivos, o malware gera uma chave aleatória de 256-bit a cada 0.18 segundos, que é lida por uma outra thread, que está encriptando os arquivos.\nOk, mas se a chave de criptografia é gerada dinamicamente e possui um valor novo a cada 0.18 segundos, como o atacante sabe qual chave utilizar na hora de descriptografar os arquivos?\nPara recuperar a chave utilizada, o malware encripta o valor utilizando uma chave RSA-4096 pública que está presente no binário:\nApós encriptar a chave, o valor é salvo junto com o arquivo encriptado, garantindo que somente o atacante possa saber qual foi o valor utilizado na criptografia, para então decifrá-lo.\nEnumFiles Conforme mostramos na imagem do pseudocode da “main”, esta função recebe como parâmetro o caminho de onde estão os arquivos a serem encriptados.\nEm primeiro lugar, a função cria múltiplas threads que chamam a função “encrypt_worker”, que contém o código responsável por encriptar os arquivos.\nAlém disso, ele também chama a função “list_dir”, que lista todo o diretório e executa a função “ReadMeStoreForDir”, que cria a nota de resgate no mesmo local, com o nome de “!NEWS_FOR_STJ!.txt”.\nApós criar o arquivo, o conteúdo é escrito usando a função “fwrite”.\nA nota de resgate possui informações para que o STJ entre em contato com o atacante. Vale ressaltar que o email deixado para contato foi reportado como abuse e removido pela ProtonMail, o que possivelmente pode dificultar o contato com o autor do ataque, como podemos ver no teste abaixo:\nCryptOneFile / CryptOneBlock Conforme mencionado acima, a função “encrypt_worker” será executada em uma thread separada e será responsável por executar o código que irá efetivamente encriptar o arquivo. Para cada arquivo, a função “CryptOneFile” é chamada.\nDentro da “CryptOneFile”, a chave gerada pela outra thread é acessada conforme mostramos nas etapas acima, inicializando uma criptografia AES, com as funções mbedtls_aes_init e mbedtls_aes_setkey_enc.\nUma vez inicializada, o arquivo é encriptado em blocos pela função “CryptOneBlock”, que encripta o arquivo utilizando AES no modo ECB.\nSTJ x Departamento de Transportes do Texas Vale ressaltar também a comparação entre o ransomware utilizado no ataque ao Departamento de Transporte do Texas (TxDOT), pois existe uma grande similaridade entre os binários, que são da mesma família:\nAlém de levantar diversas hipóteses, também podemos perceber a importância do uso da inteligência gerada a partir de outros incidentes, como possibilidade e melhoria de novos mecanismos de proteção, como uma simples regra via YARA ou qualquer outra tecnologia.\nComo podemos ver abaixo, os dois executáveis possuem 99% de similaridade:\nDemonstração Para demonstrar o funcionamento do ransomware, gravamos um pequeno vídeo executando-o em uma VM Linux (Ubuntu).\nConclusão Neste post mostramos os principais detalhes técnicos do ransomware utilizado no ataque ao STJ. O principal objetivo do malware é somente a criptografia dos arquivos, o que é uma operação incomum se compararmos com as famílias de ransomware mais recentes, onde há comunicação com C2 e funcionalidades adicionais.\nLamentamos muito o ocorrido com o STJ e esperamos ter contribuído com alguma informação útil, vale ressaltar que estamos à disposição do governo para auxiliar em qualquer análise adicional.\nVale lembrar que tanto a análise do arquivo e o artigo foram produzidos no dia de hoje, 15 de Novembro de 2020, caso o artigo possua algum erro, por gentileza, agradecemos qualquer feedback.\nIOCs Arquivo:\nNome: svc-new/svc-new SHA256: 08113ca015468d6c29af4e4e4754c003dacc194ce4a254e15f38060854f18867 MITRE:",
+  "ID_list": [
+    "T1486"
+  ],
+  "Name_list": [
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1486": [
+      {
+        "sentence": "RansomEXX — Análise do Ransomware Utilizado no Ataque ao STJ Acreditamos que a grande maioria dos brasileiros souberam de um ataque cibernético que infelizmente ocorreu no Supremo Tribunal de Justiça recentemente.",
+        "score": 0.4455
+      },
+      {
+        "sentence": "De acordo com a nota oficial: “O Superior Tribunal de Justiça (STJ) comunica que a rede de tecnologia da informação do tribunal sofreu um ataque hacker, nessa terça-feira (3), durante o período da tarde, quando aconteciam as sessões de julgamento dos colegiados das seis turmas.",
+        "score": 0.3435
+      },
+      {
+        "sentence": "O primeiro deles (notepad.exe) é um loader conhecido por Vatet, que deixaremos de fora do artigo, pois ele está sendo analisado no canal Papo Binário, confere lá!",
+        "score": 0.3708
+      },
+      {
+        "sentence": "Ainda sobre a nota, o incidente teve proporções críticas, a área de TI do STJ recomendou aos usuários — ministros, servidores, estagiários e terceirizados — que não utilizem computadores, ainda que os pessoais, que estejam conectados com algum dos sistemas informatizados da Corte, até que seja garantida a segurança do procedimento.",
+        "score": 0.328
+      },
+      {
+        "sentence": "Com isso em mente, eu e mais dois amigos, Ialle Teixeira e Felipe Duarte, fizemos uma análise do segundo arquivo e resolvemos publicar aqui, com o único intuito de mostrar a engenharia reversa do malware e talvez ajudar as pessoas a entenderem seu funcionamento e de alguma forma, contribuir com mais informações úteis para os órgãos de interesse.",
+        "score": 0.4016
+      },
+      {
+        "sentence": "RansomEXX O arquivo pertence a uma família de ransomware conhecida por RansomEXX, ou Defray777.",
+        "score": 0.4301
+      },
+      {
+        "sentence": "Ao longo do ano de 2020, este ransomware ficou conhecido devido a grandes ataques, como o que ocorreu no Departamento de Transporte do Texas (TxDOT).",
+        "score": 0.4256
+      },
+      {
+        "sentence": "Até o começo de novembro de 2020, somente versões Windows do RansomEXX haviam sido detectadas, contudo, uma variante para Linux foi recentemente descoberta e publicada pela Kaspersky.",
+        "score": 0.3889
+      },
+      {
+        "sentence": "O arquivo publicado pelo DSI é justamente uma versão do RansomEXX para Linux, sendo um binário ELF de 64-bits compilado com GCC, como indica a imagem acima.",
+        "score": 0.4193
+      },
+      {
+        "sentence": "A primeira coisa a se notar é que o malware não possui técnicas anti-análise e nem ofuscação no código ou nas strings.",
+        "score": 0.3267
+      },
+      {
+        "sentence": "Outro ponto é que o arquivo foi compilado com as informações de debug, ou seja, através de engenharia reversa, podemos obter detalhes interessantes como nome de variáveis e métodos utilizado pelo atacante.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "Nas próximas seções, iremos mostrar os detalhes das principais funções do RansomEXX. main() A função “main” do malware é responsável por: - Chamar a função “GeneratePreData”, que cria o contexto de criptografia; - Criar uma thread que executa a mesma função a cada 0.18 segundos, gerando novas chaves de criptografia; - Encriptar os arquivos de um determinado path, que foi passado via argumento na linha de comando de execução.",
+        "score": 0.4228
+      },
+      {
+        "sentence": "GeneratePreData Essa função é responsável por gerar a chave de criptografia que será utilizada pelo malware.",
+        "score": 0.3946
+      },
+      {
+        "sentence": "Para isso, ele utiliza uma biblioteca open-source chamada mbedtls.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "Na primeira etapa da função, o malware gera um valor que é utilizado no parâmetro “custom” da função “mbedtls_ctr_drbg_seed”.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "Para isso, ele chama a função “time”, que retorna a data atual representada em um valor de 4 bytes, por exemplo: Este valor é então passado para a função srand, que alimentará as quatro chamadas subsequentes da função rand.",
+        "score": 0.3506
+      },
+      {
+        "sentence": "O resultado destas chamadas são então concatenados em uma string de 32 caracteres, parecido com um hash MD5.",
+        "score": 0.3467
+      },
+      {
+        "sentence": "Este valor é utilizado para garantir que a inicialização da chave de criptografia sempre tenha um ponto de partida diferente, a própria biblioteca possui um tutorial mostrando a utilização deste valor na função “mbedtls_ctr_drbg_seed”.",
+        "score": 0.3456
+      },
+      {
+        "sentence": "Para finalizar, o autor do malware utilizou a função “mbedtls_ctr_drbg_random” para gerar uma chave de criptografia aleatória de 256 bits.",
+        "score": 0.3696
+      },
+      {
+        "sentence": "A criação da chave de criptografia pode ser resumida com a seguinte representação em C: Como vamos mostrar mais pra frente, este ransomware faz a utilização de múltiplas threads para acelerar o processo de criptografia.",
+        "score": 0.4043
+      },
+      {
+        "sentence": "Para ler a chave, o malware faz a utilização de mutex, através da função pthread_mutex_lock e pthread_mutex_unlock. - O mutex é travado, indicando para as outras threads que a chave de criptografia não pode ser acessada ainda; - A chave de criptografia nova é copiada para uma variável, que será lida por outras threads; - O mutex é destravado, indicando que o valor já pode ser acessado.",
+        "score": 0.405
+      },
+      {
+        "sentence": "Já na função responsável por encriptar os arquivos, que mostraremos ao longo do post, a mesma lógica é utilizada: - O mutex é travado, indicando que a chave está sendo lida pela função; - A chave de criptografia é utilizada; - O mutex é destravado, indicando que o endereço está livre para receber novas chaves.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "Esta lógica permite que tanto na hora de gerar a chave quanto na hora de utilizá-la, nenhum valor seja corrompido, pois ela só poderá ser lida/alterada quando o mutex estiver liberado.",
+        "score": 0.328
+      },
+      {
+        "sentence": "Em resumo, para encriptar os arquivos, o malware gera uma chave aleatória de 256-bit a cada 0.18 segundos, que é lida por uma outra thread, que está encriptando os arquivos.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "Ok, mas se a chave de criptografia é gerada dinamicamente e possui um valor novo a cada 0.18 segundos, como o atacante sabe qual chave utilizar na hora de descriptografar os arquivos?",
+        "score": 0.314
+      },
+      {
+        "sentence": "Para recuperar a chave utilizada, o malware encripta o valor utilizando uma chave RSA-4096 pública que está presente no binário: Após encriptar a chave, o valor é salvo junto com o arquivo encriptado, garantindo que somente o atacante possa saber qual foi o valor utilizado na criptografia, para então decifrá-lo.",
+        "score": 0.3785
+      },
+      {
+        "sentence": "EnumFiles Conforme mostramos na imagem do pseudocode da “main”, esta função recebe como parâmetro o caminho de onde estão os arquivos a serem encriptados.",
+        "score": 0.3485
+      },
+      {
+        "sentence": "Em primeiro lugar, a função cria múltiplas threads que chamam a função “encrypt_worker”, que contém o código responsável por encriptar os arquivos.",
+        "score": 0.3609
+      },
+      {
+        "sentence": "Além disso, ele também chama a função “list_dir”, que lista todo o diretório e executa a função “ReadMeStoreForDir”, que cria a nota de resgate no mesmo local, com o nome de “!NEWS_FOR_STJ!.txt”.",
+        "score": 0.4455
+      },
+      {
+        "sentence": "Após criar o arquivo, o conteúdo é escrito usando a função “fwrite”.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Vale ressaltar que o email deixado para contato foi reportado como abuse e removido pela ProtonMail, o que possivelmente pode dificultar o contato com o autor do ataque, como podemos ver no teste abaixo: CryptOneFile / CryptOneBlock Conforme mencionado acima, a função “encrypt_worker” será executada em uma thread separada e será responsável por executar o código que irá efetivamente encriptar o arquivo.",
+        "score": 0.4335
+      },
+      {
+        "sentence": "Para cada arquivo, a função “CryptOneFile” é chamada.",
+        "score": 0.4906
+      },
+      {
+        "sentence": "Dentro da “CryptOneFile”, a chave gerada pela outra thread é acessada conforme mostramos nas etapas acima, inicializando uma criptografia AES, com as funções mbedtls_aes_init e mbedtls_aes_setkey_enc.",
+        "score": 0.4466
+      },
+      {
+        "sentence": "Uma vez inicializada, o arquivo é encriptado em blocos pela função “CryptOneBlock”, que encripta o arquivo utilizando AES no modo ECB.",
+        "score": 0.3946
+      },
+      {
+        "sentence": "Como podemos ver abaixo, os dois executáveis possuem 99% de similaridade: Demonstração Para demonstrar o funcionamento do ransomware, gravamos um pequeno vídeo executando-o em uma VM Linux (Ubuntu).",
+        "score": 0.4243
+      },
+      {
+        "sentence": "Conclusão Neste post mostramos os principais detalhes técnicos do ransomware utilizado no ataque ao STJ.",
+        "score": 0.3694
+      },
+      {
+        "sentence": "O principal objetivo do malware é somente a criptografia dos arquivos, o que é uma operação incomum se compararmos com as famílias de ransomware mais recentes, onde há comunicação com C2 e funcionalidades adicionais.",
+        "score": 0.4481
+      },
+      {
+        "sentence": "Lamentamos muito o ocorrido com o STJ e esperamos ter contribuído com alguma informação útil, vale ressaltar que estamos à disposição do governo para auxiliar em qualquer análise adicional.",
+        "score": 0.3433
+      }
+    ]
+  }
+}

@@ -1,0 +1,424 @@
+{
+  "original_txt": "https://www.alienvault.com/blogs/labs-research/oceanlotus-for-os-x-an-application-bundle-pretending-to-be-an-adobe-flash-update FEB MAR JAN Previous capture 15 Next capture 2016 2017 2018 10 captures 15 Mar 2017 - 21 Aug 2019 About this capture Who We Are Meet AlienVault AlienVault Labs Management Team, Board & Advisors Customers Careers Newsroom Newsroom Central Press Coverage Press Releases Awards Events Blogs Corporate Fact Sheet Customer Success Support Overview Customer Resources Login to Support Portal Documentation Center Product Forums Training Certification Partners Partner Program Overview Locate a Partner Partner Portal Resellers MSSPs/MSPs Implementation Partners Technology Partners AlienVault PARTNERS CONTACTSUPPORTMORE PRODUCTS SOLUTIONS OPEN THREAT EXCHANGE RESOURCES ONLINE DEMO \\xe2\\x80\\xba The AlienVault Blogs Taking On Today\\xe2\\x80\\x99s Threats BLOG HIGHLIGHTS LABS RESEARCH SECURITY ESSENTIALS FEBRUARY 17, 2016 OceanLotus for OS X \\xe2\\x80\\x93 an Application Bundle Pretending to be an Adobe Flash Update Twitter LinkedIn Facebook Google Plus RedditEddie Lee Eddie Lee In May 2015, researchers at Qihoo 360 published a report on OceanLotus that included details about malware targeting Chinese infrastructure. In that report, there is a description about a piece of malware that targets OS X systems. A sample of that malware was uploaded to VirusTotal a few months ago. Curiously, as of February 8th, 2016, none of the 55 anti-virus solutions used by VirusTotal are detecting the sample as malicious. As such, we thought it would be interesting to take a closer look at the OS X version of OceanLotus. Analysis OceanLotus for OS X is packaged as an application bundle pretending to be an Adobe Flash update. Although there are other files in the bundle, the files of interest are: FlashUpdate.app/Contents/MacOS/EmptyApplication FlashUpdate.app/Contents/Resources/en.lproj/.en_icon FlashUpdate.app/Contents/Resources/en.lproj/.DS_Stores The Loader As you can see below, EmptyApplication is a universal binary that can run on both i386 and x86_64 architectures. It is a fairly simple program that ROL3 decodes the \"hidden\" files .en_icon and .DS_Stores then executes them. $file EmptyApplication EmptyApplication: Mach-O universal binary with 2 architectures EmptyApplication (for architecture x86_64): Mach-O 64-bit executable x86_64 EmptyApplication (for architecture i386): Mach-O executable i386 For obfuscation, EmptyApplication uses XOR encryption with the key \"xc\" to obfuscate strings within the binary. Below is the simple decryption function. OceanLotus XOR decode subroutine In the 64-bit version, strings shorter than 8 bytes are stored as integer values. Encrypted strings longer than 8 bytes are stored in adjacent variables and the decrypting function reads past the variable's 8 byte boundary. As you can see below, &v34 is passed to the decrypting function, but the function actually decrypts the combination of v34 and v35. OceanLotus decoding XOR After decoding .en_icon, EmptyApplication writes it to a temporary directory with the name \"pboard\" (presumably to mimic the OS X paste board daemon) and executes the binary. EmptyApplication then deletes itself, decodes .DS_Stores, and writes the decoded binary as \"EmptyApplication\" \\xe2\\x80\\x93 replacing the original EmptyApplication executable. Finally, the new EmptyApplication is relaunched with a call to NSTask.launch(). The decrypted .DS_Stores binary does almost the same thing as the original EmptyApplication, except it does not look for .DS_Stores. The Trojan Encrypted Strings The decoded .en_icon file is the main Trojan. It has anti-debugging capabilities and handles the connection to the command and control servers. As we'll discuss later, the Trojan takes advantage of several OS X specific commands and API calls, so it's clear that this Trojan was tailor-made for OS X rather than a port from another operating system. Again, most strings in the binary are XOR encrypted but this binary uses multiple keys and the keys themselves are XOR encrypted. In fact, the first thing the Trojan does is to decrypt several XOR keys. It is interesting to note that the code that sets up the decryption keys is executed before the \"main\" entry point by using C++ static constructors. This code is referenced in the __mod_init_func section of mach-o binaries. OceanLotus decoded main Trojan As you can see from the image above, the primary decryption key used throughout the executable is \"Variable\". However, there are several different instances of the \"Variable\" string, and it would be trivial for the authors to update the code to use different decryption keys through the code. Although XOR decryption is simple by nature, using such a scheme makes reverse engineering a tedious process. Below is the decryption function, which is similar to the function used in EmptyApplication, except this version takes a variable decryption key. XOR decryption of OceanLotus Anti-Debugging To prevent debuggers from attaching to itself, the Trojan calls ptrace() with the PT_DENY_ATTACH argument. Furthermore, it creates a signal handler to catch SIGTRAPs, calls \"int 3\" to throw a SIGTRAP, sets a flag in the SIGTRAP handler and checks the flag value before it continues to run. This is more of an annoyance than anything novel in terms of anti-debugging. Next, before moving on to the meat of the code, the Trojan performs a signature check on itself by looking at the last 27 bytes of the binary. The first 11 bytes of the 27 bytes must match a hardcoded value in the binary and the final 16 bytes must be the MD5 hash of the binary minus the last 27 bytes. Persistence This first real bit of trojan functionality that is performed is to set up a Launch Agent for persistence \\xe2\\x80\\x93 the Launch Agent will run every time a user logs in. The Trojan copies itself to ~/Library/Logs/.Logs/corevideosd (or /Library/Logs/.Logs/corevideosd if it has root permissions) and creates a Launch Agent plist at ~/Library/LaunchAgents/com.google.plugins.plist (or /Library/LaunchAgents/com.google.plugins.plist) that references the corevideosd executable. In addition to using \"hidden\" dot directories, the Trojan calls chflags(filename, UF_HIDDEN) on the corevideosd and com.google.plugins.plist files. The final step that is taken to lower its profile is to call 'xattr -d -r com.apple.quarantine \"PATH to corevideosd\"' to remove the quarantine extended attribute from corevideosd. If the Launch Agent is already running, the command \"/bin/launchctl unload \"/Library/LaunchAgents/com.google.plugins.plist\" is used to unload itself before relaunching corevideosd. Command and Control Communication The Trojan attempts to contact multiple command and control servers(C2s) to retrieve commands and additional payloads. The first C2 it attempts to connect to is kiifd[.]pozon7[.]net on port 80 using HTTP. Below is an example of a check-in request. OceanLotus GET command Here, 1AD6A35F4C2D73593912F9F9E1A55097 is the MD5 hash of the IOPlatformUUID. The IOPlatformUUID is obtained by executing the OS X specific command: /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | grep 'IOPlatformUUID' This UUID is also written locally to ~/Library/Preferences/.fDTYuRs. Before being written to disk, the UUID is XOR encrypted using the key \"pth\". Currently, kiifd[.]pozon7[.]net is down, however, the Trojan is coded to download and execute an additional payload if the C2 tells it to. It can run an executable file or open a zipped application bundle (.app application). After contacting the first C2, the Trojan checks a local file ~/Library/Parallels/.cfg (or /Library/Parallels/.cfg) for a list of executables or applications to run. ~/Library/Parallels/.cfg is essentially a \"Startup Items\" file that contains a list of programs to run when the Trojan first starts up. Although the Chinese report says that OceanLotus MAC can detect the Parallels virtual environment, we do not think this is the case. OceanLotus MAC simply stores a hidden configuration file in the /Library/Parallels/ directory. Next the Trojan performs a check-in to an \"encrypted\" C2. It first attempts to connect to shop[.]ownpro[.]net, but if that host is down then it will fallback to pad[.]werzo[.]net. The network communication is made over port 443 but does not use SSL. Instead data is encrypted with a single byte XOR key of 0x1B. During the initial check-in, the victim does not send any data that is unique to the compromised host. After confirming successful communication with the C2, the Trojan gets ready to start handling commands from the C2. It starts by creating a keep-alive thread to \"ping\" the C2 every minute. Then it gathers the following information about the system and current user: Product Name and Version (read from /System/Library/CoreServices/SystemVersion.plist) Machine name Is the user root User's name (from pw_gecos) Username MD5 hash of the IOPlatformUUID (If IOPlatformUUID can't be found, then a combination of username and machine name is used as a unique ID) In addition to the system and user information, the Trojan will obtain the current time from www.microsoft.com. It does this by making an HTTP request to www.microsoft.com and parsing the Data header from the response. There is actually an error in the request - the request made to www.microsoft.com looks like: Request to Microsoft to get time in OceanLotus As you can see, there is no path in the request and the server responds with a 400. Since the Trojan only cares about the Date header in the response, the failed request still works. The parsed date is converted to epoch time and stored in ~/Library/Hash/.Hashtag/.hash (or /Library/Hash/.Hashtag/.hash). Here, there is another error in the code where the Trojan attempts to read the time from ~/Library/Hash/.hash and misses the .HashTag directory. In addition to the timestamp, the values \"th\" and 1 are also stored in the file and the entire contents are XOR encrypted with the key \"camon\". The system and user information is sent to the C2 and finally a new thread is created to handle commands from the C2. Below is a dump of the encrypted communication to the C2. dump of the encrypted communication to the C2 by OceanLotus Decoding the system information block with the key 0x1B results in the following data \\xe2\\x80\\x93 highlighted are the product name, OS version, username, machine name, and IOPlatformUUID MD5 hash. \\\\x02\\\\x10\\\\x00\\\\x00\\\\x00Mac OS X 10.10.5\\\\x00\\\\x02\\\\x00\\\\x00\\\\x00av\\\\t\\\\x00\\\\x00\\\\x00lab_osx_1 \\\\x00\\\\x00\\\\x001AD6A35F4C2D73593912F9F9E1A55097\\\\xcb\\\\xf2\\\\x81V\\\\x00\\\\x00\\\\x00\\\\x00@\\\\x00\\\\x00\\\\x00\\\\x02\\\\x00\\\\x00\\\\x00th\\\\x00\\\\x00\\\\x00\\\\x00 After sending the system and user information to the C2, this thread attempts to read from the C2 every second, however, it appears that the C2 only sends data once every 5 seconds. If the response from the C2 contains a command directive, the Trojan will execute one of those commands. The following strings were decrypted from the binary and are likely part of an interactive command console on the C2 side. Usage: ls [path] Usage: cd <path> Usage: pwd Usage: rm <file_path> Usage: cp <srcpath> <dstpath> Usage: mv <srcpath> <dstpath> Usage: ps Usage: proc <pid> Usage: kill <pid> Usage: exec <path> Usage: info [path] Usage: cmd <command system> Usage: localip Usage: recent Usage: windows Usage: download fromURL savePath Usage: cat path [num_byte] Usage: capture <saved_path> where With the exception of a few commands these are self-explanatory. \"exec\" opens an application bundle (.app directory) by calling system(\"open <APP Bundle>\") \"info\" returns information about a file or path \"recent\" returns a list of recently opened documents. This done by calling LSSharedFileListCreate(0, kLSSharedFileListRecentDocumentItems, 0); \"windows\" returns information about the currently open windows on the system (e.g. which process owns the window.). This is done with a call to CGWindowListCopyWindowInfo() \"capture\" saves a screenshot of the current desktop to the specified path. This is done by executing the command: \"/usr/sbin/screencapture -x <PATH>\" (the -x option prevents the shutter sound from being played) \"where\" is missing a usage statement, but it is accepted as a command and returns the full path of the running Trojan. This done by executing: \"ps awx | awk '$1 == [PID] {print $5}\" where PID is the current process ID. In addition to the above functionality, there are commands codes that allow the C2 to perform the following actions (there is some overlap with the previous commands): Update the /Library/Hash/.Hashtag/.hash file Update or read the /Library/Parallels/.cfg file Automatically download files from a URL Unzip and open a zipped application bundle, run an executable file, or execute code from a dynamic library. Kill a process Delete a file or path Shutdown the connection to the C2 Summary The OS X version of OceanLotus is clearly a mature piece of malware that is written specifically for OS X. The use of OS X specific commands and APIs is evidence that the authors are intimately familiar with the operating system and have spent quite a bit of time customizing it for the OS X environment. Similar to other advanced malware, the use of obfuscation and indirection within the binary are an indication that the authors want to protect their work, make it difficult for others to reverse engineer, and reduce detection rates. The fact that VirusTotal still shows a zero detection rate for this threat shows they are succeeding at the latter. We also found a version of OceanLotus that appears to be much simpler. It still communicates with the hardcoded C2 at kiifd[.]pozon7[.]net over port 80, but does not connect to an encrypted C2. This version does not launch multiple threads to handle other tasks and seems less developed so it is most likely an earlier version. We did not perform an in-depth analysis of this earlier variant, however, it could be in interesting exercise to see how the malware has evolved over time. IOCs Hashes: ROL3 encoded .en_icon: 9cf500e1149992baae53caee89df456de54689caf5a1bc25750eb22c5eca1cce ROL3 decoded .en_icon: 3d974c08c6e376f40118c3c2fa0af87fdb9a6147c877ef0e16adad12ad0ee43a ROL3 encoded .DS_Stores: 4c59c448c3991bd4c6d5a9534835a05dc00b1b6032f89ffdd4a9c294d0184e3b ROL3 decoded .DS_Stores: 987680637f31c3fc75c5d2796af84c852f546d654def35901675784fffc07e5d EmptyApplication: 12f941f43b5aba416cbccabf71bce2488a7e642b90a3a1cb0e4c75525abb2888 App bundle 83cd03d4190ad7dd122de96d2cc1e29642ffc34c2a836dbc0e1b03e3b3b55cff Another older variant that only communicates with the unencrypted C2 a3b568fe2154305b3caa1d9a3c42360eacfc13335aee10ac50ef4598e33eea07 C2s: kiifd[.]pozon7[.]net shop[.]ownpro[.]net pad[.]werzo[.]net Dropped Files: /Library/.SystemPreferences/.prev/.ver.txt or ~/Library/.SystemPreferences/.prev/.ver.txt /Library/Logs/.Logs/corevideosd or ~/Library/Logs/.Logs/corevideosd /Library/LaunchAgents/com.google.plugins.plist or ~/Library/LaunchAgents/com.google.plugins.plist /Library/Parallels/.cfg or /~Library/Parallels/.cfg /tmp/crunzip.temp.XXXXXX (passed to mktemp(), so the actual file will vary) ~/Library/Preferences/.fDTYuRs /Library/Hash/.Hashtag/.hash (or ~/Library/Hash/.Hashtag/.hash) Detection Yara Rules rule oceanlotus_xor_decode { meta: author = \"AlienVault Labs\" type = \"malware\" description = \"OceanLotus XOR decode function\" strings: $xor_decode = { 89 D2 41 8A ?? ?? [0-1] 32 0? 88 ?? FF C2 [0-1] 39 ?A [0-1] 0F 43 D? 4? FF C? 48 FF C? [0-1] FF C? 75 E3 } condition: $xor_decode } rule oceanlotus_constants { meta: author = \"AlienVault Labs\" type = \"malware\" description = \"OceanLotus constants\" strings: $c1 = { 3A 52 16 25 11 19 07 14 3D 08 0F } $c2 = { 0F 08 3D 14 07 19 11 25 16 52 3A } condition: any of them } Osquery OceanLotus pack: { \"platform\": \"darwin\", \"version\": \"1.4.5\", \"queries\": { \"OceanLotus_launchagent\": { \"query\" : \"select * from launchd where name = 'com.google.plugins.plist';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus Launch Agent\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_1\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Logs/.Logs/corevideosd';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_2\": { \"query\" : \"select * from file where path = '/Library/Logs/.Logs/corevideosd';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_3\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/.SystemPreferences/.prev/.ver.txt';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_4\": { \"query\" : \"select * from file where path = '/Library/.SystemPreferences/.prev/.ver.txt';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_5\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Parallels/.cfg';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_6\": { \"query\" : \"select * from file where path = '/Library/Parallels/.cfg';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_7\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Preferences/.fDTYuRs';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_8\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Hash/.Hashtag/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_9\": { \"query\" : \"select * from file where path = '/Library/Hash/.Hashtag/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_10\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Hash/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_11\": { \"query\" : \"select * from file where path = '/Library/Hash/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_12\": { \"query\" : \"select * from file where path = '/tmp/crunzip.temp.%';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" } } } GO DEEPER WITH THIS WEBCAST: IDS for Security Analysts: How to Get Actionable Insights from your IDS The fun with IDS doesn't stop after installation, in fact, that's really where the fun starts. Join our panel of IDS experts for an educational discussion that will help you make sense of your IDS data, starting from Day 1. We will discuss signature manipulation, event output, and the three \"P's\" - policy, procedure and process. We won't stop there either! You'll find out the meaning behind the terms all the cool kids are using like \"False Positives\" and \"Baselining\". We'll round it out with more information about how IDS interacts with the rest of your IT applications and infrastructure. If you installed an IDS and are wondering what to do next then signup now! WATCH IT NOW \\xe2\\x80\\xba LEARN MORE: Cyber espionage campaign against the Uyghur community, targeting MacOSX systems Yara signatures for \\xe2\\x80\\x9cCareto\\xe2\\x80\\x9d - The Masked APT Detecting malware on Mac OS X with USM and MIDAS Free and Commercial Tools to Implement the SANS Top 20 Security Controls, Part 5: Malware Defenses How Malware Actually Works? TAGS: malware, os x, oceanlotus \\xe2\\x80\\xb9 BACK TO ALL BLOGS Search Our Blogs Get the latest security news in your inbox. SUBSCRIBE VIA EMAIL Labs Research Security Essentials All Blogs Gartner MQ FEATURED CONTENT WEBCAST: IDS for Security Analysts: How to Get Actionable Insights from your IDS WATCH IT NOW \\xe2\\x80\\xba EBOOK: Beginner\\xe2\\x80\\x99s Guide to Open Source Intrusion Detection Tools READ IT NOW \\xe2\\x80\\xba WEBCAST: Six Steps to SIEM Success WATCH IT NOW \\xe2\\x80\\xba Chat From the Blog Jaime Blasco Jaime Blasco Mar 14, 2017 Apache Struts Vulnerability Being Exploited by Attackers Explore All Blog Posts > TwitterLinkedInFacebookYouTube Google+SlideShareSpiceworks Who We Are Meet AlienVault AlienVault Labs Management Team, Board & Advisors Customers Careers Contact Us Newsroom Newsroom Central Events Blogs Partners Partner Programs Partner Portal Products AlienVault USM Overview USM Anywhere (Cloud) USM Appliance (On-Premises) Security as a Service (MSSP) Community & Open Source Offerings Free Trials & Product Resources Open Threat Exchange Open Threat Exchange (OTX) Overview Technology Partners OTX Dashboards & Tools Solutions Cloud Security Management Threat Detection Intrusion Detection SIEM and Log Management Vulnerability Assessment Resources Resources AlienVault Blogs Forums Customer Success Support & Services Login to Support Portal Documentation Center Training Certification CONTACT US Questions? hello@alienvault.com \\xc2\\xa9 Copyright 2017 AlienVault, Inc. | Privacy Policy | Website Terms of Use",
+  "sanitized_txt": "https://www.alienvault.com/blogs/labs-research/oceanlotus-for-os-x-an-application-bundle-pretending-to-be-an-adobe-flash-update FEB MAR JAN Previous capture 15 Next capture 2016 2017 2018 10 captures 15 Mar 2017 - 21 Aug 2019 About this capture Who We Are Meet AlienVault AlienVault Labs Management Team, Board & Advisors Customers Careers Newsroom Newsroom Central Press Coverage Press Releases Awards Events Blogs Corporate Fact Sheet Customer Success Support Overview Customer Resources Login to Support Portal Documentation Center Product Forums Training Certification Partners Partner Program Overview Locate a Partner Partner Portal Resellers MSSPs/MSPs Implementation Partners Technology Partners AlienVault PARTNERS CONTACTSUPPORTMORE PRODUCTS SOLUTIONS OPEN THREAT EXCHANGE RESOURCES ONLINE DEMO \\xe2\\x80\\xba The AlienVault Blogs Taking On Today\\xe2\\x80\\x99s Threats BLOG HIGHLIGHTS LABS RESEARCH SECURITY ESSENTIALS FEBRUARY 17, 2016 OceanLotus for OS X \\xe2\\x80\\x93 an Application Bundle Pretending to be an Adobe Flash Update Twitter LinkedIn Facebook Google Plus RedditEddie Lee Eddie Lee In May 2015, researchers at Qihoo 360 published a report on OceanLotus that included details about malware targeting Chinese infrastructure. In that report, there is a description about a piece of malware that targets OS X systems. A sample of that malware was uploaded to VirusTotal a few months ago. Curiously, as of February 8th, 2016, none of the 55 anti-virus solutions used by VirusTotal are detecting the sample as malicious. As such, we thought it would be interesting to take a closer look at the OS X version of OceanLotus. Analysis OceanLotus for OS X is packaged as an application bundle pretending to be an Adobe Flash update. Although there are other files in the bundle, the files of interest are: FlashUpdate.app/Contents/MacOS/EmptyApplication FlashUpdate.app/Contents/Resources/en.lproj/.en_icon FlashUpdate.app/Contents/Resources/en.lproj/.DS_Stores The Loader As you can see below, EmptyApplication is a universal binary that can run on both i386 and x86_64 architectures. It is a fairly simple program that ROL3 decodes the \"hidden\" files .en_icon and .DS_Stores then executes them. $file EmptyApplication EmptyApplication: Mach-O universal binary with 2 architectures EmptyApplication (for architecture x86_64): Mach-O 64-bit executable x86_64 EmptyApplication (for architecture i386): Mach-O executable i386 For obfuscation, EmptyApplication uses XOR encryption with the key \"xc\" to obfuscate strings within the binary. Below is the simple decryption function. OceanLotus XOR decode subroutine In the 64-bit version, strings shorter than 8 bytes are stored as integer values. Encrypted strings longer than 8 bytes are stored in adjacent variables and the decrypting function reads past the variable's 8 byte boundary. As you can see below, &v34 is passed to the decrypting function, but the function actually decrypts the combination of v34 and v35. OceanLotus decoding XOR After decoding .en_icon, EmptyApplication writes it to a temporary directory with the name \"pboard\" (presumably to mimic the OS X paste board daemon) and executes the binary. EmptyApplication then deletes itself, decodes .DS_Stores, and writes the decoded binary as \"EmptyApplication\" \\xe2\\x80\\x93 replacing the original EmptyApplication executable. Finally, the new EmptyApplication is relaunched with a call to NSTask.launch(). The decrypted .DS_Stores binary does almost the same thing as the original EmptyApplication, except it does not look for .DS_Stores. The Trojan Encrypted Strings The decoded .en_icon file is the main Trojan. It has anti-debugging capabilities and handles the connection to the command and control servers. As we'll discuss later, the Trojan takes advantage of several OS X specific commands and API calls, so it's clear that this Trojan was tailor-made for OS X rather than a port from another operating system. Again, most strings in the binary are XOR encrypted but this binary uses multiple keys and the keys themselves are XOR encrypted. In fact, the first thing the Trojan does is to decrypt several XOR keys. It is interesting to note that the code that sets up the decryption keys is executed before the \"main\" entry point by using C++ static constructors. This code is referenced in the __mod_init_func section of mach-o binaries. OceanLotus decoded main Trojan As you can see from the image above, the primary decryption key used throughout the executable is \"Variable\". However, there are several different instances of the \"Variable\" string, and it would be trivial for the authors to update the code to use different decryption keys through the code. Although XOR decryption is simple by nature, using such a scheme makes reverse engineering a tedious process. Below is the decryption function, which is similar to the function used in EmptyApplication, except this version takes a variable decryption key. XOR decryption of OceanLotus Anti-Debugging To prevent debuggers from attaching to itself, the Trojan calls ptrace() with the PT_DENY_ATTACH argument. Furthermore, it creates a signal handler to catch SIGTRAPs, calls \"int 3\" to throw a SIGTRAP, sets a flag in the SIGTRAP handler and checks the flag value before it continues to run. This is more of an annoyance than anything novel in terms of anti-debugging. Next, before moving on to the meat of the code, the Trojan performs a signature check on itself by looking at the last 27 bytes of the binary. The first 11 bytes of the 27 bytes must match a hardcoded value in the binary and the final 16 bytes must be the MD5 hash of the binary minus the last 27 bytes. Persistence This first real bit of trojan functionality that is performed is to set up a Launch Agent for persistence \\xe2\\x80\\x93 the Launch Agent will run every time a user logs in. The Trojan copies itself to ~/Library/Logs/.Logs/corevideosd (or /Library/Logs/.Logs/corevideosd if it has root permissions) and creates a Launch Agent plist at ~/Library/LaunchAgents/com.google.plugins.plist (or /Library/LaunchAgents/com.google.plugins.plist) that references the corevideosd executable. In addition to using \"hidden\" dot directories, the Trojan calls chflags(filename, UF_HIDDEN) on the corevideosd and com.google.plugins.plist files. The final step that is taken to lower its profile is to call 'xattr -d -r com.apple.quarantine \"PATH to corevideosd\"' to remove the quarantine extended attribute from corevideosd. If the Launch Agent is already running, the command \"/bin/launchctl unload \"/Library/LaunchAgents/com.google.plugins.plist\" is used to unload itself before relaunching corevideosd. Command and Control Communication The Trojan attempts to contact multiple command and control servers(C2s) to retrieve commands and additional payloads. The first C2 it attempts to connect to is kiifd[.]pozon7[.]net on port 80 using HTTP. Below is an example of a check-in request. OceanLotus GET command Here, 1AD6A35F4C2D73593912F9F9E1A55097 is the MD5 hash of the IOPlatformUUID. The IOPlatformUUID is obtained by executing the OS X specific command: /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | grep 'IOPlatformUUID' This UUID is also written locally to ~/Library/Preferences/.fDTYuRs. Before being written to disk, the UUID is XOR encrypted using the key \"pth\". Currently, kiifd[.]pozon7[.]net is down, however, the Trojan is coded to download and execute an additional payload if the C2 tells it to. It can run an executable file or open a zipped application bundle (.app application). After contacting the first C2, the Trojan checks a local file ~/Library/Parallels/.cfg (or /Library/Parallels/.cfg) for a list of executables or applications to run. ~/Library/Parallels/.cfg is essentially a \"Startup Items\" file that contains a list of programs to run when the Trojan first starts up. Although the Chinese report says that OceanLotus MAC can detect the Parallels virtual environment, we do not think this is the case. OceanLotus MAC simply stores a hidden configuration file in the /Library/Parallels/ directory. Next the Trojan performs a check-in to an \"encrypted\" C2. It first attempts to connect to shop[.]ownpro[.]net, but if that host is down then it will fallback to pad[.]werzo[.]net. The network communication is made over port 443 but does not use SSL. Instead data is encrypted with a single byte XOR key of 0x1B. During the initial check-in, the victim does not send any data that is unique to the compromised host. After confirming successful communication with the C2, the Trojan gets ready to start handling commands from the C2. It starts by creating a keep-alive thread to \"ping\" the C2 every minute. Then it gathers the following information about the system and current user: Product Name and Version (read from /System/Library/CoreServices/SystemVersion.plist) Machine name Is the user root User's name (from pw_gecos) Username MD5 hash of the IOPlatformUUID (If IOPlatformUUID can't be found, then a combination of username and machine name is used as a unique ID) In addition to the system and user information, the Trojan will obtain the current time from www.microsoft.com. It does this by making an HTTP request to www.microsoft.com and parsing the Data header from the response. There is actually an error in the request - the request made to www.microsoft.com looks like: Request to Microsoft to get time in OceanLotus As you can see, there is no path in the request and the server responds with a 400. Since the Trojan only cares about the Date header in the response, the failed request still works. The parsed date is converted to epoch time and stored in ~/Library/Hash/.Hashtag/.hash (or /Library/Hash/.Hashtag/.hash). Here, there is another error in the code where the Trojan attempts to read the time from ~/Library/Hash/.hash and misses the .HashTag directory. In addition to the timestamp, the values \"th\" and 1 are also stored in the file and the entire contents are XOR encrypted with the key \"camon\". The system and user information is sent to the C2 and finally a new thread is created to handle commands from the C2. Below is a dump of the encrypted communication to the C2. dump of the encrypted communication to the C2 by OceanLotus Decoding the system information block with the key 0x1B results in the following data \\xe2\\x80\\x93 highlighted are the product name, OS version, username, machine name, and IOPlatformUUID MD5 hash. \\\\x02\\\\x10\\\\x00\\\\x00\\\\x00Mac OS X 10.10.5\\\\x00\\\\x02\\\\x00\\\\x00\\\\x00av\\\\t\\\\x00\\\\x00\\\\x00lab_osx_1 \\\\x00\\\\x00\\\\x001AD6A35F4C2D73593912F9F9E1A55097\\\\xcb\\\\xf2\\\\x81V\\\\x00\\\\x00\\\\x00\\\\x00@\\\\x00\\\\x00\\\\x00\\\\x02\\\\x00\\\\x00\\\\x00th\\\\x00\\\\x00\\\\x00\\\\x00 After sending the system and user information to the C2, this thread attempts to read from the C2 every second, however, it appears that the C2 only sends data once every 5 seconds. If the response from the C2 contains a command directive, the Trojan will execute one of those commands. The following strings were decrypted from the binary and are likely part of an interactive command console on the C2 side. Usage: ls [path] Usage: cd <path> Usage: pwd Usage: rm <file_path> Usage: cp <srcpath> <dstpath> Usage: mv <srcpath> <dstpath> Usage: ps Usage: proc <pid> Usage: kill <pid> Usage: exec <path> Usage: info [path] Usage: cmd <command system> Usage: localip Usage: recent Usage: windows Usage: download fromURL savePath Usage: cat path [num_byte] Usage: capture <saved_path> where With the exception of a few commands these are self-explanatory. \"exec\" opens an application bundle (.app directory) by calling system(\"open <APP Bundle>\") \"info\" returns information about a file or path \"recent\" returns a list of recently opened documents. This done by calling LSSharedFileListCreate(0, kLSSharedFileListRecentDocumentItems, 0); \"windows\" returns information about the currently open windows on the system (e.g. which process owns the window.). This is done with a call to CGWindowListCopyWindowInfo() \"capture\" saves a screenshot of the current desktop to the specified path. This is done by executing the command: \"/usr/sbin/screencapture -x <PATH>\" (the -x option prevents the shutter sound from being played) \"where\" is missing a usage statement, but it is accepted as a command and returns the full path of the running Trojan. This done by executing: \"ps awx | awk '$1 == [PID] {print $5}\" where PID is the current process ID. In addition to the above functionality, there are commands codes that allow the C2 to perform the following actions (there is some overlap with the previous commands): Update the /Library/Hash/.Hashtag/.hash file Update or read the /Library/Parallels/.cfg file Automatically download files from a URL Unzip and open a zipped application bundle, run an executable file, or execute code from a dynamic library. Kill a process Delete a file or path Shutdown the connection to the C2 Summary The OS X version of OceanLotus is clearly a mature piece of malware that is written specifically for OS X. The use of OS X specific commands and APIs is evidence that the authors are intimately familiar with the operating system and have spent quite a bit of time customizing it for the OS X environment. Similar to other advanced malware, the use of obfuscation and indirection within the binary are an indication that the authors want to protect their work, make it difficult for others to reverse engineer, and reduce detection rates. The fact that VirusTotal still shows a zero detection rate for this threat shows they are succeeding at the latter. We also found a version of OceanLotus that appears to be much simpler. It still communicates with the hardcoded C2 at kiifd[.]pozon7[.]net over port 80, but does not connect to an encrypted C2. This version does not launch multiple threads to handle other tasks and seems less developed so it is most likely an earlier version. We did not perform an in-depth analysis of this earlier variant, however, it could be in interesting exercise to see how the malware has evolved over time. IOCs Hashes: ROL3 encoded .en_icon: 9cf500e1149992baae53caee89df456de54689caf5a1bc25750eb22c5eca1cce ROL3 decoded .en_icon: 3d974c08c6e376f40118c3c2fa0af87fdb9a6147c877ef0e16adad12ad0ee43a ROL3 encoded .DS_Stores: 4c59c448c3991bd4c6d5a9534835a05dc00b1b6032f89ffdd4a9c294d0184e3b ROL3 decoded .DS_Stores: 987680637f31c3fc75c5d2796af84c852f546d654def35901675784fffc07e5d EmptyApplication: 12f941f43b5aba416cbccabf71bce2488a7e642b90a3a1cb0e4c75525abb2888 App bundle 83cd03d4190ad7dd122de96d2cc1e29642ffc34c2a836dbc0e1b03e3b3b55cff Another older variant that only communicates with the unencrypted C2 a3b568fe2154305b3caa1d9a3c42360eacfc13335aee10ac50ef4598e33eea07 C2s: kiifd[.]pozon7[.]net shop[.]ownpro[.]net pad[.]werzo[.]net Dropped Files: /Library/.SystemPreferences/.prev/.ver.txt or ~/Library/.SystemPreferences/.prev/.ver.txt /Library/Logs/.Logs/corevideosd or ~/Library/Logs/.Logs/corevideosd /Library/LaunchAgents/com.google.plugins.plist or ~/Library/LaunchAgents/com.google.plugins.plist /Library/Parallels/.cfg or /~Library/Parallels/.cfg /tmp/crunzip.temp.XXXXXX (passed to mktemp(), so the actual file will vary) ~/Library/Preferences/.fDTYuRs /Library/Hash/.Hashtag/.hash (or ~/Library/Hash/.Hashtag/.hash) Detection Yara Rules rule oceanlotus_xor_decode { meta: author = \"AlienVault Labs\" type = \"malware\" description = \"OceanLotus XOR decode function\" strings: $xor_decode = { 89 D2 41 8A ?? ?? [0-1] 32 0? 88 ?? FF C2 [0-1] 39 ?A [0-1] 0F 43 D? 4? FF C? 48 FF C? [0-1] FF C? 75 E3 } condition: $xor_decode } rule oceanlotus_constants { meta: author = \"AlienVault Labs\" type = \"malware\" description = \"OceanLotus constants\" strings: $c1 = { 3A 52 16 25 11 19 07 14 3D 08 0F } $c2 = { 0F 08 3D 14 07 19 11 25 16 52 3A } condition: any of them } Osquery OceanLotus pack: { \"platform\": \"darwin\", \"version\": \"1.4.5\", \"queries\": { \"OceanLotus_launchagent\": { \"query\" : \"select * from launchd where name = 'com.google.plugins.plist';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus Launch Agent\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_1\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Logs/.Logs/corevideosd';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_2\": { \"query\" : \"select * from file where path = '/Library/Logs/.Logs/corevideosd';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_3\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/.SystemPreferences/.prev/.ver.txt';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_4\": { \"query\" : \"select * from file where path = '/Library/.SystemPreferences/.prev/.ver.txt';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_5\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Parallels/.cfg';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_6\": { \"query\" : \"select * from file where path = '/Library/Parallels/.cfg';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_7\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Preferences/.fDTYuRs';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_8\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Hash/.Hashtag/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_9\": { \"query\" : \"select * from file where path = '/Library/Hash/.Hashtag/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_10\": { \"query\" : \"select * from file where pattern = '/Users/%/Library/Hash/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_11\": { \"query\" : \"select * from file where path = '/Library/Hash/.hash';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" }, \"OceanLotus_dropped_file_12\": { \"query\" : \"select * from file where path = '/tmp/crunzip.temp.%';\", \"interval\" : \"86400\", \"description\" : \"OceanLotus dropped file\", \"value\" : \"Artifact used by this malware\" } } } GO DEEPER WITH THIS WEBCAST: IDS for Security Analysts: How to Get Actionable Insights from your IDS The fun with IDS doesn't stop after installation, in fact, that's really where the fun starts. Join our panel of IDS experts for an educational discussion that will help you make sense of your IDS data, starting from Day 1. We will discuss signature manipulation, event output, and the three \"P's\" - policy, procedure and process. We won't stop there either! You'll find out the meaning behind the terms all the cool kids are using like \"False Positives\" and \"Baselining\". We'll round it out with more information about how IDS interacts with the rest of your IT applications and infrastructure. If you installed an IDS and are wondering what to do next then signup now! WATCH IT NOW \\xe2\\x80\\xba LEARN MORE: Cyber espionage campaign against the Uyghur community, targeting MacOSX systems Yara signatures for \\xe2\\x80\\x9cCareto\\xe2\\x80\\x9d - The Masked APT Detecting malware on Mac OS X with USM and MIDAS Free and Commercial Tools to Implement the SANS Top 20 Security Controls, Part 5: Malware Defenses How Malware Actually Works? TAGS: malware, os x, oceanlotus \\xe2\\x80\\xb9 BACK TO ALL BLOGS Search Our Blogs Get the latest security news in your inbox. SUBSCRIBE VIA EMAIL Labs Research Security Essentials All Blogs Gartner MQ FEATURED CONTENT WEBCAST: IDS for Security Analysts: How to Get Actionable Insights from your IDS WATCH IT NOW \\xe2\\x80\\xba EBOOK: Beginner\\xe2\\x80\\x99s Guide to Open Source Intrusion Detection Tools READ IT NOW \\xe2\\x80\\xba WEBCAST: Six Steps to SIEM Success WATCH IT NOW \\xe2\\x80\\xba Chat From the Blog Jaime Blasco Jaime Blasco Mar 14, 2017 Apache Struts Vulnerability Being Exploited by Attackers Explore All Blog Posts > TwitterLinkedInFacebookYouTube Google+SlideShareSpiceworks Who We Are Meet AlienVault AlienVault Labs Management Team, Board & Advisors Customers Careers Contact Us Newsroom Newsroom Central Events Blogs Partners Partner Programs Partner Portal Products AlienVault USM Overview USM Anywhere (Cloud) USM Appliance (On-Premises) Security as a Service (MSSP) Community & Open Source Offerings Free Trials & Product Resources Open Threat Exchange Open Threat Exchange (OTX) Overview Technology Partners OTX Dashboards & Tools Solutions Cloud Security Management Threat Detection Intrusion Detection SIEM and Log Management Vulnerability Assessment Resources Resources AlienVault Blogs Forums Customer Success Support & Services Login to Support Portal Documentation Center Training Certification CONTACT US Questions? hello@alienvault.com \\xc2\\xa9 Copyright 2017 AlienVault, Inc. | Privacy Policy | Website Terms of Use",
+  "ID_list": [
+    "T1144",
+    "T1159",
+    "TA0003",
+    "TA0005"
+  ],
+  "Name_list": [
+    "At",
+    "Launchctl",
+    "Launchd",
+    "Malware",
+    "Server",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1144": [
+      {
+        "sentence": "In that report, there is a description about a piece of malware that targets OS X systems.",
+        "score": 0.4748
+      },
+      {
+        "sentence": "A sample of that malware was uploaded to VirusTotal a few months ago.",
+        "score": 0.4428
+      },
+      {
+        "sentence": "Curiously, as of February 8th, 2016, none of the 55 anti-virus solutions used by VirusTotal are detecting the sample as malicious.",
+        "score": 0.4974
+      },
+      {
+        "sentence": "As such, we thought it would be interesting to take a closer look at the OS X version of OceanLotus.",
+        "score": 0.4535
+      },
+      {
+        "sentence": "Analysis OceanLotus for OS X is packaged as an application bundle pretending to be an Adobe Flash update.",
+        "score": 0.511
+      },
+      {
+        "sentence": "Although there are other files in the bundle, the files of interest are: FlashUpdate.app/Contents/MacOS/EmptyApplication FlashUpdate.app/Contents/Resources/en.lproj/.en_icon FlashUpdate.app/Contents/Resources/en.lproj/.DS_Stores The Loader As you can see below, EmptyApplication is a universal binary that can run on both i386 and x86_64 architectures.",
+        "score": 0.5109
+      },
+      {
+        "sentence": "It is a fairly simple program that ROL3 decodes the \"hidden\" files .en_icon and .DS_Stores then executes them. $file EmptyApplication EmptyApplication: Mach-O universal binary with 2 architectures EmptyApplication (for architecture x86_64): Mach-O 64-bit executable x86_64 EmptyApplication (for architecture i386): Mach-O executable i386 For obfuscation, EmptyApplication uses XOR encryption with the key \"xc\" to obfuscate strings within the binary.",
+        "score": 0.392
+      },
+      {
+        "sentence": "Below is the simple decryption function.",
+        "score": 0.3057
+      },
+      {
+        "sentence": "OceanLotus XOR decode subroutine In the 64-bit version, strings shorter than 8 bytes are stored as integer values.",
+        "score": 0.3299
+      },
+      {
+        "sentence": "Encrypted strings longer than 8 bytes are stored in adjacent variables and the decrypting function reads past the variable's 8 byte boundary.",
+        "score": 0.3517
+      },
+      {
+        "sentence": "As you can see below, &v34 is passed to the decrypting function, but the function actually decrypts the combination of v34 and v35.",
+        "score": 0.3321
+      },
+      {
+        "sentence": "OceanLotus decoding XOR After decoding .en_icon, EmptyApplication writes it to a temporary directory with the name \"pboard\" (presumably to mimic the OS X paste board daemon) and executes the binary.",
+        "score": 0.4098
+      },
+      {
+        "sentence": "EmptyApplication then deletes itself, decodes .DS_Stores, and writes the decoded binary as \"EmptyApplication\" \\xe2\\x80\\x93 replacing the original EmptyApplication executable.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "Finally, the new EmptyApplication is relaunched with a call to NSTask.launch().",
+        "score": 0.3266
+      },
+      {
+        "sentence": "The decrypted .DS_Stores binary does almost the same thing as the original EmptyApplication, except it does not look for .DS_Stores.",
+        "score": 0.3336
+      },
+      {
+        "sentence": "The Trojan Encrypted Strings The decoded .en_icon file is the main Trojan.",
+        "score": 0.3368
+      },
+      {
+        "sentence": "It has anti-debugging capabilities and handles the connection to the command and control servers.",
+        "score": 0.3232
+      },
+      {
+        "sentence": "As we'll discuss later, the Trojan takes advantage of several OS X specific commands and API calls, so it's clear that this Trojan was tailor-made for OS X rather than a port from another operating system.",
+        "score": 0.3477
+      },
+      {
+        "sentence": "Again, most strings in the binary are XOR encrypted but this binary uses multiple keys and the keys themselves are XOR encrypted.",
+        "score": 0.3822
+      },
+      {
+        "sentence": "In fact, the first thing the Trojan does is to decrypt several XOR keys.",
+        "score": 0.3519
+      },
+      {
+        "sentence": "It is interesting to note that the code that sets up the decryption keys is executed before the \"main\" entry point by using C++ static constructors.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "This code is referenced in the __mod_init_func section of mach-o binaries.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "OceanLotus decoded main Trojan As you can see from the image above, the primary decryption key used throughout the executable is \"Variable\".",
+        "score": 0.3258
+      },
+      {
+        "sentence": "However, there are several different instances of the \"Variable\" string, and it would be trivial for the authors to update the code to use different decryption keys through the code.",
+        "score": 0.3548
+      },
+      {
+        "sentence": "Although XOR decryption is simple by nature, using such a scheme makes reverse engineering a tedious process.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "Below is the decryption function, which is similar to the function used in EmptyApplication, except this version takes a variable decryption key.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "XOR decryption of OceanLotus Anti-Debugging To prevent debuggers from attaching to itself, the Trojan calls ptrace() with the PT_DENY_ATTACH argument.",
+        "score": 0.4092
+      },
+      {
+        "sentence": "Furthermore, it creates a signal handler to catch SIGTRAPs, calls \"int 3\" to throw a SIGTRAP, sets a flag in the SIGTRAP handler and checks the flag value before it continues to run.",
+        "score": 0.3675
+      },
+      {
+        "sentence": "This is more of an annoyance than anything novel in terms of anti-debugging.",
+        "score": 0.3995
+      },
+      {
+        "sentence": "Next, before moving on to the meat of the code, the Trojan performs a signature check on itself by looking at the last 27 bytes of the binary.",
+        "score": 0.4516
+      },
+      {
+        "sentence": "The first 11 bytes of the 27 bytes must match a hardcoded value in the binary and the final 16 bytes must be the MD5 hash of the binary minus the last 27 bytes.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "Persistence This first real bit of trojan functionality that is performed is to set up a Launch Agent for persistence \\xe2\\x80\\x93 the Launch Agent will run every time a user logs in.",
+        "score": 0.4107
+      },
+      {
+        "sentence": "The Trojan copies itself to ~/Library/Logs/.Logs/corevideosd (or /Library/Logs/.Logs/corevideosd if it has root permissions) and creates a Launch Agent plist at ~/Library/LaunchAgents/com.google.plugins.plist (or /Library/LaunchAgents/com.google.plugins.plist) that references the corevideosd executable.",
+        "score": 0.5299
+      },
+      {
+        "sentence": "In addition to using \"hidden\" dot directories, the Trojan calls chflags(filename, UF_HIDDEN) on the corevideosd and com.google.plugins.plist files.",
+        "score": 0.397
+      },
+      {
+        "sentence": "The final step that is taken to lower its profile is to call 'xattr -d -r com.apple.quarantine \"PATH to corevideosd\"' to remove the quarantine extended attribute from corevideosd.",
+        "score": 0.6035
+      },
+      {
+        "sentence": "If the Launch Agent is already running, the command \"/bin/launchctl unload \"/Library/LaunchAgents/com.google.plugins.plist\" is used to unload itself before relaunching corevideosd.",
+        "score": 0.4903
+      },
+      {
+        "sentence": "The IOPlatformUUID is obtained by executing the OS X specific command: /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | grep 'IOPlatformUUID' This UUID is also written locally to ~/Library/Preferences/.fDTYuRs.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "Currently, kiifd[.]pozon7[.]net is down, however, the Trojan is coded to download and execute an additional payload if the C2 tells it to.",
+        "score": 0.4776
+      },
+      {
+        "sentence": "It can run an executable file or open a zipped application bundle (.app application).",
+        "score": 0.4706
+      },
+      {
+        "sentence": "After contacting the first C2, the Trojan checks a local file ~/Library/Parallels/.cfg (or /Library/Parallels/.cfg) for a list of executables or applications to run. ~/Library/Parallels/.cfg is essentially a \"Startup Items\" file that contains a list of programs to run when the Trojan first starts up.",
+        "score": 0.5982
+      },
+      {
+        "sentence": "Although the Chinese report says that OceanLotus MAC can detect the Parallels virtual environment, we do not think this is the case.",
+        "score": 0.3403
+      },
+      {
+        "sentence": "OceanLotus MAC simply stores a hidden configuration file in the /Library/Parallels/ directory.",
+        "score": 0.3111
+      },
+      {
+        "sentence": "Since the Trojan only cares about the Date header in the response, the failed request still works.",
+        "score": 0.3064
+      },
+      {
+        "sentence": "The parsed date is converted to epoch time and stored in ~/Library/Hash/.Hashtag/.hash (or /Library/Hash/.Hashtag/.hash).",
+        "score": 0.3219
+      },
+      {
+        "sentence": "Here, there is another error in the code where the Trojan attempts to read the time from ~/Library/Hash/.hash and misses the .HashTag directory.",
+        "score": 0.4284
+      },
+      {
+        "sentence": "In addition to the timestamp, the values \"th\" and 1 are also stored in the file and the entire contents are XOR encrypted with the key \"camon\".",
+        "score": 0.3557
+      },
+      {
+        "sentence": "If the response from the C2 contains a command directive, the Trojan will execute one of those commands.",
+        "score": 0.3
+      },
+      {
+        "sentence": "The following strings were decrypted from the binary and are likely part of an interactive command console on the C2 side.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "This is done by executing the command: \"/usr/sbin/screencapture -x <PATH>\" (the -x option prevents the shutter sound from being played) \"where\" is missing a usage statement, but it is accepted as a command and returns the full path of the running Trojan.",
+        "score": 0.4622
+      },
+      {
+        "sentence": "In addition to the above functionality, there are commands codes that allow the C2 to perform the following actions (there is some overlap with the previous commands): Update the /Library/Hash/.Hashtag/.hash file Update or read the /Library/Parallels/.cfg file Automatically download files from a URL Unzip and open a zipped application bundle, run an executable file, or execute code from a dynamic library.",
+        "score": 0.6225
+      },
+      {
+        "sentence": "Kill a process Delete a file or path Shutdown the connection to the C2 Summary The OS X version of OceanLotus is clearly a mature piece of malware that is written specifically for OS X.",
+        "score": 0.3409
+      },
+      {
+        "sentence": "The use of OS X specific commands and APIs is evidence that the authors are intimately familiar with the operating system and have spent quite a bit of time customizing it for the OS X environment.",
+        "score": 0.3745
+      },
+      {
+        "sentence": "Similar to other advanced malware, the use of obfuscation and indirection within the binary are an indication that the authors want to protect their work, make it difficult for others to reverse engineer, and reduce detection rates.",
+        "score": 0.3813
+      },
+      {
+        "sentence": "The fact that VirusTotal still shows a zero detection rate for this threat shows they are succeeding at the latter.",
+        "score": 0.4309
+      },
+      {
+        "sentence": "We also found a version of OceanLotus that appears to be much simpler.",
+        "score": 0.3596
+      },
+      {
+        "sentence": "We did not perform an in-depth analysis of this earlier variant, however, it could be in interesting exercise to see how the malware has evolved over time.",
+        "score": 0.3643
+      },
+      {
+        "sentence": "Join our panel of IDS experts for an educational discussion that will help you make sense of your IDS data, starting from Day 1.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "We will discuss signature manipulation, event output, and the three \"P's\" - policy, procedure and process.",
+        "score": 0.3318
+      },
+      {
+        "sentence": "You'll find out the meaning behind the terms all the cool kids are using like \"False Positives\" and \"Baselining\".",
+        "score": 0.3605
+      },
+      {
+        "sentence": "If you installed an IDS and are wondering what to do next then signup now!",
+        "score": 0.3129
+      },
+      {
+        "sentence": "WATCH IT NOW \\xe2\\x80\\xba LEARN MORE: Cyber espionage campaign against the Uyghur community, targeting MacOSX systems Yara signatures for \\xe2\\x80\\x9cCareto\\xe2\\x80\\x9d - The Masked APT Detecting malware on Mac OS X with USM and MIDAS Free and Commercial Tools to Implement the SANS Top 20 Security Controls, Part 5: Malware Defenses How Malware Actually Works?",
+        "score": 0.5068
+      },
+      {
+        "sentence": "TAGS: malware, os x, oceanlotus \\xe2\\x80\\xb9 BACK TO ALL BLOGS Search Our Blogs Get the latest security news in your inbox.",
+        "score": 0.4194
+      }
+    ],
+    "T1159": [
+      {
+        "sentence": "In that report, there is a description about a piece of malware that targets OS X systems.",
+        "score": 0.45
+      },
+      {
+        "sentence": "As such, we thought it would be interesting to take a closer look at the OS X version of OceanLotus.",
+        "score": 0.4837
+      },
+      {
+        "sentence": "Analysis OceanLotus for OS X is packaged as an application bundle pretending to be an Adobe Flash update.",
+        "score": 0.4677
+      },
+      {
+        "sentence": "Although there are other files in the bundle, the files of interest are: FlashUpdate.app/Contents/MacOS/EmptyApplication FlashUpdate.app/Contents/Resources/en.lproj/.en_icon FlashUpdate.app/Contents/Resources/en.lproj/.DS_Stores The Loader As you can see below, EmptyApplication is a universal binary that can run on both i386 and x86_64 architectures.",
+        "score": 0.5536
+      },
+      {
+        "sentence": "It is a fairly simple program that ROL3 decodes the \"hidden\" files .en_icon and .DS_Stores then executes them. $file EmptyApplication EmptyApplication: Mach-O universal binary with 2 architectures EmptyApplication (for architecture x86_64): Mach-O 64-bit executable x86_64 EmptyApplication (for architecture i386): Mach-O executable i386 For obfuscation, EmptyApplication uses XOR encryption with the key \"xc\" to obfuscate strings within the binary.",
+        "score": 0.3786
+      },
+      {
+        "sentence": "OceanLotus decoding XOR After decoding .en_icon, EmptyApplication writes it to a temporary directory with the name \"pboard\" (presumably to mimic the OS X paste board daemon) and executes the binary.",
+        "score": 0.4804
+      },
+      {
+        "sentence": "EmptyApplication then deletes itself, decodes .DS_Stores, and writes the decoded binary as \"EmptyApplication\" \\xe2\\x80\\x93 replacing the original EmptyApplication executable.",
+        "score": 0.3162
+      },
+      {
+        "sentence": "Finally, the new EmptyApplication is relaunched with a call to NSTask.launch().",
+        "score": 0.5235
+      },
+      {
+        "sentence": "The decrypted .DS_Stores binary does almost the same thing as the original EmptyApplication, except it does not look for .DS_Stores.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "The Trojan Encrypted Strings The decoded .en_icon file is the main Trojan.",
+        "score": 0.305
+      },
+      {
+        "sentence": "As we'll discuss later, the Trojan takes advantage of several OS X specific commands and API calls, so it's clear that this Trojan was tailor-made for OS X rather than a port from another operating system.",
+        "score": 0.3435
+      },
+      {
+        "sentence": "It is interesting to note that the code that sets up the decryption keys is executed before the \"main\" entry point by using C++ static constructors.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "This code is referenced in the __mod_init_func section of mach-o binaries.",
+        "score": 0.3359
+      },
+      {
+        "sentence": "OceanLotus decoded main Trojan As you can see from the image above, the primary decryption key used throughout the executable is \"Variable\".",
+        "score": 0.3308
+      },
+      {
+        "sentence": "However, there are several different instances of the \"Variable\" string, and it would be trivial for the authors to update the code to use different decryption keys through the code.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "Below is the decryption function, which is similar to the function used in EmptyApplication, except this version takes a variable decryption key.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "XOR decryption of OceanLotus Anti-Debugging To prevent debuggers from attaching to itself, the Trojan calls ptrace() with the PT_DENY_ATTACH argument.",
+        "score": 0.3118
+      },
+      {
+        "sentence": "Persistence This first real bit of trojan functionality that is performed is to set up a Launch Agent for persistence \\xe2\\x80\\x93 the Launch Agent will run every time a user logs in.",
+        "score": 0.7656
+      },
+      {
+        "sentence": "The Trojan copies itself to ~/Library/Logs/.Logs/corevideosd (or /Library/Logs/.Logs/corevideosd if it has root permissions) and creates a Launch Agent plist at ~/Library/LaunchAgents/com.google.plugins.plist (or /Library/LaunchAgents/com.google.plugins.plist) that references the corevideosd executable.",
+        "score": 0.7469
+      },
+      {
+        "sentence": "In addition to using \"hidden\" dot directories, the Trojan calls chflags(filename, UF_HIDDEN) on the corevideosd and com.google.plugins.plist files.",
+        "score": 0.4443
+      },
+      {
+        "sentence": "The final step that is taken to lower its profile is to call 'xattr -d -r com.apple.quarantine \"PATH to corevideosd\"' to remove the quarantine extended attribute from corevideosd.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "If the Launch Agent is already running, the command \"/bin/launchctl unload \"/Library/LaunchAgents/com.google.plugins.plist\" is used to unload itself before relaunching corevideosd.",
+        "score": 0.6652
+      },
+      {
+        "sentence": "The IOPlatformUUID is obtained by executing the OS X specific command: /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | grep 'IOPlatformUUID' This UUID is also written locally to ~/Library/Preferences/.fDTYuRs.",
+        "score": 0.4184
+      },
+      {
+        "sentence": "Currently, kiifd[.]pozon7[.]net is down, however, the Trojan is coded to download and execute an additional payload if the C2 tells it to.",
+        "score": 0.338
+      },
+      {
+        "sentence": "It can run an executable file or open a zipped application bundle (.app application).",
+        "score": 0.3885
+      },
+      {
+        "sentence": "After contacting the first C2, the Trojan checks a local file ~/Library/Parallels/.cfg (or /Library/Parallels/.cfg) for a list of executables or applications to run. ~/Library/Parallels/.cfg is essentially a \"Startup Items\" file that contains a list of programs to run when the Trojan first starts up.",
+        "score": 0.5171
+      },
+      {
+        "sentence": "OceanLotus MAC simply stores a hidden configuration file in the /Library/Parallels/ directory.",
+        "score": 0.4139
+      },
+      {
+        "sentence": "Then it gathers the following information about the system and current user: Product Name and Version (read from /System/Library/CoreServices/SystemVersion.plist) Machine name Is the user root User's name (from pw_gecos) Username MD5 hash of the IOPlatformUUID (If IOPlatformUUID can't be found, then a combination of username and machine name is used as a unique ID) In addition to the system and user information, the Trojan will obtain the current time from www.microsoft.com.",
+        "score": 0.382
+      },
+      {
+        "sentence": "The parsed date is converted to epoch time and stored in ~/Library/Hash/.Hashtag/.hash (or /Library/Hash/.Hashtag/.hash).",
+        "score": 0.3565
+      },
+      {
+        "sentence": "Here, there is another error in the code where the Trojan attempts to read the time from ~/Library/Hash/.hash and misses the .HashTag directory.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "In addition to the timestamp, the values \"th\" and 1 are also stored in the file and the entire contents are XOR encrypted with the key \"camon\".",
+        "score": 0.3729
+      },
+      {
+        "sentence": "The system and user information is sent to the C2 and finally a new thread is created to handle commands from the C2.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "This is done by executing the command: \"/usr/sbin/screencapture -x <PATH>\" (the -x option prevents the shutter sound from being played) \"where\" is missing a usage statement, but it is accepted as a command and returns the full path of the running Trojan.",
+        "score": 0.419
+      },
+      {
+        "sentence": "In addition to the above functionality, there are commands codes that allow the C2 to perform the following actions (there is some overlap with the previous commands): Update the /Library/Hash/.Hashtag/.hash file Update or read the /Library/Parallels/.cfg file Automatically download files from a URL Unzip and open a zipped application bundle, run an executable file, or execute code from a dynamic library.",
+        "score": 0.4811
+      },
+      {
+        "sentence": "The use of OS X specific commands and APIs is evidence that the authors are intimately familiar with the operating system and have spent quite a bit of time customizing it for the OS X environment.",
+        "score": 0.3896
+      },
+      {
+        "sentence": "We also found a version of OceanLotus that appears to be much simpler.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "This version does not launch multiple threads to handle other tasks and seems less developed so it is most likely an earlier version.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "WATCH IT NOW \\xe2\\x80\\xba LEARN MORE: Cyber espionage campaign against the Uyghur community, targeting MacOSX systems Yara signatures for \\xe2\\x80\\x9cCareto\\xe2\\x80\\x9d - The Masked APT Detecting malware on Mac OS X with USM and MIDAS Free and Commercial Tools to Implement the SANS Top 20 Security Controls, Part 5: Malware Defenses How Malware Actually Works?",
+        "score": 0.468
+      }
+    ]
+  }
+}

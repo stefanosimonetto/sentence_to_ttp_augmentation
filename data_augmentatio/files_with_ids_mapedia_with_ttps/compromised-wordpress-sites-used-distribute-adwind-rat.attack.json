@@ -1,0 +1,1666 @@
+{
+  "original_txt": "With more than 60 million websites, including 33.4 percent of the top 10 million global websites, built on the WordPress platform, it is big news when a new attack aimed at this popular tool surfaces. And, as you can probably guess, the Zscaler ThreatLabZ team recently noticed another campaign targeting WordPress sites.\nSince the first week of April 2020, we observed several instances of malicious Java archive (JAR) files hosted on compromised WordPress websites. These JAR files used several layers of encryption to protect its final payload—the Adwind remote access Trojan (RAT).\nIn this blog, we describe two aspects of this campaign. In the first part, we describe the intelligence information we gathered from this campaign, which was used for threat attribution. In the second part, we explain in detail all the steps used for decrypting the multiple layers of encryption that were used to protect the final payload.\nCompromised sites used for hosting the payload\nWe observed a common pattern shared among all the compromised websites in this campaign, which are used to host the malicious JAR payload. All these websites used the Content Management System (CMS) from WordPress. Attackers often exploit vulnerabilities in WordPress plugins to get access to the admin panel of the CMS. Once the access is obtained, they can host their payload on the server.\nThe WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.\nFigure 1: WordPress version in the HTML source code.\nMost of the compromised websites in this campaign were running a fairly recent version of WordPress—5.3.x. Only a few sites were running outdated versions, such as 4.5.x or 3.3.x.\nThe file names for the payload varied between themes ranging from Coronavirus to payment invoices and shipping delivery services, such as DHL and USPS, as shown below:\nCovid-19Update.jar\nReylontransport-covid19-statement20.jar\nRescheduleUSPS.jar\nDHLPaket.jar\nThreat attribution\nOn some of the compromised WordPress sites used to host the malicious JAR files, we were able to find PHP web shells that attackers used to control the web server as shown in Figure 2.\nFigure 2: PHP web shell on a compromised WordPress site.\nThere are some other web shells present in the same directory. After inspecting the different web shells, we located a PHP mailer script that would send a test email to attacker-specified email addresses, as shown in Figure 3.\nFigure 3: PHP mailing script found on the compromised server.\nEmail addresses:\nTechnical analysis of the encrypted JAR\nThere were multiple layers of encryption used in the JAR files in this campaign, which made it clear that some form of crypting service was used by the threat actor to protect the final JAR payload. After decrypting several layers, we found a reference to “Qarallax”, which leads us to believe that the cryptor used can be attributed to the Qarallax crypt service.\nIn this section of the blog, we will go in to the details of the different layers of encryption and how we unpacked them one by one to reveal the final payload.\nFor the purpose of analysis, we have chosen the JAR file with MD5 hash: 0a5f34440389ca860235434eea963465\nFilename of the JAR file: Covid-19Update.jar\nDecryption: Stage 1\nThis JAR file contains two encrypted resources:\nResource 1: /cloud/file.update\nResource: 2: AaxIv/WEPcXKp/UBLah/kCQuJbJn\nThese resources will be loaded and decrypted at runtime. To understand the decryption process, let us look at the source code of rr.class present inside this JAR file. This class file is responsible for loading the above resources and calling the decryption routines. The code section is shown in Figure 4 with relevant comments added to the code.\nFigure 4: Code for decrypting the resources in stage 1.\nIt is also important to note that the strings referenced in the above code are defined inside the gf.class file. All these strings are encrypted as shown in Figure 5.\nFigure 5: Encrypted strings in stage 1.\nThe string decryption routine is shown in Figure 6.\nFigure 6: String decryption routine in stage 1.\nThis string decryption routine was reused in the later stages as well. So we rewrote it in Python to make the decryption process of further layers easier. The code for string decryption is mentioned in the Appendix I section of this blog.\nThe different steps involved in decryption in above code are:\n- The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array.\n- This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING.\n- The result of the above decryption is an XML file, which is shown in Figure 7.\nFigure 7: XML file obtained after decryption. It contains the AES key to decrypt the second resource.\n4. This resource is loaded using the loadFromXML() method which allows individual properties from the XML to be accessed to continue the decryption process.\nDecryption: Stage 2\nThe XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below.\n- The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file. The PASSWORD entry in the above XML file corresponds to the AES key, which will be used to decrypt this second resource.\n- The AES key used for decrypting the second resource is: xslNGppgnJmTwGGH.\n- Second resource is decrypted to a Gzip file, which gets decompressed to another JAR file.\nDecryption: Stage 3\nIn this stage, we will look at the decrypted JAR file obtained from stage 2. The class files and resource file structure for this JAR is as shown in Figure 8.\nFigure 8: JAR file structure of stage 3.\nThis JAR file has one encrypted resource called “/this/file.grt”.\nExecution of this JAR file begins in the method: j2t.ple.IL as shown in Figure 9.\nFigure 9: The main method in stage 3.\nThe strings in this method were encrypted using the same string encryption method as in stage 1. The only difference was in the initial one byte XOR key, which was changed to 0x58.\nAfter decrypting the strings in the main method, we can see a reference to the Qarallax project. Qarallax provides crypting services for encrypting JAR files on underground hacking forums, leading us to correlate this to Qarallax.\nNow let us look at the method, Il() defined in il_1.class file. This method performs the resource decryption as shown in Figure 10.\nFigure 10: Code for performing decryption of resources in stage 3.\nThe different steps involved in the decryption are:\n- It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array.\n- It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource.\n- The result of decryption is an XML file as shown in Figure 11.\nFigure 11: The XML file after decryption in stage 3.\n4. The SERVER_BIN file in the above decrypted XML corresponds to the next stage encrypted file. PASSWORD_CRYPTED corresponds to an encrypted AES key, which will be used to decrypt the SERVER_BIN file. PRIVATE_PASSWORD is the RSA private key, which is used to decrypt the AES key.\n5. Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.\n6. The RSA private key is stored as a serialized Java object. It is unserialized using the readObject() method.\n7. The unserialized RSA key is used to decrypt the AES key defined in the PASSWORD_CRYPTED section of the XML.\n8. The decrypted AES key is used to decrypt the SERVER_BIN file, which results in the next stage decrypted file.\nDecryption: Stage 4\nThe decrypted payload obtained from stage 3 is the final JAR payload, which was protected with multiple layers of encryption. The JAR class file structure for this payload is as shown in Figure 12.\nFigure 12: The JAR file structure in stage 4.\nThis file contains multiple encrypted resources.\nKey1.json – RSA private key stored as a serialized Java object.\nKey2.json – Encrypted AES key.\nConfig.json – Encrypted config file of the Java RAT.\nLet us look at the main method—server.main.Start()—of this JAR file. We can see the use of encrypted strings in this JAR file as shown in Figure 13.\nFigure 13: The encrypted strings in stage 4.\nFigure 14 shows the string decryption routine.\nFigure 14: The string decryption routine in stage 4.\nThis string decryption routine is different from the previous stages we analyzed. It is a variant of XOR decryption, which derives the decryption key in an interesting way.\nThe first two lines of the decryption routine are:\nStackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1];\nString string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString();\nThese lines are used to fetch the class name and the method name from which the string decryption routine was called. To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1]. From this stack frame, the calling class name and method name are derived.\nAs an example, when the string decryption routine is called by the method \"ii\" in the class \"Start\", then the XOR decryption key will be: \"Startii\".\nUpon further analysis, we discovered that this string decryption routine is the same as the one provided by the Java obfuscator called Allatori. Usually class files obfuscated with Allatori obfuscator use the method name: ALLATORIxDEMOxhthr().\nHowever, in this case, the method name was also obfuscated to remove any reference to Allatori.\nWe rewrote the string decryption routine in Python to decrypt all the strings in this JAR file. The Python script is provided in the Appendix II section of this blog.\nAfter decrypting the strings, the resulting code is shown in Figure 15.\nFigure 15: The code after decrypting the strings.\nDecryption of the config file\nAs a first step, we will decrypt the resources to get access to the config file. The steps involved in decryption are:\n- Loads the serialized object from the resource: “/server/resources/Key1.json” using getClass.getResourceAsStream().\n- Unserializes the Java object using readObject() to get access to the RSA private key.\n- Loads the encrypted AES key from the resource called: \"/server/resources/Key2.json\".\n- Loads the encrypted config file from the resource called: “/server/resources/config.json\".\n- Decrypts the AES key using the RSA private key.\n- Decrypts the encrypted resource using the decrypted AES key.\nThe resulting decrypted config file is as shown below.\n{\"securityRetry\":20,\"vbox\":true,\"security\":[],\"nickName\":\"quarantoes\",\"installation\":{\"jarName\":\"aDaGm\",\"moduleFolder\":\"pWnmd\",\"moduleEntry\":\"tUjeninoYOKbbABjEQOfwMmkkAV/iPYMlXQvBnHKdoBEfaulmhiFQGfShHjNdiXUwSYRhLsTHMKLKkpXcgQlsdxcFcRbKfmpoSbxtVnqmjBHZYAWtNtYoYCLANenc/bOErAlOWThJDSpULmJVQtqDhaxOKlhudNtTRmXmBLSbwTosaNniBOKWGfjLMnAhIFspJ.aHpXpONmqBPEdQLuDgrAhZChTbGSTZlKJXFxqBvREcuWrMTHhhIngmMTMtkrvrWhhjpluNgrCCbfVu\",\"uniqueIDFile\":\".ntusernt.ini\",\"delay\":2,\"jreFolder\":\"Oracle\",\"active\":true,\"mainFolder\":\"pMbbW\",\"moduleExtension\":\"riY\",\"jarExtension\":\"class\",\"jarRegistry\":\"UKikhtn\"},\"vmware\":true,\"encryptKey\":\"ClonWWwVrPXQwSEIcfITKNPMg\",\"network\":[{\"delay\":2,\"port\":9932,\"dns\":\"212.114.52.236\"}]}\nWe provide a description of the key fields present in the above configuration file.\nVbox: Indicates whether the presence of VirtualBox should be checked or not.\nnickName: This is a unique identifier used while building the RAT. In our case, it is “quarantoes”.\nInstallation: A JSON that contains key-value pairs describing the location where the JAR file needs to be copied to on the file system.\njreFolder: Indicates the folder where all the files required for running the JAR are stored.\njarRegistry: The name of the Windows registry key used for persistence.\ndelay: Indicates the number of seconds to delay the execution.\nVmware: Indicates whether the presence of VMWare should be checked or not.\nPort: The port number on which the RAT communicates with the server.\nDNS: IP address of the callback server.\nActivities performed by the RAT\nBelow are the main activities performed by the RAT.\n-\nIt checks the OS name and if it is not Windows, then the RAT does not execute.\n- It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class. The directory name in this path is selected from the “mainFolder” parameter of the config file and the filename is selected using the “jarName” parameter in the config file. The file extension for the JAR file is selected as “.class” based on the configured value for parameter: “jarExtension” in the config file.\n- It sets the Windows registry key for persistence to ensure that the above JAR file is executed automatically using javaw.exe upon reboot.\nKey path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\nKey name: UKikhtn\nKey value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\"\nThe key name is fetched from the config file as well.\n- It loads the DLL from the resource section: “/server/resources” based on the system architecture. For 32-bit system, it loads x86.dll and for 64-bit system, it loads amd64.dll.\nThis DLL will be loaded and copied to a temporary location on the file system with the file extension, “.xml”. The DLL is then loaded using the System.load() command as shown in Figure 16.\nFigure 16: The code for loading the DLL.\n5. It checks the value of the “active” key in the decrypted config.json file. If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.\n6. It checks for the presence of a virtualization environment, such as VMWare, Virtualbox and Qemu. If it finds the presence of such an environment, then it exits the execution.\nWe will not be describing the functionality of this binary in detail in this blog since the final payload is a well-known jRAT (Java-based RAT).\nCloud Sandbox Detection\nFigure 17 shows the Zscaler Cloud Sandbox successfully detecting this JAR-based threat.\nFigure 17: Zscaler Cloud Sandbox detection.\nIn addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels, as seen here: Java.Backdoor.Adwind.\nConclusion\nThis threat actor leverages compromised websites to serve heavily encrypted variants of a Java-based RAT, which makes the detection difficult over the network.\nAs an extra precaution, users should not run JAR files from untrusted and unknown sources since JAR files contain executable code and have the capability of infecting a system.\nWeb administrators who use WordPress installations should ensure that they are running the latest version of WordPress plugins and themes to prevent any vulnerability from being exploited.\nThe Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.\nMITRE ATT&CK TTP Mapping\n| Tactic | Technique |\n|\nPersistence |\nRegistry Run Keys / Startup Folder - T1060 |\n|\nObfuscation |\nObfuscated Files or Information - T1027 |\n|\nSoftware Packing |\nT1045 |\n|\nProcess Discovery |\nQuery and kill system processes - T1057 |\n|\nSecurity Software Discovery |\nT1063 |\n|\nSystem Information Discovery |\nT1082 |\n|\nSystem Network Configuration Discovery |\nT1016 |\n|\nWindows Management Instrumentation |\nT1047 |\n|\nUncommonly Used Port | T1065 |\nIndicators of Compromise (IOC)\nURLs hosting JAR files\nhxxp://haus-pesjak[.]at/Covid-19Update.jar\nhxxps://digitaltextile.com[.]ru/lk/Deutsche%20Telekom.jar\nhxxps://digitaltextile.com[.]ru/n/DHL%20paket.jar\nhxxp://haus-pesjak[.]at/04-07-20Intuitinvoices.jar\nhxxp://teddyshatsworld[.]pl/Reylontransport-covid19-statement20.jar\nhxxp://thaivictory.co[.]th/pageconfig/album/dir/5/order.jar\nhxxp://cherryemoore[.]com/USPS/RedeliveryUSPS.jar\nhxxps://feylibertad[.]org/Amazon-PO20023938.jar\nhxxp://mahalowood[.]com/USPS/USPSReschedulerLabel.jar\nhxxps://newsha.jsonland[.]ir/wp-includes/css/DHLPaket.jar\nhxxps://www.stillval[.]com/USPS/RescheduleUSPS.jar\nhxxps://thediscoveryrun[.]com/UPS/ShippingInfo.jar\nhxxp://jeddahcrumbly[.]com/DHLPAKET.jar\nhxxps://dev.medialogistics2020[.]ca/wp-content/plugins/ubh/Quickbooks-INV5066.jar\nHashes of the samples\n7e4bdf62d3ecd78b3f407f6ec1158678\n0a5f34440389ca860235434eea963465\n1da18ec639f7ec2a8aad58655d846e23\nd7489b47e17630e5594a320b43b201db\nda52c24302a03626d2175123b751f466\nb766cf6695730b74a107cb73157262b1\n919f2d0043f063a90702fb36887699e8\nd470d5a428f99818278fb2816a8d03e9\n8f5e55fbb1bee93dc5912dcbd0092519\n4a97b2d004d72b69aa64f621b5b74775\n051b4da1f0079c6f60d6c8eb62b3f586\n2020551b5373121053abdbf3eaafa02d\na4da22e269b93148eb9857036b9a072a\n876eb4208ef2eec6e9f12b13f764a975\n1d77e96974e1e2301ed78cec19e8710b\nNetwork Indicators\n212.114.52[.]236:9932\nunks123.duckdns[.]org:46865\nlay.dubya[.]us:8181\nfresh.ygto[.]com:1010\ngwiza1988.hopto[.]org:6025\npraisesalways.ddns[.]net:1010\nwawa.cleansite[.]us:1010\ndlee889.mywire[.]org:5858\nAppendix I\nString decryption routine\n#! /usr/bin/python\n# -*- coding: utf-8 -*-\nimport sys\n# Replace encoded_string with the string to be decoded.\ninput =\n# Replace one_byte_key with the respective value found in the Java class file\nkey =\nl = len(input) - 1\noutput = []\ncounter = l\nwhile counter >= 0:\nb1 = ord(input[l]) ^ key\nt = (l ^ key) & 0x3f\noutput.append(chr(b1))\nl = l - 1\nif l\nbreak\nb2 = ord(input[l]) ^ t\nkey = (l ^ t) & 0x3f\noutput.append(chr(b2))\nl = l - 1\ncounter = l\noutput.reverse()\nprint(''.join(output))\nAllatori string decryption routine ported to Python\n#! /usr/bin/python\nimport os\nimport sys\ndef decode(encrypted, c_method):\nbase_string = c_method\nn2 = len(encrypted)\nn3 = n2 - 1\n# Replace n4_val and n5_val with the respective values used in the Allatori obfuscator.\n# These are one byte values\nn4 =\nn5 =\nn6 = n = len(base_string) - 1\nstring2 = base_string\nresult = []\nwhile (n3 >= 0):\nn7 = n3\nn3 = n3 - 1\nresult.append(chr(n5 ^ (ord(encrypted[n7]) ^ ord(string2[n]))))\nif (n3\nn8 = n3\nn3 = n3 - 1\nresult.append(chr(n4 ^ (ord(encrypted[n8]) ^ ord(string2[n]))))\nm = n\nn = n - 1\nif (m\nn = n6;\nn9 = n3\nreturn result\nif __name__ == \"__main__\":\n# Replace encrypted_string with the string to be decrypted\nencrypted_str =\n# Replace calling_class_name and calling_method_name with the names of the Class and Method from where the decryption routine was invoked\nc_method =\nprint ''.join(decode(encrypted_str, c_method))[::-1]",
+  "sanitized_txt": "With more than 60 million websites, including 33.4 percent of the top 10 million global websites, built on the WordPress platform, it is big news when a new attack aimed at this popular tool surfaces. And, as you can probably guess, the Zscaler ThreatLabZ team recently noticed another campaign targeting WordPress sites.\nSince the first week of April 2020, we observed several instances of malicious Java archive (JAR) files hosted on compromised WordPress websites. These JAR files used several layers of encryption to protect its final payload—the Adwind remote access Trojan (RAT).\nIn this blog, we describe two aspects of this campaign. In the first part, we describe the intelligence information we gathered from this campaign, which was used for threat attribution. In the second part, we explain in detail all the steps used for decrypting the multiple layers of encryption that were used to protect the final payload.\nCompromised sites used for hosting the payload We observed a common pattern shared among all the compromised websites in this campaign, which are used to host the malicious JAR payload. All these websites used the Content Management System (CMS) from WordPress. Attackers often exploit vulnerabilities in WordPress plugins to get access to the admin panel of the CMS. Once the access is obtained, they can host their payload on the server.\nThe WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.\nFigure 1: WordPress version in the HTML source code.\nMost of the compromised websites in this campaign were running a fairly recent version of WordPress—5.3.x. Only a few sites were running outdated versions, such as 4.5.x or 3.3.x.\nThe file names for the payload varied between themes ranging from Coronavirus to payment invoices and shipping delivery services, such as DHL and USPS, as shown below:\nCovid-19Update.jar Reylontransport-covid19-statement20.jar RescheduleUSPS.jar DHLPaket.jar Threat attribution On some of the compromised WordPress sites used to host the malicious JAR files, we were able to find PHP web shells that attackers used to control the web server as shown in Figure 2.\nFigure 2: PHP web shell on a compromised WordPress site.\nThere are some other web shells present in the same directory. After inspecting the different web shells, we located a PHP mailer script that would send a test email to attacker-specified email addresses, as shown in Figure 3.\nFigure 3: PHP mailing script found on the compromised server.\nEmail addresses:\nTechnical analysis of the encrypted JAR There were multiple layers of encryption used in the JAR files in this campaign, which made it clear that some form of crypting service was used by the threat actor to protect the final JAR payload. After decrypting several layers, we found a reference to “Qarallax”, which leads us to believe that the cryptor used can be attributed to the Qarallax crypt service.\nIn this section of the blog, we will go in to the details of the different layers of encryption and how we unpacked them one by one to reveal the final payload.\nFor the purpose of analysis, we have chosen the JAR file with MD5 hash: 0a5f34440389ca860235434eea963465 Filename of the JAR file: Covid-19Update.jar Decryption: Stage 1 This JAR file contains two encrypted resources:\nResource 1: /cloud/file.update Resource: 2: AaxIv/WEPcXKp/UBLah/kCQuJbJn These resources will be loaded and decrypted at runtime. To understand the decryption process, let us look at the source code of rr.class present inside this JAR file. This class file is responsible for loading the above resources and calling the decryption routines. The code section is shown in Figure 4 with relevant comments added to the code.\nFigure 4: Code for decrypting the resources in stage 1.\nIt is also important to note that the strings referenced in the above code are defined inside the gf.class file. All these strings are encrypted as shown in Figure 5.\nFigure 5: Encrypted strings in stage 1.\nThe string decryption routine is shown in Figure 6.\nFigure 6: String decryption routine in stage 1.\nThis string decryption routine was reused in the later stages as well. So we rewrote it in Python to make the decryption process of further layers easier. The code for string decryption is mentioned in the Appendix I section of this blog.\nThe different steps involved in decryption in above code are:\n- The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array.\n- This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING.\n- The result of the above decryption is an XML file, which is shown in Figure 7.\nFigure 7: XML file obtained after decryption. It contains the AES key to decrypt the second resource.\n4. This resource is loaded using the loadFromXML() method which allows individual properties from the XML to be accessed to continue the decryption process.\nDecryption: Stage 2 The XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below.\n- The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file. The PASSWORD entry in the above XML file corresponds to the AES key, which will be used to decrypt this second resource.\n- The AES key used for decrypting the second resource is: xslNGppgnJmTwGGH.\n- Second resource is decrypted to a Gzip file, which gets decompressed to another JAR file.\nDecryption: Stage 3 In this stage, we will look at the decrypted JAR file obtained from stage 2. The class files and resource file structure for this JAR is as shown in Figure 8.\nFigure 8: JAR file structure of stage 3.\nThis JAR file has one encrypted resource called “/this/file.grt”.\nExecution of this JAR file begins in the method: j2t.ple.IL as shown in Figure 9.\nFigure 9: The main method in stage 3.\nThe strings in this method were encrypted using the same string encryption method as in stage 1. The only difference was in the initial one byte XOR key, which was changed to 0x58.\nAfter decrypting the strings in the main method, we can see a reference to the Qarallax project. Qarallax provides crypting services for encrypting JAR files on underground hacking forums, leading us to correlate this to Qarallax.\nNow let us look at the method, Il() defined in il_1.class file. This method performs the resource decryption as shown in Figure 10.\nFigure 10: Code for performing decryption of resources in stage 3.\nThe different steps involved in the decryption are:\n- It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array.\n- It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource.\n- The result of decryption is an XML file as shown in Figure 11.\nFigure 11: The XML file after decryption in stage 3.\n4. The SERVER_BIN file in the above decrypted XML corresponds to the next stage encrypted file. PASSWORD_CRYPTED corresponds to an encrypted AES key, which will be used to decrypt the SERVER_BIN file. PRIVATE_PASSWORD is the RSA private key, which is used to decrypt the AES key.\n5. Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.\n6. The RSA private key is stored as a serialized Java object. It is unserialized using the readObject() method.\n7. The unserialized RSA key is used to decrypt the AES key defined in the PASSWORD_CRYPTED section of the XML.\n8. The decrypted AES key is used to decrypt the SERVER_BIN file, which results in the next stage decrypted file.\nDecryption: Stage 4 The decrypted payload obtained from stage 3 is the final JAR payload, which was protected with multiple layers of encryption. The JAR class file structure for this payload is as shown in Figure 12.\nFigure 12: The JAR file structure in stage 4.\nThis file contains multiple encrypted resources.\nKey1.json – RSA private key stored as a serialized Java object.\nKey2.json – Encrypted AES key.\nConfig.json – Encrypted config file of the Java RAT.\nLet us look at the main method—server.main.Start()—of this JAR file. We can see the use of encrypted strings in this JAR file as shown in Figure 13.\nFigure 13: The encrypted strings in stage 4.\nFigure 14 shows the string decryption routine.\nFigure 14: The string decryption routine in stage 4.\nThis string decryption routine is different from the previous stages we analyzed. It is a variant of XOR decryption, which derives the decryption key in an interesting way.\nThe first two lines of the decryption routine are:\nStackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1];\nString string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString();\nThese lines are used to fetch the class name and the method name from which the string decryption routine was called. To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1]. From this stack frame, the calling class name and method name are derived.\nAs an example, when the string decryption routine is called by the method \"ii\" in the class \"Start\", then the XOR decryption key will be: \"Startii\".\nUpon further analysis, we discovered that this string decryption routine is the same as the one provided by the Java obfuscator called Allatori. Usually class files obfuscated with Allatori obfuscator use the method name: ALLATORIxDEMOxhthr().\nHowever, in this case, the method name was also obfuscated to remove any reference to Allatori.\nWe rewrote the string decryption routine in Python to decrypt all the strings in this JAR file. The Python script is provided in the Appendix II section of this blog.\nAfter decrypting the strings, the resulting code is shown in Figure 15.\nFigure 15: The code after decrypting the strings.\nDecryption of the config file As a first step, we will decrypt the resources to get access to the config file. The steps involved in decryption are:\n- Loads the serialized object from the resource: “/server/resources/Key1.json” using getClass.getResourceAsStream().\n- Unserializes the Java object using readObject() to get access to the RSA private key.\n- Loads the encrypted AES key from the resource called: \"/server/resources/Key2.json\".\n- Loads the encrypted config file from the resource called: “/server/resources/config.json\".\n- Decrypts the AES key using the RSA private key.\n- Decrypts the encrypted resource using the decrypted AES key.\nThe resulting decrypted config file is as shown below.\n{\"securityRetry\":20,\"vbox\":true,\"security\":[],\"nickName\":\"quarantoes\",\"installation\":{\"jarName\":\"aDaGm\",\"moduleFolder\":\"pWnmd\",\"moduleEntry\":\"tUjeninoYOKbbABjEQOfwMmkkAV/iPYMlXQvBnHKdoBEfaulmhiFQGfShHjNdiXUwSYRhLsTHMKLKkpXcgQlsdxcFcRbKfmpoSbxtVnqmjBHZYAWtNtYoYCLANenc/bOErAlOWThJDSpULmJVQtqDhaxOKlhudNtTRmXmBLSbwTosaNniBOKWGfjLMnAhIFspJ.aHpXpONmqBPEdQLuDgrAhZChTbGSTZlKJXFxqBvREcuWrMTHhhIngmMTMtkrvrWhhjpluNgrCCbfVu\",\"uniqueIDFile\":\".ntusernt.ini\",\"delay\":2,\"jreFolder\":\"Oracle\",\"active\":true,\"mainFolder\":\"pMbbW\",\"moduleExtension\":\"riY\",\"jarExtension\":\"class\",\"jarRegistry\":\"UKikhtn\"},\"vmware\":true,\"encryptKey\":\"ClonWWwVrPXQwSEIcfITKNPMg\",\"network\":[{\"delay\":2,\"port\":9932,\"dns\":\"212.114.52.236\"}]} We provide a description of the key fields present in the above configuration file.\nVbox: Indicates whether the presence of VirtualBox should be checked or not.\nnickName: This is a unique identifier used while building the RAT. In our case, it is “quarantoes”.\nInstallation: A JSON that contains key-value pairs describing the location where the JAR file needs to be copied to on the file system.\njreFolder: Indicates the folder where all the files required for running the JAR are stored.\njarRegistry: The name of the Windows registry key used for persistence.\ndelay: Indicates the number of seconds to delay the execution.\nVmware: Indicates whether the presence of VMWare should be checked or not.\nPort: The port number on which the RAT communicates with the server.\nDNS: IP address of the callback server.\nActivities performed by the RAT Below are the main activities performed by the RAT.\n- It checks the OS name and if it is not Windows, then the RAT does not execute.\n- It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class. The directory name in this path is selected from the “mainFolder” parameter of the config file and the filename is selected using the “jarName” parameter in the config file. The file extension for the JAR file is selected as “.class” based on the configured value for parameter: “jarExtension” in the config file.\n- It sets the Windows registry key for persistence to ensure that the above JAR file is executed automatically using javaw.exe upon reboot.\nKey path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run Key name: UKikhtn Key value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\" The key name is fetched from the config file as well.\n- It loads the DLL from the resource section: “/server/resources” based on the system architecture. For 32-bit system, it loads x86.dll and for 64-bit system, it loads amd64.dll.\nThis DLL will be loaded and copied to a temporary location on the file system with the file extension, “.xml”. The DLL is then loaded using the System.load() command as shown in Figure 16.\nFigure 16: The code for loading the DLL.\n5. It checks the value of the “active” key in the decrypted config.json file. If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.\n6. It checks for the presence of a virtualization environment, such as VMWare, Virtualbox and Qemu. If it finds the presence of such an environment, then it exits the execution.\nWe will not be describing the functionality of this binary in detail in this blog since the final payload is a well-known jRAT (Java-based RAT).\nCloud Sandbox Detection Figure 17 shows the Zscaler Cloud Sandbox successfully detecting this JAR-based threat.\nFigure 17: Zscaler Cloud Sandbox detection.\nIn addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels, as seen here: Java.Backdoor.Adwind.\nConclusion This threat actor leverages compromised websites to serve heavily encrypted variants of a Java-based RAT, which makes the detection difficult over the network.\nAs an extra precaution, users should not run JAR files from untrusted and unknown sources since JAR files contain executable code and have the capability of infecting a system.\nWeb administrators who use WordPress installations should ensure that they are running the latest version of WordPress plugins and themes to prevent any vulnerability from being exploited.\nThe Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.\ninput = # Replace one_byte_key with the respective value found in the Java class file key = l = len(input) - 1 output = [] counter = l while counter >= 0:\nb1 = ord(input[l]) ^ key t = (l ^ key) & 0x3f output.append(chr(b1)) l = l - 1 if l break b2 = ord(input[l]) ^ t key = (l ^ t) & 0x3f output.append(chr(b2)) l = l - 1 counter = l output.reverse() print(''.join(output)) Allatori string decryption routine ported to Python #! /usr/bin/python import os import sys def decode(encrypted, c_method):\nbase_string = c_method n2 = len(encrypted) n3 = n2 - 1 # Replace n4_val and n5_val with the respective values used in the Allatori obfuscator.\n# These are one byte values n4 = n5 = n6 = n = len(base_string) - 1 string2 = base_string result = [] while (n3 >= 0):\nn7 = n3 n3 = n3 - 1 result.append(chr(n5 ^ (ord(encrypted[n7]) ^ ord(string2[n])))) if (n3 n8 = n3 n3 = n3 - 1 result.append(chr(n4 ^ (ord(encrypted[n8]) ^ ord(string2[n])))) m = n n = n - 1 if (m n = n6;\nn9 = n3 return result if __name__ == \"__main__\":\n# Replace encrypted_string with the string to be decrypted encrypted_str = # Replace calling_class_name and calling_method_name with the names of the Class and Method from where the decryption routine was invoked c_method = print ''.join(decode(encrypted_str, c_method))[::-1]",
+  "ID_list": [
+    "T1016",
+    "T1027",
+    "T1045",
+    "T1047",
+    "T1057",
+    "T1060",
+    "T1063",
+    "T1065",
+    "T1082"
+  ],
+  "Name_list": [
+    "Discovery",
+    "Execution",
+    "Persistence",
+    "Source",
+    "Web Shell"
+  ],
+  "TTP_sentences": {
+    "T1027": [
+      {
+        "sentence": "With more than 60 million websites, including 33.4 percent of the top 10 million global websites, built on the WordPress platform, it is big news when a new attack aimed at this popular tool surfaces.",
+        "score": 0.3695
+      },
+      {
+        "sentence": "And, as you can probably guess, the Zscaler ThreatLabZ team recently noticed another campaign targeting WordPress sites.",
+        "score": 0.3458
+      },
+      {
+        "sentence": "Since the first week of April 2020, we observed several instances of malicious Java archive (JAR) files hosted on compromised WordPress websites.",
+        "score": 0.5549
+      },
+      {
+        "sentence": "These JAR files used several layers of encryption to protect its final payload—the Adwind remote access Trojan (RAT).",
+        "score": 0.6803
+      },
+      {
+        "sentence": "In this blog, we describe two aspects of this campaign.",
+        "score": 0.4338
+      },
+      {
+        "sentence": "In the first part, we describe the intelligence information we gathered from this campaign, which was used for threat attribution.",
+        "score": 0.4514
+      },
+      {
+        "sentence": "In the second part, we explain in detail all the steps used for decrypting the multiple layers of encryption that were used to protect the final payload.",
+        "score": 0.7744
+      },
+      {
+        "sentence": "Compromised sites used for hosting the payload We observed a common pattern shared among all the compromised websites in this campaign, which are used to host the malicious JAR payload.",
+        "score": 0.5247
+      },
+      {
+        "sentence": "All these websites used the Content Management System (CMS) from WordPress.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "The WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.",
+        "score": 0.3678
+      },
+      {
+        "sentence": "Figure 1: WordPress version in the HTML source code.",
+        "score": 0.4691
+      },
+      {
+        "sentence": "Only a few sites were running outdated versions, such as 4.5.x or 3.3.x.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "The file names for the payload varied between themes ranging from Coronavirus to payment invoices and shipping delivery services, such as DHL and USPS, as shown below: Covid-19Update.jar Reylontransport-covid19-statement20.jar RescheduleUSPS.jar DHLPaket.jar Threat attribution On some of the compromised WordPress sites used to host the malicious JAR files, we were able to find PHP web shells that attackers used to control the web server as shown in Figure 2.",
+        "score": 0.569
+      },
+      {
+        "sentence": "Figure 2: PHP web shell on a compromised WordPress site.",
+        "score": 0.374
+      },
+      {
+        "sentence": "There are some other web shells present in the same directory.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "Email addresses: Technical analysis of the encrypted JAR There were multiple layers of encryption used in the JAR files in this campaign, which made it clear that some form of crypting service was used by the threat actor to protect the final JAR payload.",
+        "score": 0.8292
+      },
+      {
+        "sentence": "After decrypting several layers, we found a reference to “Qarallax”, which leads us to believe that the cryptor used can be attributed to the Qarallax crypt service.",
+        "score": 0.6234
+      },
+      {
+        "sentence": "In this section of the blog, we will go in to the details of the different layers of encryption and how we unpacked them one by one to reveal the final payload.",
+        "score": 0.7573
+      },
+      {
+        "sentence": "For the purpose of analysis, we have chosen the JAR file with MD5 hash: 0a5f34440389ca860235434eea963465 Filename of the JAR file: Covid-19Update.jar Decryption: Stage 1 This JAR file contains two encrypted resources: Resource 1: /cloud/file.update Resource: 2: AaxIv/WEPcXKp/UBLah/kCQuJbJn These resources will be loaded and decrypted at runtime.",
+        "score": 0.7655
+      },
+      {
+        "sentence": "To understand the decryption process, let us look at the source code of rr.class present inside this JAR file.",
+        "score": 0.7409
+      },
+      {
+        "sentence": "This class file is responsible for loading the above resources and calling the decryption routines.",
+        "score": 0.5862
+      },
+      {
+        "sentence": "The code section is shown in Figure 4 with relevant comments added to the code.",
+        "score": 0.532
+      },
+      {
+        "sentence": "Figure 4: Code for decrypting the resources in stage 1.",
+        "score": 0.5768
+      },
+      {
+        "sentence": "It is also important to note that the strings referenced in the above code are defined inside the gf.class file.",
+        "score": 0.6042
+      },
+      {
+        "sentence": "All these strings are encrypted as shown in Figure 5.",
+        "score": 0.8224
+      },
+      {
+        "sentence": "Figure 5: Encrypted strings in stage 1.",
+        "score": 0.7611
+      },
+      {
+        "sentence": "The string decryption routine is shown in Figure 6.",
+        "score": 0.5852
+      },
+      {
+        "sentence": "Figure 6: String decryption routine in stage 1.",
+        "score": 0.5313
+      },
+      {
+        "sentence": "This string decryption routine was reused in the later stages as well.",
+        "score": 0.5658
+      },
+      {
+        "sentence": "So we rewrote it in Python to make the decryption process of further layers easier.",
+        "score": 0.6429
+      },
+      {
+        "sentence": "The code for string decryption is mentioned in the Appendix I section of this blog.",
+        "score": 0.6382
+      },
+      {
+        "sentence": "The different steps involved in decryption in above code are: - The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array. - This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING. - The result of the above decryption is an XML file, which is shown in Figure 7.",
+        "score": 0.6262
+      },
+      {
+        "sentence": "Figure 7: XML file obtained after decryption.",
+        "score": 0.5926
+      },
+      {
+        "sentence": "It contains the AES key to decrypt the second resource.",
+        "score": 0.6525
+      },
+      {
+        "sentence": "This resource is loaded using the loadFromXML() method which allows individual properties from the XML to be accessed to continue the decryption process.",
+        "score": 0.565
+      },
+      {
+        "sentence": "Decryption: Stage 2 The XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below. - The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file.",
+        "score": 0.7143
+      },
+      {
+        "sentence": "The PASSWORD entry in the above XML file corresponds to the AES key, which will be used to decrypt this second resource. - The AES key used for decrypting the second resource is: xslNGppgnJmTwGGH. - Second resource is decrypted to a Gzip file, which gets decompressed to another JAR file.",
+        "score": 0.6945
+      },
+      {
+        "sentence": "Decryption: Stage 3 In this stage, we will look at the decrypted JAR file obtained from stage 2.",
+        "score": 0.5674
+      },
+      {
+        "sentence": "The class files and resource file structure for this JAR is as shown in Figure 8.",
+        "score": 0.6039
+      },
+      {
+        "sentence": "Figure 8: JAR file structure of stage 3.",
+        "score": 0.5737
+      },
+      {
+        "sentence": "This JAR file has one encrypted resource called “/this/file.grt”.",
+        "score": 0.7789
+      },
+      {
+        "sentence": "Execution of this JAR file begins in the method: j2t.ple.IL as shown in Figure 9.",
+        "score": 0.5312
+      },
+      {
+        "sentence": "Figure 9: The main method in stage 3.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "The strings in this method were encrypted using the same string encryption method as in stage 1.",
+        "score": 0.7556
+      },
+      {
+        "sentence": "The only difference was in the initial one byte XOR key, which was changed to 0x58.",
+        "score": 0.639
+      },
+      {
+        "sentence": "After decrypting the strings in the main method, we can see a reference to the Qarallax project.",
+        "score": 0.6867
+      },
+      {
+        "sentence": "Qarallax provides crypting services for encrypting JAR files on underground hacking forums, leading us to correlate this to Qarallax.",
+        "score": 0.706
+      },
+      {
+        "sentence": "Now let us look at the method, Il() defined in il_1.class file.",
+        "score": 0.4588
+      },
+      {
+        "sentence": "This method performs the resource decryption as shown in Figure 10.",
+        "score": 0.5305
+      },
+      {
+        "sentence": "Figure 10: Code for performing decryption of resources in stage 3.",
+        "score": 0.5422
+      },
+      {
+        "sentence": "The different steps involved in the decryption are: - It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array. - It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource. - The result of decryption is an XML file as shown in Figure 11.",
+        "score": 0.6896
+      },
+      {
+        "sentence": "Figure 11: The XML file after decryption in stage 3.",
+        "score": 0.6094
+      },
+      {
+        "sentence": "The SERVER_BIN file in the above decrypted XML corresponds to the next stage encrypted file.",
+        "score": 0.6201
+      },
+      {
+        "sentence": "PASSWORD_CRYPTED corresponds to an encrypted AES key, which will be used to decrypt the SERVER_BIN file.",
+        "score": 0.6653
+      },
+      {
+        "sentence": "PRIVATE_PASSWORD is the RSA private key, which is used to decrypt the AES key.",
+        "score": 0.6375
+      },
+      {
+        "sentence": "Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.",
+        "score": 0.4776
+      },
+      {
+        "sentence": "The RSA private key is stored as a serialized Java object.",
+        "score": 0.6688
+      },
+      {
+        "sentence": "It is unserialized using the readObject() method.",
+        "score": 0.5313
+      },
+      {
+        "sentence": "The unserialized RSA key is used to decrypt the AES key defined in the PASSWORD_CRYPTED section of the XML.",
+        "score": 0.6673
+      },
+      {
+        "sentence": "The decrypted AES key is used to decrypt the SERVER_BIN file, which results in the next stage decrypted file.",
+        "score": 0.5277
+      },
+      {
+        "sentence": "Decryption: Stage 4 The decrypted payload obtained from stage 3 is the final JAR payload, which was protected with multiple layers of encryption.",
+        "score": 0.7019
+      },
+      {
+        "sentence": "The JAR class file structure for this payload is as shown in Figure 12.",
+        "score": 0.5906
+      },
+      {
+        "sentence": "Figure 12: The JAR file structure in stage 4.",
+        "score": 0.5774
+      },
+      {
+        "sentence": "This file contains multiple encrypted resources.",
+        "score": 0.7951
+      },
+      {
+        "sentence": "Key1.json – RSA private key stored as a serialized Java object.",
+        "score": 0.6299
+      },
+      {
+        "sentence": "Key2.json – Encrypted AES key.",
+        "score": 0.6167
+      },
+      {
+        "sentence": "Config.json – Encrypted config file of the Java RAT.",
+        "score": 0.7132
+      },
+      {
+        "sentence": "Let us look at the main method—server.main.Start()—of this JAR file.",
+        "score": 0.5023
+      },
+      {
+        "sentence": "We can see the use of encrypted strings in this JAR file as shown in Figure 13.",
+        "score": 0.8347
+      },
+      {
+        "sentence": "Figure 13: The encrypted strings in stage 4.",
+        "score": 0.7947
+      },
+      {
+        "sentence": "Figure 14 shows the string decryption routine.",
+        "score": 0.5675
+      },
+      {
+        "sentence": "Figure 14: The string decryption routine in stage 4.",
+        "score": 0.5636
+      },
+      {
+        "sentence": "This string decryption routine is different from the previous stages we analyzed.",
+        "score": 0.6245
+      },
+      {
+        "sentence": "It is a variant of XOR decryption, which derives the decryption key in an interesting way.",
+        "score": 0.6089
+      },
+      {
+        "sentence": "The first two lines of the decryption routine are: StackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1]; String string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString(); These lines are used to fetch the class name and the method name from which the string decryption routine was called.",
+        "score": 0.5935
+      },
+      {
+        "sentence": "To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1].",
+        "score": 0.3936
+      },
+      {
+        "sentence": "From this stack frame, the calling class name and method name are derived.",
+        "score": 0.4862
+      },
+      {
+        "sentence": "As an example, when the string decryption routine is called by the method \"ii\" in the class \"Start\", then the XOR decryption key will be: \"Startii\".",
+        "score": 0.6081
+      },
+      {
+        "sentence": "Upon further analysis, we discovered that this string decryption routine is the same as the one provided by the Java obfuscator called Allatori.",
+        "score": 0.7172
+      },
+      {
+        "sentence": "Usually class files obfuscated with Allatori obfuscator use the method name: ALLATORIxDEMOxhthr().",
+        "score": 0.7572
+      },
+      {
+        "sentence": "However, in this case, the method name was also obfuscated to remove any reference to Allatori.",
+        "score": 0.7602
+      },
+      {
+        "sentence": "We rewrote the string decryption routine in Python to decrypt all the strings in this JAR file.",
+        "score": 0.6749
+      },
+      {
+        "sentence": "The Python script is provided in the Appendix II section of this blog.",
+        "score": 0.4353
+      },
+      {
+        "sentence": "After decrypting the strings, the resulting code is shown in Figure 15.",
+        "score": 0.6369
+      },
+      {
+        "sentence": "Figure 15: The code after decrypting the strings.",
+        "score": 0.6768
+      },
+      {
+        "sentence": "Decryption of the config file As a first step, we will decrypt the resources to get access to the config file.",
+        "score": 0.662
+      },
+      {
+        "sentence": "Vbox: Indicates whether the presence of VirtualBox should be checked or not. nickName: This is a unique identifier used while building the RAT.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "Installation: A JSON that contains key-value pairs describing the location where the JAR file needs to be copied to on the file system. jreFolder: Indicates the folder where all the files required for running the JAR are stored. jarRegistry: The name of the Windows registry key used for persistence. delay: Indicates the number of seconds to delay the execution.",
+        "score": 0.457
+      },
+      {
+        "sentence": "Port: The port number on which the RAT communicates with the server.",
+        "score": 0.3068
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.4279
+      },
+      {
+        "sentence": "The directory name in this path is selected from the “mainFolder” parameter of the config file and the filename is selected using the “jarName” parameter in the config file.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "The file extension for the JAR file is selected as “.class” based on the configured value for parameter: “jarExtension” in the config file. - It sets the Windows registry key for persistence to ensure that the above JAR file is executed automatically using javaw.exe upon reboot.",
+        "score": 0.3781
+      },
+      {
+        "sentence": "Key path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run Key name: UKikhtn Key value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\" The key name is fetched from the config file as well. - It loads the DLL from the resource section: “/server/resources” based on the system architecture.",
+        "score": 0.4573
+      },
+      {
+        "sentence": "For 32-bit system, it loads x86.dll and for 64-bit system, it loads amd64.dll.",
+        "score": 0.4556
+      },
+      {
+        "sentence": "This DLL will be loaded and copied to a temporary location on the file system with the file extension, “.xml”.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "The DLL is then loaded using the System.load() command as shown in Figure 16.",
+        "score": 0.426
+      },
+      {
+        "sentence": "Figure 16: The code for loading the DLL.",
+        "score": 0.4975
+      },
+      {
+        "sentence": "It checks the value of the “active” key in the decrypted config.json file.",
+        "score": 0.5126
+      },
+      {
+        "sentence": "If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.",
+        "score": 0.4609
+      },
+      {
+        "sentence": "If it finds the presence of such an environment, then it exits the execution.",
+        "score": 0.4857
+      },
+      {
+        "sentence": "We will not be describing the functionality of this binary in detail in this blog since the final payload is a well-known jRAT (Java-based RAT).",
+        "score": 0.5304
+      },
+      {
+        "sentence": "Cloud Sandbox Detection Figure 17 shows the Zscaler Cloud Sandbox successfully detecting this JAR-based threat.",
+        "score": 0.4523
+      },
+      {
+        "sentence": "Figure 17: Zscaler Cloud Sandbox detection.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels, as seen here: Java.Backdoor.Adwind.",
+        "score": 0.4943
+      },
+      {
+        "sentence": "Conclusion This threat actor leverages compromised websites to serve heavily encrypted variants of a Java-based RAT, which makes the detection difficult over the network.",
+        "score": 0.7288
+      },
+      {
+        "sentence": "As an extra precaution, users should not run JAR files from untrusted and unknown sources since JAR files contain executable code and have the capability of infecting a system.",
+        "score": 0.6466
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.",
+        "score": 0.4204
+      }
+    ],
+    "T1045": [
+      {
+        "sentence": "With more than 60 million websites, including 33.4 percent of the top 10 million global websites, built on the WordPress platform, it is big news when a new attack aimed at this popular tool surfaces.",
+        "score": 0.3786
+      },
+      {
+        "sentence": "And, as you can probably guess, the Zscaler ThreatLabZ team recently noticed another campaign targeting WordPress sites.",
+        "score": 0.3353
+      },
+      {
+        "sentence": "Since the first week of April 2020, we observed several instances of malicious Java archive (JAR) files hosted on compromised WordPress websites.",
+        "score": 0.4839
+      },
+      {
+        "sentence": "These JAR files used several layers of encryption to protect its final payload—the Adwind remote access Trojan (RAT).",
+        "score": 0.6076
+      },
+      {
+        "sentence": "In this blog, we describe two aspects of this campaign.",
+        "score": 0.3945
+      },
+      {
+        "sentence": "In the first part, we describe the intelligence information we gathered from this campaign, which was used for threat attribution.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "In the second part, we explain in detail all the steps used for decrypting the multiple layers of encryption that were used to protect the final payload.",
+        "score": 0.7635
+      },
+      {
+        "sentence": "Compromised sites used for hosting the payload We observed a common pattern shared among all the compromised websites in this campaign, which are used to host the malicious JAR payload.",
+        "score": 0.4985
+      },
+      {
+        "sentence": "All these websites used the Content Management System (CMS) from WordPress.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "The WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.",
+        "score": 0.317
+      },
+      {
+        "sentence": "Figure 1: WordPress version in the HTML source code.",
+        "score": 0.4165
+      },
+      {
+        "sentence": "Only a few sites were running outdated versions, such as 4.5.x or 3.3.x.",
+        "score": 0.3057
+      },
+      {
+        "sentence": "The file names for the payload varied between themes ranging from Coronavirus to payment invoices and shipping delivery services, such as DHL and USPS, as shown below: Covid-19Update.jar Reylontransport-covid19-statement20.jar RescheduleUSPS.jar DHLPaket.jar Threat attribution On some of the compromised WordPress sites used to host the malicious JAR files, we were able to find PHP web shells that attackers used to control the web server as shown in Figure 2.",
+        "score": 0.5192
+      },
+      {
+        "sentence": "Figure 2: PHP web shell on a compromised WordPress site.",
+        "score": 0.3547
+      },
+      {
+        "sentence": "There are some other web shells present in the same directory.",
+        "score": 0.3172
+      },
+      {
+        "sentence": "Email addresses: Technical analysis of the encrypted JAR There were multiple layers of encryption used in the JAR files in this campaign, which made it clear that some form of crypting service was used by the threat actor to protect the final JAR payload.",
+        "score": 0.7379
+      },
+      {
+        "sentence": "After decrypting several layers, we found a reference to “Qarallax”, which leads us to believe that the cryptor used can be attributed to the Qarallax crypt service.",
+        "score": 0.5652
+      },
+      {
+        "sentence": "In this section of the blog, we will go in to the details of the different layers of encryption and how we unpacked them one by one to reveal the final payload.",
+        "score": 0.7627
+      },
+      {
+        "sentence": "For the purpose of analysis, we have chosen the JAR file with MD5 hash: 0a5f34440389ca860235434eea963465 Filename of the JAR file: Covid-19Update.jar Decryption: Stage 1 This JAR file contains two encrypted resources: Resource 1: /cloud/file.update Resource: 2: AaxIv/WEPcXKp/UBLah/kCQuJbJn These resources will be loaded and decrypted at runtime.",
+        "score": 0.7501
+      },
+      {
+        "sentence": "To understand the decryption process, let us look at the source code of rr.class present inside this JAR file.",
+        "score": 0.7461
+      },
+      {
+        "sentence": "This class file is responsible for loading the above resources and calling the decryption routines.",
+        "score": 0.6558
+      },
+      {
+        "sentence": "The code section is shown in Figure 4 with relevant comments added to the code.",
+        "score": 0.4871
+      },
+      {
+        "sentence": "Figure 4: Code for decrypting the resources in stage 1.",
+        "score": 0.6154
+      },
+      {
+        "sentence": "It is also important to note that the strings referenced in the above code are defined inside the gf.class file.",
+        "score": 0.5571
+      },
+      {
+        "sentence": "All these strings are encrypted as shown in Figure 5.",
+        "score": 0.6916
+      },
+      {
+        "sentence": "Figure 5: Encrypted strings in stage 1.",
+        "score": 0.6498
+      },
+      {
+        "sentence": "The string decryption routine is shown in Figure 6.",
+        "score": 0.6263
+      },
+      {
+        "sentence": "Figure 6: String decryption routine in stage 1.",
+        "score": 0.5817
+      },
+      {
+        "sentence": "This string decryption routine was reused in the later stages as well.",
+        "score": 0.6054
+      },
+      {
+        "sentence": "So we rewrote it in Python to make the decryption process of further layers easier.",
+        "score": 0.6819
+      },
+      {
+        "sentence": "The code for string decryption is mentioned in the Appendix I section of this blog.",
+        "score": 0.6478
+      },
+      {
+        "sentence": "The different steps involved in decryption in above code are: - The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array. - This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING. - The result of the above decryption is an XML file, which is shown in Figure 7.",
+        "score": 0.6377
+      },
+      {
+        "sentence": "Figure 7: XML file obtained after decryption.",
+        "score": 0.6017
+      },
+      {
+        "sentence": "It contains the AES key to decrypt the second resource.",
+        "score": 0.632
+      },
+      {
+        "sentence": "This resource is loaded using the loadFromXML() method which allows individual properties from the XML to be accessed to continue the decryption process.",
+        "score": 0.5762
+      },
+      {
+        "sentence": "Decryption: Stage 2 The XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below. - The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file.",
+        "score": 0.7014
+      },
+      {
+        "sentence": "The PASSWORD entry in the above XML file corresponds to the AES key, which will be used to decrypt this second resource. - The AES key used for decrypting the second resource is: xslNGppgnJmTwGGH. - Second resource is decrypted to a Gzip file, which gets decompressed to another JAR file.",
+        "score": 0.7367
+      },
+      {
+        "sentence": "Decryption: Stage 3 In this stage, we will look at the decrypted JAR file obtained from stage 2.",
+        "score": 0.6251
+      },
+      {
+        "sentence": "The class files and resource file structure for this JAR is as shown in Figure 8.",
+        "score": 0.5915
+      },
+      {
+        "sentence": "Figure 8: JAR file structure of stage 3.",
+        "score": 0.5981
+      },
+      {
+        "sentence": "This JAR file has one encrypted resource called “/this/file.grt”.",
+        "score": 0.6778
+      },
+      {
+        "sentence": "Execution of this JAR file begins in the method: j2t.ple.IL as shown in Figure 9.",
+        "score": 0.5393
+      },
+      {
+        "sentence": "Figure 9: The main method in stage 3.",
+        "score": 0.3167
+      },
+      {
+        "sentence": "The strings in this method were encrypted using the same string encryption method as in stage 1.",
+        "score": 0.6668
+      },
+      {
+        "sentence": "The only difference was in the initial one byte XOR key, which was changed to 0x58.",
+        "score": 0.551
+      },
+      {
+        "sentence": "After decrypting the strings in the main method, we can see a reference to the Qarallax project.",
+        "score": 0.6491
+      },
+      {
+        "sentence": "Qarallax provides crypting services for encrypting JAR files on underground hacking forums, leading us to correlate this to Qarallax.",
+        "score": 0.6857
+      },
+      {
+        "sentence": "Now let us look at the method, Il() defined in il_1.class file.",
+        "score": 0.4751
+      },
+      {
+        "sentence": "This method performs the resource decryption as shown in Figure 10.",
+        "score": 0.5965
+      },
+      {
+        "sentence": "Figure 10: Code for performing decryption of resources in stage 3.",
+        "score": 0.6018
+      },
+      {
+        "sentence": "The different steps involved in the decryption are: - It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array. - It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource. - The result of decryption is an XML file as shown in Figure 11.",
+        "score": 0.7053
+      },
+      {
+        "sentence": "Figure 11: The XML file after decryption in stage 3.",
+        "score": 0.6368
+      },
+      {
+        "sentence": "The SERVER_BIN file in the above decrypted XML corresponds to the next stage encrypted file.",
+        "score": 0.6207
+      },
+      {
+        "sentence": "PASSWORD_CRYPTED corresponds to an encrypted AES key, which will be used to decrypt the SERVER_BIN file.",
+        "score": 0.6675
+      },
+      {
+        "sentence": "PRIVATE_PASSWORD is the RSA private key, which is used to decrypt the AES key.",
+        "score": 0.6533
+      },
+      {
+        "sentence": "Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.",
+        "score": 0.4833
+      },
+      {
+        "sentence": "The RSA private key is stored as a serialized Java object.",
+        "score": 0.6413
+      },
+      {
+        "sentence": "It is unserialized using the readObject() method.",
+        "score": 0.5397
+      },
+      {
+        "sentence": "The unserialized RSA key is used to decrypt the AES key defined in the PASSWORD_CRYPTED section of the XML.",
+        "score": 0.6807
+      },
+      {
+        "sentence": "The decrypted AES key is used to decrypt the SERVER_BIN file, which results in the next stage decrypted file.",
+        "score": 0.5886
+      },
+      {
+        "sentence": "Decryption: Stage 4 The decrypted payload obtained from stage 3 is the final JAR payload, which was protected with multiple layers of encryption.",
+        "score": 0.7415
+      },
+      {
+        "sentence": "The JAR class file structure for this payload is as shown in Figure 12.",
+        "score": 0.596
+      },
+      {
+        "sentence": "Figure 12: The JAR file structure in stage 4.",
+        "score": 0.5851
+      },
+      {
+        "sentence": "This file contains multiple encrypted resources.",
+        "score": 0.6785
+      },
+      {
+        "sentence": "Key1.json – RSA private key stored as a serialized Java object.",
+        "score": 0.5969
+      },
+      {
+        "sentence": "Key2.json – Encrypted AES key.",
+        "score": 0.5649
+      },
+      {
+        "sentence": "Config.json – Encrypted config file of the Java RAT.",
+        "score": 0.6529
+      },
+      {
+        "sentence": "Let us look at the main method—server.main.Start()—of this JAR file.",
+        "score": 0.5276
+      },
+      {
+        "sentence": "We can see the use of encrypted strings in this JAR file as shown in Figure 13.",
+        "score": 0.7269
+      },
+      {
+        "sentence": "Figure 13: The encrypted strings in stage 4.",
+        "score": 0.6847
+      },
+      {
+        "sentence": "Figure 14 shows the string decryption routine.",
+        "score": 0.611
+      },
+      {
+        "sentence": "Figure 14: The string decryption routine in stage 4.",
+        "score": 0.6125
+      },
+      {
+        "sentence": "This string decryption routine is different from the previous stages we analyzed.",
+        "score": 0.6503
+      },
+      {
+        "sentence": "It is a variant of XOR decryption, which derives the decryption key in an interesting way.",
+        "score": 0.6447
+      },
+      {
+        "sentence": "The first two lines of the decryption routine are: StackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1]; String string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString(); These lines are used to fetch the class name and the method name from which the string decryption routine was called.",
+        "score": 0.622
+      },
+      {
+        "sentence": "To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1].",
+        "score": 0.4393
+      },
+      {
+        "sentence": "From this stack frame, the calling class name and method name are derived.",
+        "score": 0.5183
+      },
+      {
+        "sentence": "As an example, when the string decryption routine is called by the method \"ii\" in the class \"Start\", then the XOR decryption key will be: \"Startii\".",
+        "score": 0.6509
+      },
+      {
+        "sentence": "Upon further analysis, we discovered that this string decryption routine is the same as the one provided by the Java obfuscator called Allatori.",
+        "score": 0.7373
+      },
+      {
+        "sentence": "Usually class files obfuscated with Allatori obfuscator use the method name: ALLATORIxDEMOxhthr().",
+        "score": 0.7552
+      },
+      {
+        "sentence": "However, in this case, the method name was also obfuscated to remove any reference to Allatori.",
+        "score": 0.6675
+      },
+      {
+        "sentence": "We rewrote the string decryption routine in Python to decrypt all the strings in this JAR file.",
+        "score": 0.7253
+      },
+      {
+        "sentence": "The Python script is provided in the Appendix II section of this blog.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "After decrypting the strings, the resulting code is shown in Figure 15.",
+        "score": 0.647
+      },
+      {
+        "sentence": "Figure 15: The code after decrypting the strings.",
+        "score": 0.6626
+      },
+      {
+        "sentence": "Decryption of the config file As a first step, we will decrypt the resources to get access to the config file.",
+        "score": 0.6715
+      },
+      {
+        "sentence": "Vbox: Indicates whether the presence of VirtualBox should be checked or not. nickName: This is a unique identifier used while building the RAT.",
+        "score": 0.3074
+      },
+      {
+        "sentence": "Installation: A JSON that contains key-value pairs describing the location where the JAR file needs to be copied to on the file system. jreFolder: Indicates the folder where all the files required for running the JAR are stored. jarRegistry: The name of the Windows registry key used for persistence. delay: Indicates the number of seconds to delay the execution.",
+        "score": 0.4855
+      },
+      {
+        "sentence": "Port: The port number on which the RAT communicates with the server.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "DNS: IP address of the callback server.",
+        "score": 0.3446
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.4454
+      },
+      {
+        "sentence": "The directory name in this path is selected from the “mainFolder” parameter of the config file and the filename is selected using the “jarName” parameter in the config file.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "The file extension for the JAR file is selected as “.class” based on the configured value for parameter: “jarExtension” in the config file. - It sets the Windows registry key for persistence to ensure that the above JAR file is executed automatically using javaw.exe upon reboot.",
+        "score": 0.353
+      },
+      {
+        "sentence": "Key path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run Key name: UKikhtn Key value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\" The key name is fetched from the config file as well. - It loads the DLL from the resource section: “/server/resources” based on the system architecture.",
+        "score": 0.4078
+      },
+      {
+        "sentence": "For 32-bit system, it loads x86.dll and for 64-bit system, it loads amd64.dll.",
+        "score": 0.5282
+      },
+      {
+        "sentence": "This DLL will be loaded and copied to a temporary location on the file system with the file extension, “.xml”.",
+        "score": 0.4788
+      },
+      {
+        "sentence": "The DLL is then loaded using the System.load() command as shown in Figure 16.",
+        "score": 0.4515
+      },
+      {
+        "sentence": "Figure 16: The code for loading the DLL.",
+        "score": 0.5696
+      },
+      {
+        "sentence": "It checks the value of the “active” key in the decrypted config.json file.",
+        "score": 0.5198
+      },
+      {
+        "sentence": "If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.",
+        "score": 0.4823
+      },
+      {
+        "sentence": "If it finds the presence of such an environment, then it exits the execution.",
+        "score": 0.4574
+      },
+      {
+        "sentence": "We will not be describing the functionality of this binary in detail in this blog since the final payload is a well-known jRAT (Java-based RAT).",
+        "score": 0.5049
+      },
+      {
+        "sentence": "Cloud Sandbox Detection Figure 17 shows the Zscaler Cloud Sandbox successfully detecting this JAR-based threat.",
+        "score": 0.4764
+      },
+      {
+        "sentence": "Figure 17: Zscaler Cloud Sandbox detection.",
+        "score": 0.366
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels, as seen here: Java.Backdoor.Adwind.",
+        "score": 0.4919
+      },
+      {
+        "sentence": "Conclusion This threat actor leverages compromised websites to serve heavily encrypted variants of a Java-based RAT, which makes the detection difficult over the network.",
+        "score": 0.6206
+      },
+      {
+        "sentence": "As an extra precaution, users should not run JAR files from untrusted and unknown sources since JAR files contain executable code and have the capability of infecting a system.",
+        "score": 0.5773
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.",
+        "score": 0.3573
+      }
+    ],
+    "T1065": [
+      {
+        "sentence": "In this blog, we describe two aspects of this campaign.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "In the second part, we explain in detail all the steps used for decrypting the multiple layers of encryption that were used to protect the final payload.",
+        "score": 0.328
+      },
+      {
+        "sentence": "Only a few sites were running outdated versions, such as 4.5.x or 3.3.x.",
+        "score": 0.317
+      },
+      {
+        "sentence": "The file names for the payload varied between themes ranging from Coronavirus to payment invoices and shipping delivery services, such as DHL and USPS, as shown below: Covid-19Update.jar Reylontransport-covid19-statement20.jar RescheduleUSPS.jar DHLPaket.jar Threat attribution On some of the compromised WordPress sites used to host the malicious JAR files, we were able to find PHP web shells that attackers used to control the web server as shown in Figure 2.",
+        "score": 0.3083
+      },
+      {
+        "sentence": "After inspecting the different web shells, we located a PHP mailer script that would send a test email to attacker-specified email addresses, as shown in Figure 3.",
+        "score": 0.3237
+      },
+      {
+        "sentence": "Email addresses: Technical analysis of the encrypted JAR There were multiple layers of encryption used in the JAR files in this campaign, which made it clear that some form of crypting service was used by the threat actor to protect the final JAR payload.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "After decrypting several layers, we found a reference to “Qarallax”, which leads us to believe that the cryptor used can be attributed to the Qarallax crypt service.",
+        "score": 0.4374
+      },
+      {
+        "sentence": "All these strings are encrypted as shown in Figure 5.",
+        "score": 0.3014
+      },
+      {
+        "sentence": "The string decryption routine is shown in Figure 6.",
+        "score": 0.3076
+      },
+      {
+        "sentence": "The code for string decryption is mentioned in the Appendix I section of this blog.",
+        "score": 0.3376
+      },
+      {
+        "sentence": "The different steps involved in decryption in above code are: - The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array. - This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING. - The result of the above decryption is an XML file, which is shown in Figure 7.",
+        "score": 0.3611
+      },
+      {
+        "sentence": "It contains the AES key to decrypt the second resource.",
+        "score": 0.3158
+      },
+      {
+        "sentence": "Decryption: Stage 2 The XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below. - The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file.",
+        "score": 0.3403
+      },
+      {
+        "sentence": "The PASSWORD entry in the above XML file corresponds to the AES key, which will be used to decrypt this second resource. - The AES key used for decrypting the second resource is: xslNGppgnJmTwGGH. - Second resource is decrypted to a Gzip file, which gets decompressed to another JAR file.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "The only difference was in the initial one byte XOR key, which was changed to 0x58.",
+        "score": 0.3495
+      },
+      {
+        "sentence": "After decrypting the strings in the main method, we can see a reference to the Qarallax project.",
+        "score": 0.3289
+      },
+      {
+        "sentence": "Qarallax provides crypting services for encrypting JAR files on underground hacking forums, leading us to correlate this to Qarallax.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "The different steps involved in the decryption are: - It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array. - It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource. - The result of decryption is an XML file as shown in Figure 11.",
+        "score": 0.3524
+      },
+      {
+        "sentence": "PASSWORD_CRYPTED corresponds to an encrypted AES key, which will be used to decrypt the SERVER_BIN file.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "PRIVATE_PASSWORD is the RSA private key, which is used to decrypt the AES key.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "The unserialized RSA key is used to decrypt the AES key defined in the PASSWORD_CRYPTED section of the XML.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "The decrypted AES key is used to decrypt the SERVER_BIN file, which results in the next stage decrypted file.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "Decryption: Stage 4 The decrypted payload obtained from stage 3 is the final JAR payload, which was protected with multiple layers of encryption.",
+        "score": 0.3166
+      },
+      {
+        "sentence": "This string decryption routine is different from the previous stages we analyzed.",
+        "score": 0.3233
+      },
+      {
+        "sentence": "It is a variant of XOR decryption, which derives the decryption key in an interesting way.",
+        "score": 0.33
+      },
+      {
+        "sentence": "The first two lines of the decryption routine are: StackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1]; String string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString(); These lines are used to fetch the class name and the method name from which the string decryption routine was called.",
+        "score": 0.3246
+      },
+      {
+        "sentence": "As an example, when the string decryption routine is called by the method \"ii\" in the class \"Start\", then the XOR decryption key will be: \"Startii\".",
+        "score": 0.3532
+      },
+      {
+        "sentence": "Upon further analysis, we discovered that this string decryption routine is the same as the one provided by the Java obfuscator called Allatori.",
+        "score": 0.3208
+      },
+      {
+        "sentence": "Figure 15: The code after decrypting the strings.",
+        "score": 0.31
+      },
+      {
+        "sentence": "Decryption of the config file As a first step, we will decrypt the resources to get access to the config file.",
+        "score": 0.3145
+      },
+      {
+        "sentence": "Port: The port number on which the RAT communicates with the server.",
+        "score": 0.7244
+      },
+      {
+        "sentence": "DNS: IP address of the callback server.",
+        "score": 0.5013
+      },
+      {
+        "sentence": "It checks the value of the “active” key in the decrypted config.json file.",
+        "score": 0.3898
+      },
+      {
+        "sentence": "If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.",
+        "score": 0.3778
+      },
+      {
+        "sentence": "We will not be describing the functionality of this binary in detail in this blog since the final payload is a well-known jRAT (Java-based RAT).",
+        "score": 0.3329
+      },
+      {
+        "sentence": "Conclusion This threat actor leverages compromised websites to serve heavily encrypted variants of a Java-based RAT, which makes the detection difficult over the network.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.",
+        "score": 0.3295
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "In this blog, we describe two aspects of this campaign.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "In the first part, we describe the intelligence information we gathered from this campaign, which was used for threat attribution.",
+        "score": 0.4303
+      },
+      {
+        "sentence": "In the second part, we explain in detail all the steps used for decrypting the multiple layers of encryption that were used to protect the final payload.",
+        "score": 0.3099
+      },
+      {
+        "sentence": "The WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.",
+        "score": 0.4881
+      },
+      {
+        "sentence": "Figure 1: WordPress version in the HTML source code.",
+        "score": 0.3789
+      },
+      {
+        "sentence": "Only a few sites were running outdated versions, such as 4.5.x or 3.3.x.",
+        "score": 0.3523
+      },
+      {
+        "sentence": "The file names for the payload varied between themes ranging from Coronavirus to payment invoices and shipping delivery services, such as DHL and USPS, as shown below: Covid-19Update.jar Reylontransport-covid19-statement20.jar RescheduleUSPS.jar DHLPaket.jar Threat attribution On some of the compromised WordPress sites used to host the malicious JAR files, we were able to find PHP web shells that attackers used to control the web server as shown in Figure 2.",
+        "score": 0.3538
+      },
+      {
+        "sentence": "Email addresses: Technical analysis of the encrypted JAR There were multiple layers of encryption used in the JAR files in this campaign, which made it clear that some form of crypting service was used by the threat actor to protect the final JAR payload.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "After decrypting several layers, we found a reference to “Qarallax”, which leads us to believe that the cryptor used can be attributed to the Qarallax crypt service.",
+        "score": 0.4321
+      },
+      {
+        "sentence": "For the purpose of analysis, we have chosen the JAR file with MD5 hash: 0a5f34440389ca860235434eea963465 Filename of the JAR file: Covid-19Update.jar Decryption: Stage 1 This JAR file contains two encrypted resources: Resource 1: /cloud/file.update Resource: 2: AaxIv/WEPcXKp/UBLah/kCQuJbJn These resources will be loaded and decrypted at runtime.",
+        "score": 0.3307
+      },
+      {
+        "sentence": "All these strings are encrypted as shown in Figure 5.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "The string decryption routine is shown in Figure 6.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "This string decryption routine was reused in the later stages as well.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "The code for string decryption is mentioned in the Appendix I section of this blog.",
+        "score": 0.3101
+      },
+      {
+        "sentence": "The different steps involved in decryption in above code are: - The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array. - This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING. - The result of the above decryption is an XML file, which is shown in Figure 7.",
+        "score": 0.3422
+      },
+      {
+        "sentence": "It contains the AES key to decrypt the second resource.",
+        "score": 0.3227
+      },
+      {
+        "sentence": "This resource is loaded using the loadFromXML() method which allows individual properties from the XML to be accessed to continue the decryption process.",
+        "score": 0.3427
+      },
+      {
+        "sentence": "Decryption: Stage 2 The XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below. - The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file.",
+        "score": 0.3372
+      },
+      {
+        "sentence": "The strings in this method were encrypted using the same string encryption method as in stage 1.",
+        "score": 0.3242
+      },
+      {
+        "sentence": "After decrypting the strings in the main method, we can see a reference to the Qarallax project.",
+        "score": 0.3228
+      },
+      {
+        "sentence": "Qarallax provides crypting services for encrypting JAR files on underground hacking forums, leading us to correlate this to Qarallax.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "This method performs the resource decryption as shown in Figure 10.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "The different steps involved in the decryption are: - It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array. - It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource. - The result of decryption is an XML file as shown in Figure 11.",
+        "score": 0.3522
+      },
+      {
+        "sentence": "PASSWORD_CRYPTED corresponds to an encrypted AES key, which will be used to decrypt the SERVER_BIN file.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "PRIVATE_PASSWORD is the RSA private key, which is used to decrypt the AES key.",
+        "score": 0.31
+      },
+      {
+        "sentence": "Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.",
+        "score": 0.4017
+      },
+      {
+        "sentence": "It is unserialized using the readObject() method.",
+        "score": 0.3092
+      },
+      {
+        "sentence": "The unserialized RSA key is used to decrypt the AES key defined in the PASSWORD_CRYPTED section of the XML.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "This file contains multiple encrypted resources.",
+        "score": 0.301
+      },
+      {
+        "sentence": "Key2.json – Encrypted AES key.",
+        "score": 0.3125
+      },
+      {
+        "sentence": "We can see the use of encrypted strings in this JAR file as shown in Figure 13.",
+        "score": 0.3087
+      },
+      {
+        "sentence": "Figure 13: The encrypted strings in stage 4.",
+        "score": 0.308
+      },
+      {
+        "sentence": "Figure 14 shows the string decryption routine.",
+        "score": 0.3014
+      },
+      {
+        "sentence": "Figure 14: The string decryption routine in stage 4.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "This string decryption routine is different from the previous stages we analyzed.",
+        "score": 0.3278
+      },
+      {
+        "sentence": "It is a variant of XOR decryption, which derives the decryption key in an interesting way.",
+        "score": 0.3263
+      },
+      {
+        "sentence": "The first two lines of the decryption routine are: StackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1]; String string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString(); These lines are used to fetch the class name and the method name from which the string decryption routine was called.",
+        "score": 0.4738
+      },
+      {
+        "sentence": "To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1].",
+        "score": 0.5232
+      },
+      {
+        "sentence": "From this stack frame, the calling class name and method name are derived.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "As an example, when the string decryption routine is called by the method \"ii\" in the class \"Start\", then the XOR decryption key will be: \"Startii\".",
+        "score": 0.3343
+      },
+      {
+        "sentence": "Upon further analysis, we discovered that this string decryption routine is the same as the one provided by the Java obfuscator called Allatori.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "Decryption of the config file As a first step, we will decrypt the resources to get access to the config file.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "Vbox: Indicates whether the presence of VirtualBox should be checked or not. nickName: This is a unique identifier used while building the RAT.",
+        "score": 0.6423
+      },
+      {
+        "sentence": "Installation: A JSON that contains key-value pairs describing the location where the JAR file needs to be copied to on the file system. jreFolder: Indicates the folder where all the files required for running the JAR are stored. jarRegistry: The name of the Windows registry key used for persistence. delay: Indicates the number of seconds to delay the execution.",
+        "score": 0.3196
+      },
+      {
+        "sentence": "Vmware: Indicates whether the presence of VMWare should be checked or not.",
+        "score": 0.5743
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.6343
+      },
+      {
+        "sentence": "The directory name in this path is selected from the “mainFolder” parameter of the config file and the filename is selected using the “jarName” parameter in the config file.",
+        "score": 0.3771
+      },
+      {
+        "sentence": "Key path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run Key name: UKikhtn Key value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\" The key name is fetched from the config file as well. - It loads the DLL from the resource section: “/server/resources” based on the system architecture.",
+        "score": 0.5222
+      },
+      {
+        "sentence": "For 32-bit system, it loads x86.dll and for 64-bit system, it loads amd64.dll.",
+        "score": 0.4094
+      },
+      {
+        "sentence": "The DLL is then loaded using the System.load() command as shown in Figure 16.",
+        "score": 0.3996
+      },
+      {
+        "sentence": "It checks the value of the “active” key in the decrypted config.json file.",
+        "score": 0.3881
+      },
+      {
+        "sentence": "If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "It checks for the presence of a virtualization environment, such as VMWare, Virtualbox and Qemu.",
+        "score": 0.5943
+      },
+      {
+        "sentence": "If it finds the presence of such an environment, then it exits the execution.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "Figure 17: Zscaler Cloud Sandbox detection.",
+        "score": 0.3718
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels, as seen here: Java.Backdoor.Adwind.",
+        "score": 0.3967
+      },
+      {
+        "sentence": "Conclusion This threat actor leverages compromised websites to serve heavily encrypted variants of a Java-based RAT, which makes the detection difficult over the network.",
+        "score": 0.3419
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.",
+        "score": 0.303
+      }
+    ],
+    "T1016": [
+      {
+        "sentence": "In the first part, we describe the intelligence information we gathered from this campaign, which was used for threat attribution.",
+        "score": 0.3035
+      },
+      {
+        "sentence": "To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1].",
+        "score": 0.3704
+      },
+      {
+        "sentence": "From this stack frame, the calling class name and method name are derived.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "Vbox: Indicates whether the presence of VirtualBox should be checked or not. nickName: This is a unique identifier used while building the RAT.",
+        "score": 0.4369
+      },
+      {
+        "sentence": "Vmware: Indicates whether the presence of VMWare should be checked or not.",
+        "score": 0.3738
+      },
+      {
+        "sentence": "DNS: IP address of the callback server.",
+        "score": 0.4197
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.3135
+      },
+      {
+        "sentence": "It checks for the presence of a virtualization environment, such as VMWare, Virtualbox and Qemu.",
+        "score": 0.3956
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "In the second part, we explain in detail all the steps used for decrypting the multiple layers of encryption that were used to protect the final payload.",
+        "score": 0.304
+      },
+      {
+        "sentence": "The WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.",
+        "score": 0.3448
+      },
+      {
+        "sentence": "Figure 1: WordPress version in the HTML source code.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "Only a few sites were running outdated versions, such as 4.5.x or 3.3.x.",
+        "score": 0.304
+      },
+      {
+        "sentence": "After decrypting several layers, we found a reference to “Qarallax”, which leads us to believe that the cryptor used can be attributed to the Qarallax crypt service.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "In this section of the blog, we will go in to the details of the different layers of encryption and how we unpacked them one by one to reveal the final payload.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "For the purpose of analysis, we have chosen the JAR file with MD5 hash: 0a5f34440389ca860235434eea963465 Filename of the JAR file: Covid-19Update.jar Decryption: Stage 1 This JAR file contains two encrypted resources: Resource 1: /cloud/file.update Resource: 2: AaxIv/WEPcXKp/UBLah/kCQuJbJn These resources will be loaded and decrypted at runtime.",
+        "score": 0.3209
+      },
+      {
+        "sentence": "All these strings are encrypted as shown in Figure 5.",
+        "score": 0.3399
+      },
+      {
+        "sentence": "Figure 5: Encrypted strings in stage 1.",
+        "score": 0.3292
+      },
+      {
+        "sentence": "The string decryption routine is shown in Figure 6.",
+        "score": 0.3013
+      },
+      {
+        "sentence": "This string decryption routine was reused in the later stages as well.",
+        "score": 0.3088
+      },
+      {
+        "sentence": "The code for string decryption is mentioned in the Appendix I section of this blog.",
+        "score": 0.307
+      },
+      {
+        "sentence": "The different steps involved in decryption in above code are: - The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array. - This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING. - The result of the above decryption is an XML file, which is shown in Figure 7.",
+        "score": 0.3405
+      },
+      {
+        "sentence": "It contains the AES key to decrypt the second resource.",
+        "score": 0.3173
+      },
+      {
+        "sentence": "This resource is loaded using the loadFromXML() method which allows individual properties from the XML to be accessed to continue the decryption process.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "Decryption: Stage 2 The XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below. - The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file.",
+        "score": 0.3204
+      },
+      {
+        "sentence": "The strings in this method were encrypted using the same string encryption method as in stage 1.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "After decrypting the strings in the main method, we can see a reference to the Qarallax project.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "The different steps involved in the decryption are: - It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array. - It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource. - The result of decryption is an XML file as shown in Figure 11.",
+        "score": 0.3416
+      },
+      {
+        "sentence": "PRIVATE_PASSWORD is the RSA private key, which is used to decrypt the AES key.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.",
+        "score": 0.3309
+      },
+      {
+        "sentence": "Key2.json – Encrypted AES key.",
+        "score": 0.3209
+      },
+      {
+        "sentence": "Figure 13: The encrypted strings in stage 4.",
+        "score": 0.3143
+      },
+      {
+        "sentence": "Figure 14 shows the string decryption routine.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "Figure 14: The string decryption routine in stage 4.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "This string decryption routine is different from the previous stages we analyzed.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "The first two lines of the decryption routine are: StackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1]; String string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString(); These lines are used to fetch the class name and the method name from which the string decryption routine was called.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1].",
+        "score": 0.3629
+      },
+      {
+        "sentence": "As an example, when the string decryption routine is called by the method \"ii\" in the class \"Start\", then the XOR decryption key will be: \"Startii\".",
+        "score": 0.3029
+      },
+      {
+        "sentence": "Upon further analysis, we discovered that this string decryption routine is the same as the one provided by the Java obfuscator called Allatori.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "Vbox: Indicates whether the presence of VirtualBox should be checked or not. nickName: This is a unique identifier used while building the RAT.",
+        "score": 0.3678
+      },
+      {
+        "sentence": "Vmware: Indicates whether the presence of VMWare should be checked or not.",
+        "score": 0.3733
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.4092
+      },
+      {
+        "sentence": "Key path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run Key name: UKikhtn Key value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\" The key name is fetched from the config file as well. - It loads the DLL from the resource section: “/server/resources” based on the system architecture.",
+        "score": 0.394
+      },
+      {
+        "sentence": "It checks the value of the “active” key in the decrypted config.json file.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "It checks for the presence of a virtualization environment, such as VMWare, Virtualbox and Qemu.",
+        "score": 0.421
+      },
+      {
+        "sentence": "If it finds the presence of such an environment, then it exits the execution.",
+        "score": 0.3637
+      },
+      {
+        "sentence": "Figure 17: Zscaler Cloud Sandbox detection.",
+        "score": 0.3087
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels, as seen here: Java.Backdoor.Adwind.",
+        "score": 0.3292
+      },
+      {
+        "sentence": "Web administrators who use WordPress installations should ensure that they are running the latest version of WordPress plugins and themes to prevent any vulnerability from being exploited.",
+        "score": 0.3087
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.",
+        "score": 0.3261
+      }
+    ],
+    "T1047": [
+      {
+        "sentence": "All these websites used the Content Management System (CMS) from WordPress.",
+        "score": 0.3037
+      },
+      {
+        "sentence": "The WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.",
+        "score": 0.3115
+      },
+      {
+        "sentence": "The file names for the payload varied between themes ranging from Coronavirus to payment invoices and shipping delivery services, such as DHL and USPS, as shown below: Covid-19Update.jar Reylontransport-covid19-statement20.jar RescheduleUSPS.jar DHLPaket.jar Threat attribution On some of the compromised WordPress sites used to host the malicious JAR files, we were able to find PHP web shells that attackers used to control the web server as shown in Figure 2.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "The different steps involved in decryption in above code are: - The resource, “/cloud/file.update” is read using getClass.getResourceAsStream() into a byte array. - This resource is decrypted using the AES key: “Psjduiwo8wosld9O” using the AES block cipher mode: AES/ECB/PKCS5PADDING. - The result of the above decryption is an XML file, which is shown in Figure 7.",
+        "score": 0.3222
+      },
+      {
+        "sentence": "This resource is loaded using the loadFromXML() method which allows individual properties from the XML to be accessed to continue the decryption process.",
+        "score": 0.3597
+      },
+      {
+        "sentence": "The different steps involved in the decryption are: - It loads the encrypted resource: “/this/file.grt” using getClass.getResourceAsStream() into a byte array. - It uses the DES key: R5uE7enKM8wK0qOk8s9di to decrypt the above resource. - The result of decryption is an XML file as shown in Figure 11.",
+        "score": 0.3048
+      },
+      {
+        "sentence": "Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "The unserialized RSA key is used to decrypt the AES key defined in the PASSWORD_CRYPTED section of the XML.",
+        "score": 0.3001
+      },
+      {
+        "sentence": "The first two lines of the decryption routine are: StackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1]; String string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString(); These lines are used to fetch the class name and the method name from which the string decryption routine was called.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "From this stack frame, the calling class name and method name are derived.",
+        "score": 0.3001
+      },
+      {
+        "sentence": "Vmware: Indicates whether the presence of VMWare should be checked or not.",
+        "score": 0.3614
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.4116
+      },
+      {
+        "sentence": "Key path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run Key name: UKikhtn Key value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\" The key name is fetched from the config file as well. - It loads the DLL from the resource section: “/server/resources” based on the system architecture.",
+        "score": 0.3166
+      },
+      {
+        "sentence": "The DLL is then loaded using the System.load() command as shown in Figure 16.",
+        "score": 0.3208
+      },
+      {
+        "sentence": "It checks for the presence of a virtualization environment, such as VMWare, Virtualbox and Qemu.",
+        "score": 0.3799
+      }
+    ],
+    "T1063": [
+      {
+        "sentence": "The WordPress version can be confirmed by checking the meta HTML tag in the source code with the “name” attribute field set to “generator” as shown below for one of the compromised sites observed in this campaign.",
+        "score": 0.336
+      },
+      {
+        "sentence": "Each of the above properties are loaded from the XML using loadFromXML() and getProperty() methods.",
+        "score": 0.3142
+      },
+      {
+        "sentence": "The first two lines of the decryption routine are: StackTraceElement stackTraceElement = new LinkageError().getStackTrace()[1]; String string = new StringBuffer(stackTraceElement.getClassName()).append(stackTraceElement.getMethodName()).toString(); These lines are used to fetch the class name and the method name from which the string decryption routine was called.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "To find the calling class name and method name, it generates an exception using LinkageError() and then fetches the first stack frame using getStackTrace()[1].",
+        "score": 0.3607
+      },
+      {
+        "sentence": "Vbox: Indicates whether the presence of VirtualBox should be checked or not. nickName: This is a unique identifier used while building the RAT.",
+        "score": 0.5529
+      },
+      {
+        "sentence": "Vmware: Indicates whether the presence of VMWare should be checked or not.",
+        "score": 0.6596
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.4572
+      },
+      {
+        "sentence": "It checks the value of the “active” key in the decrypted config.json file.",
+        "score": 0.3547
+      },
+      {
+        "sentence": "It checks for the presence of a virtualization environment, such as VMWare, Virtualbox and Qemu.",
+        "score": 0.651
+      },
+      {
+        "sentence": "Cloud Sandbox Detection Figure 17 shows the Zscaler Cloud Sandbox successfully detecting this JAR-based threat.",
+        "score": 0.3841
+      },
+      {
+        "sentence": "Figure 17: Zscaler Cloud Sandbox detection.",
+        "score": 0.5303
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels, as seen here: Java.Backdoor.Adwind.",
+        "score": 0.5783
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team will continue to monitor this campaign, as well as others, to help keep our customers safe.",
+        "score": 0.3032
+      }
+    ],
+    "T1060": [
+      {
+        "sentence": "For the purpose of analysis, we have chosen the JAR file with MD5 hash: 0a5f34440389ca860235434eea963465 Filename of the JAR file: Covid-19Update.jar Decryption: Stage 1 This JAR file contains two encrypted resources: Resource 1: /cloud/file.update Resource: 2: AaxIv/WEPcXKp/UBLah/kCQuJbJn These resources will be loaded and decrypted at runtime.",
+        "score": 0.362
+      },
+      {
+        "sentence": "Decryption: Stage 2 The XML file, which was obtained after decrypting stage 1, is used to decrypt the second layer as defined below. - The SERVER entry in this XML file corresponds to the second encrypted resource called: /AaxIv/WEPcXKp/UBLah/kCQuJbJn.Tje in the JAR file.",
+        "score": 0.3151
+      },
+      {
+        "sentence": "Figure 8: JAR file structure of stage 3.",
+        "score": 0.315
+      },
+      {
+        "sentence": "Execution of this JAR file begins in the method: j2t.ple.IL as shown in Figure 9.",
+        "score": 0.356
+      },
+      {
+        "sentence": "The only difference was in the initial one byte XOR key, which was changed to 0x58.",
+        "score": 0.3314
+      },
+      {
+        "sentence": "PASSWORD_CRYPTED corresponds to an encrypted AES key, which will be used to decrypt the SERVER_BIN file.",
+        "score": 0.3433
+      },
+      {
+        "sentence": "Figure 12: The JAR file structure in stage 4.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "Config.json – Encrypted config file of the Java RAT.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "Figure 13: The encrypted strings in stage 4.",
+        "score": 0.3004
+      },
+      {
+        "sentence": "Installation: A JSON that contains key-value pairs describing the location where the JAR file needs to be copied to on the file system. jreFolder: Indicates the folder where all the files required for running the JAR are stored. jarRegistry: The name of the Windows registry key used for persistence. delay: Indicates the number of seconds to delay the execution.",
+        "score": 0.5893
+      },
+      {
+        "sentence": "Activities performed by the RAT Below are the main activities performed by the RAT. - It checks the OS name and if it is not Windows, then the RAT does not execute. - It copies itself to the path: C:\\Users\\user\\pMbbW\\aDaGm.class.",
+        "score": 0.3724
+      },
+      {
+        "sentence": "The directory name in this path is selected from the “mainFolder” parameter of the config file and the filename is selected using the “jarName” parameter in the config file.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "The file extension for the JAR file is selected as “.class” based on the configured value for parameter: “jarExtension” in the config file. - It sets the Windows registry key for persistence to ensure that the above JAR file is executed automatically using javaw.exe upon reboot.",
+        "score": 0.7038
+      },
+      {
+        "sentence": "Key path: HKEY_USERS\\Software\\Microsoft\\Windows\\CurrentVersion\\Run Key name: UKikhtn Key value: \"C:\\Users\\user\\Oracle\\bin\\javaw.exe\" -jar \"C:\\Users\\user\\pMbbW\\aDaGm.class\" The key name is fetched from the config file as well. - It loads the DLL from the resource section: “/server/resources” based on the system architecture.",
+        "score": 0.5983
+      },
+      {
+        "sentence": "This DLL will be loaded and copied to a temporary location on the file system with the file extension, “.xml”.",
+        "score": 0.3335
+      },
+      {
+        "sentence": "If the value is set to true, then the RAT delays the execution by the “delay” number of seconds as configured in the config.json file.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "Conclusion This threat actor leverages compromised websites to serve heavily encrypted variants of a Java-based RAT, which makes the detection difficult over the network.",
+        "score": 0.3043
+      },
+      {
+        "sentence": "As an extra precaution, users should not run JAR files from untrusted and unknown sources since JAR files contain executable code and have the capability of infecting a system.",
+        "score": 0.3249
+      }
+    ]
+  }
+}

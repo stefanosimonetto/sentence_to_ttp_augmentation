@@ -1,0 +1,1849 @@
+{
+  "original_txt": "By Vanja Svajcer and Adam Pridgen, Cisco Incident Command\nNEWS SUMMARY\n- Ransomware attacks and big-game hunting making the headlines, but adversaries use plenty of other methods to monetize their efforts in less intrusive ways.\n- Cisco Talos recently discovered a cryptocurrency-mining botnet attack we're calling \"Xanthe,\" which attempted to compromise one of Cisco's security honeypots for tracking Docker-related threats.\n- These threats demonstrate several techniques of the MITRE ATT&CK framework, most notably Disabling Security Tools - T1089, External Remote Services - T1133, Exploit Public-Facing Application - T1190, Resource Hijacking - T1496, Scheduled Task - T1053, Bash History - T1139, SSH Hijacking - T1184 and Rootkit - T1014.\nAttackers are constantly reinventing ways of monetizing their tools. Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.\nThe actor employs various methods to spread across the network, like harvesting client-side certificates for spreading to known hosts using ssh, or spreading to systems with an incorrectly configured Docker API.\nWhat's new?\nWe believe this is the first time anyone's documented Xanthe's operations. The actor is actively maintaining all the modules and has been active since March this year.\nHow did it work?\nThe infection starts with the downloader module, which downloads the main installer module, which is also tasked with spreading to other systems on the local and remote networks. The main module attempts to spread to other known hosts by stealing the client-side certificates and connecting to them without the requirement for a password.\nTwo additional bash scripts terminate security services, removing competitor's botnets and ensuring persistence by creating scheduled cron jobs and modifying one of the system startup scripts.\nThe main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.\nSo what?\nDefenders need to be constantly vigilant and monitor the behavior of systems within their network. Attackers are like water — they look for the smallest crack to seep in, like we see in Xanthe's potential to spread using systems with exposed Docker API. While organizations need to be focused on protecting their most valuable assets, they should not ignore threats that are not specifically targeted at their infrastructure.\nTechnical case overview\nIntroduction\nHoneypots are one of the most commonly used systems for collecting new threats and threat intelligence, with a number of open-source implementations. Cisco Talos and the Cisco Security & Trust organization deploy numerous honeypots tracking attacks on many platforms, protocols and applications.\nDocker has been one of the most popular platforms for managing containers. Over time it became a de facto standard for development and deployment of web and cloud applications. However, anybody who has worked with Docker quickly realises that the learning curve is quite steep. Therefore Docker installations can be easily misconfigured and Docker daemon exposed to external networks with a minimal level of security.\nAccording to Shodan, there are over 6,000 incorrectly-configured Docker implementations exposed to the internet, and attackers have been actively finding ways to exploit those exposed servers.\nIncorrectly configured Docker installations with exposed, unprotected APIs according to Shodan\nDocker daemons have been targets of attacks for several years now, and our security teams decided to keep tracking activities related to various actors attempting to exploit them.\nDocker honeypot\nThe Cisco Security and Trust organization developed an implementation of a Docker honeypot. The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API. The server will respond to:\n- HTTP GET version\n- HTTP GET ping\n- HTTP POST create image\n- HTTP Error Code 500 in almost all other cases\nThe assumption is that this service is running in a cloud provider somewhere. Currently, the service is a script that runs in a shell. When a recon event or the creation of a container is detected, the server will log the event to any of the following services:\n- Webex Teams\n- Slack\n- Mongodb\n- HTTP Collector\nAs a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks. This is where we recently spotted the following attempt:\nXanthe - a Docker-aware crypto miner\nThe attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script. When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines. In fact, despite Xanthe having been active since March 2020, only one of the scripts had been detected.\nOlder Xanthe versions and the VirusTotal detections\nThe initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules. It is also tasked with scanning the network and spreading to other systems over SSH and by exploiting Docker daemon installations with exposed web API.\nThere are four modules that are downloaded and launched:\n- Process-hiding module libprocesshider.so\n- Shell script to disable other miners and security services\n- Shell script to remove Docker containers of competing Docker-targeting crypto mining trojans\n- XMRig binary together with a downloaded JSON configuration file, config.json\nXanthe, its modules and the spreading vectors\nMain module - xanthe.sh\nXanthe.sh, as well as most of the other Xanthe modules, is a shell script tasked to load additional modules and spread the bot to other systems.\nThe main Xanthe module starts with an initialization procedure that attempts to download and run two additional modules: xesa.txt and fczyo. We describe both in detail in the next section.\nThe next procedure downloads a variant of the XMRig miner as java_c, its JSON configuration file and the libprocesshider shared library used for hiding the miner process name in memory. The integrity of every downloaded file is verified with a hardcoded MD5 checksum value. If the MD5 checksum is not verified, the download is reattempted.\nThe URLs for download are hardcoded in an array per URL, with direct IP addresses 139[.]162[.]124[.]27 and 34[.]92[.]166[.]158 used for download. At the moment of writing this post, the IP address 34[.]92[.]166[.]158 runs an NginX version 1.19.2, which was released in August this year. The address 139[.]162[.]124[.]27 runs a Debian Linux distribution with an older Apache version 2.4.10 serving the files. Both of the server directories, /files/, used to host the malicious files are open and potentially misconfigured.\nXanthe uses curl to download its modules and to communicate with the logging URLs. Iplogger.org is extensively used throughout the code, with each procedure communicating with a unique logging URL. Curl's user agent strings are manually specified for each request depending on the phase and the functionality currently being executed.\nUser-agent strings and the associated functionality\nThe execution of the main module continues with making sure that the /tmp directory is mounted and configured to allow execution of the files within it.\nNext, the procedure checks if the miner is already running in memory by running the ps command. First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running.\nsshd configuration and spreading\nThe main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.\nFirst, Xanthe configures the SSH daemon to make its configuration less secure and enable some functionality. The daemon is configured to run on ports 22 and 33768 with the root account login, password, client public key and GSSAPIAuthentication (such as Kerberos authentication) enabled. Once the configuration file is modified, the SSH service is restarted.\nFinally, we come to the spreading function, localgo. The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com. Next, the script uses the find utility to search for instances of client-side certificates, which will be used for authentication to remote hosts. The find is used to search for any filenames starting with the string 'id_rsa' and for files with the '.pem' file extension. The script also uses a combination of 'cat' and 'grep' to find other keys by parsing the SSH configuration files and the bash history file.\nOnce all possible keys have been found, the script proceeds with finding known hosts, TCP ports and usernames used to connect to those hosts. Finally, a loop is entered which iterates over the combination of all known usernames, hosts, keys and ports in an attempt to connect, authenticate on the remote host and launch the command lines to download and execute the main module on the remote system.\nSSH Xanthe-based spreading command\nAvailable functionality commented out\nAlthough we have seen this bot hitting our Docker honeypots with an attempt to spread, at the time of the analysis the routine for Docker scanning and spreading was commented out. The author's programming style is similar in all scripts. First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.\nFunctions are enabled/disabled by commenting a line using the character #\nThe Docker spreading functionality is contained within the function 'scangogo'. The function first attempts to install the mass port-scanning utility masscan to scan the local network, as well as the /24 subnet of the external IP address, for the hosts with incorrectly configured Docker API exposed on TCP port 2375.\nIf a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.\nAuxiliary shell scripts As soon as the main module is launched, it downloads and runs the two auxiliary modules, xesa.txt and fczyo.\nXesa.txt - the killer module Xesa starts initially with removing the system log file and adding a number of IP addresses to the /etc/hosts file so that they are resolved locally by the DNS resolver to 0.0.0.0 and blocked. The IP addresses are related to competing botnets and security services such as the Alibaba cloud security center agent. Xesa also attempts to delete several accounts, which seem to be related to competing botnets such as Kinsing.\nThe execution continues with running a large number of ps commands to determine if competitive miners are running on the infected system. If any of the miners are found, their processes will be terminated and files removed from the system.\nDocker images of competitor's miners being removed from the infected system\nOne of the main Xesa functions is terminating competitor's Docker containers if they are running and removing their images from the local Docker repository. The script finishes with another check that the java_c process is running.\nFczyo - persistence and remote access setup\nThe second auxiliary module, fczyo, is similar to xesa.txt, but it covers slightly different areas of the system for termination. The execution starts with adding two of the public DNS servers, 1.1.1.1 and 8.8.8.8, to the beginning of the /etc/resolve.conf file and restarting the DNS resolver to use those public servers. It then continues with terminating competing Docker containers if they are running.\nThe script makes sure that the security processes are not running on the infected system and ensures that crond is running so the scheduled jobs can be executed.\nFczyo attempts to add the following users to the infected system:\n- sysall\n- system\n- logger\n- autoupdater\nOnce the users are created, the script adds them to the list of sudoers so that they can run commands with administrative privileges. The script also adds a public key to the SSH configuration to allow those users access to the host using the client-side private key. Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.\nFczyo checking if the cron job is already configured\nThe next major block of functions is tasked with setting up scheduled cron jobs to ensure that Xanthe modules are downloaded and run from the download server every 30 minutes. It also modifies the file /etc/rc.d/rc.local so Xanthe can be downloaded and run every time the system is started.\nFczyo also attempts to clear bash history, disable and remove ufw and any file belonging to the Sandfly security products.\nProcess-hiding module\nXanthe and its auxiliary modules use a shared object, libprocesshider, which is downloaded and installed into /usr/local/lib/libprocesshider.so. The loading of the shared object is enabled by adding the path of the library to the file /etc/ld.so.preload. Ld.so.preload contains a list of user-specified ELF shared libraries to be loaded before all others. This can be used to selectively override functions in other shared libraries.\nProcess tools such as ps use the /proc file system and the readdir function to enumerate all the running processes. If a malicious shared object is used to implement a malicious copy of the readdir function, this function will be called before the standard library function. The malicious function then has the ability to modify the results of the readdir to omit details of some processes. The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.\nConclusion\nIn this post, we documented the previously-undocumented Monero mining botnet Xanthe, which attempts to spread over SSH using existing private keys for authentication. We discovered this botnet when it registered in a Docker honeypot system. The main module contains functions, disabled in this variant, to spread by exploiting incorrectly configured Docker API installations.\nWhile Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep. The installation is not secure by default, and it is easy to leave its API exposed to attackers on a lookout for 'free' resources they can use to run custom containers and conduct attacks.\nWhen setting up organizations' defences, administrators and devops engineers need to make sure all components in their product development and deployment systems are properly configured and secure.\nCoverage\nWays our customers can detect and block this threat are listed below.\nAdvanced Malware Protection (AMP) is ideally suited to prevent the execution of the malware used by these threat actors. Exploit Prevention present within AMP is designed to protect customers from unknown attacks such as this automatically.\nCisco Cloud Web Security (CWS) orWeb Security Appliance (WSA) web scanning prevents access to malicious websites and detects malware used in these attacks.\nEmail Security can block malicious emails sent by threat actors as part of their campaign.\nNetwork Security appliances such as Next-Generation Firewall (NGFW), Next-Generation Intrusion Prevention System (NGIPS),Cisco ISR andMeraki MX can detect malicious activity associated with this threat.\nAMP Threat Grid helps identify malicious binaries and builds protection into all Cisco Security products.\nUmbrella, our secure internet gateway (SIG), blocks users from connecting to malicious domains, IPs and URLs, whether users are on or off the corporate network.\nOpen Source Snort Subscriber Rule Set customers can stay up to date by downloading the latest rule pack available for purchase onSnort.org.\nOSQuery\nCisco AMP users can use Orbital Advanced Search to run complex OSqueries to see if their endpoints are infected with this specific threat. For specific OSqueries on this threat, click below:\nhttps://github.com/Cisco-Talos/osquery_queries/blob/master/packs/linux_malware.conf",
+  "sanitized_txt": "By Vanja Svajcer and Adam Pridgen, Cisco Incident Command NEWS SUMMARY - Ransomware attacks and big-game hunting making the headlines, but adversaries use plenty of other methods to monetize their efforts in less intrusive ways.\n- Cisco Talos recently discovered a cryptocurrency-mining botnet attack we're calling \"Xanthe,\" which attempted to compromise one of Cisco's security honeypots for tracking Docker-related threats.\nAttackers are constantly reinventing ways of monetizing their tools. Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.\nThe actor employs various methods to spread across the network, like harvesting client-side certificates for spreading to known hosts using ssh, or spreading to systems with an incorrectly configured Docker API.\nWhat's new?\nWe believe this is the first time anyone's documented Xanthe's operations. The actor is actively maintaining all the modules and has been active since March this year.\nHow did it work?\nThe infection starts with the downloader module, which downloads the main installer module, which is also tasked with spreading to other systems on the local and remote networks. The main module attempts to spread to other known hosts by stealing the client-side certificates and connecting to them without the requirement for a password.\nTwo additional bash scripts terminate security services, removing competitor's botnets and ensuring persistence by creating scheduled cron jobs and modifying one of the system startup scripts.\nThe main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.\nSo what?\nDefenders need to be constantly vigilant and monitor the behavior of systems within their network. Attackers are like water — they look for the smallest crack to seep in, like we see in Xanthe's potential to spread using systems with exposed Docker API. While organizations need to be focused on protecting their most valuable assets, they should not ignore threats that are not specifically targeted at their infrastructure.\nTechnical case overview Introduction Honeypots are one of the most commonly used systems for collecting new threats and threat intelligence, with a number of open-source implementations. Cisco Talos and the Cisco Security & Trust organization deploy numerous honeypots tracking attacks on many platforms, protocols and applications.\nDocker has been one of the most popular platforms for managing containers. Over time it became a de facto standard for development and deployment of web and cloud applications. However, anybody who has worked with Docker quickly realises that the learning curve is quite steep. Therefore Docker installations can be easily misconfigured and Docker daemon exposed to external networks with a minimal level of security.\nAccording to Shodan, there are over 6,000 incorrectly-configured Docker implementations exposed to the internet, and attackers have been actively finding ways to exploit those exposed servers.\nIncorrectly configured Docker installations with exposed, unprotected APIs according to Shodan Docker daemons have been targets of attacks for several years now, and our security teams decided to keep tracking activities related to various actors attempting to exploit them.\nDocker honeypot The Cisco Security and Trust organization developed an implementation of a Docker honeypot. The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API. The server will respond to:\n- HTTP GET version - HTTP GET ping - HTTP POST create image - HTTP Error Code 500 in almost all other cases The assumption is that this service is running in a cloud provider somewhere. Currently, the service is a script that runs in a shell. When a recon event or the creation of a container is detected, the server will log the event to any of the following services:\n- Webex Teams - Slack - Mongodb - HTTP Collector As a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks. This is where we recently spotted the following attempt:\nXanthe - a Docker-aware crypto miner The attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script. When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines. In fact, despite Xanthe having been active since March 2020, only one of the scripts had been detected.\nOlder Xanthe versions and the VirusTotal detections The initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules. It is also tasked with scanning the network and spreading to other systems over SSH and by exploiting Docker daemon installations with exposed web API.\nThere are four modules that are downloaded and launched:\n- Process-hiding module libprocesshider.so - Shell script to disable other miners and security services - Shell script to remove Docker containers of competing Docker-targeting crypto mining trojans - XMRig binary together with a downloaded JSON configuration file, config.json Xanthe, its modules and the spreading vectors Main module - xanthe.sh Xanthe.sh, as well as most of the other Xanthe modules, is a shell script tasked to load additional modules and spread the bot to other systems.\nThe main Xanthe module starts with an initialization procedure that attempts to download and run two additional modules: xesa.txt and fczyo. We describe both in detail in the next section.\nThe next procedure downloads a variant of the XMRig miner as java_c, its JSON configuration file and the libprocesshider shared library used for hiding the miner process name in memory. The integrity of every downloaded file is verified with a hardcoded MD5 checksum value. If the MD5 checksum is not verified, the download is reattempted.\nThe URLs for download are hardcoded in an array per URL, with direct IP addresses 139[.]162[.]124[.]27 and 34[.]92[.]166[.]158 used for download. At the moment of writing this post, the IP address 34[.]92[.]166[.]158 runs an NginX version 1.19.2, which was released in August this year. The address 139[.]162[.]124[.]27 runs a Debian Linux distribution with an older Apache version 2.4.10 serving the files. Both of the server directories, /files/, used to host the malicious files are open and potentially misconfigured.\nXanthe uses curl to download its modules and to communicate with the logging URLs. Iplogger.org is extensively used throughout the code, with each procedure communicating with a unique logging URL. Curl's user agent strings are manually specified for each request depending on the phase and the functionality currently being executed.\nUser-agent strings and the associated functionality The execution of the main module continues with making sure that the /tmp directory is mounted and configured to allow execution of the files within it.\nNext, the procedure checks if the miner is already running in memory by running the ps command. First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running.\nsshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.\nFirst, Xanthe configures the SSH daemon to make its configuration less secure and enable some functionality. The daemon is configured to run on ports 22 and 33768 with the root account login, password, client public key and GSSAPIAuthentication (such as Kerberos authentication) enabled. Once the configuration file is modified, the SSH service is restarted.\nFinally, we come to the spreading function, localgo. The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com. Next, the script uses the find utility to search for instances of client-side certificates, which will be used for authentication to remote hosts. The find is used to search for any filenames starting with the string 'id_rsa' and for files with the '.pem' file extension. The script also uses a combination of 'cat' and 'grep' to find other keys by parsing the SSH configuration files and the bash history file.\nOnce all possible keys have been found, the script proceeds with finding known hosts, TCP ports and usernames used to connect to those hosts. Finally, a loop is entered which iterates over the combination of all known usernames, hosts, keys and ports in an attempt to connect, authenticate on the remote host and launch the command lines to download and execute the main module on the remote system.\nSSH Xanthe-based spreading command Available functionality commented out Although we have seen this bot hitting our Docker honeypots with an attempt to spread, at the time of the analysis the routine for Docker scanning and spreading was commented out. The author's programming style is similar in all scripts. First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.\nFunctions are enabled/disabled by commenting a line using the character # The Docker spreading functionality is contained within the function 'scangogo'. The function first attempts to install the mass port-scanning utility masscan to scan the local network, as well as the /24 subnet of the external IP address, for the hosts with incorrectly configured Docker API exposed on TCP port 2375.\nIf a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.\nAuxiliary shell scripts As soon as the main module is launched, it downloads and runs the two auxiliary modules, xesa.txt and fczyo.\nXesa.txt - the killer module Xesa starts initially with removing the system log file and adding a number of IP addresses to the /etc/hosts file so that they are resolved locally by the DNS resolver to 0.0.0.0 and blocked. The IP addresses are related to competing botnets and security services such as the Alibaba cloud security center agent. Xesa also attempts to delete several accounts, which seem to be related to competing botnets such as Kinsing.\nThe execution continues with running a large number of ps commands to determine if competitive miners are running on the infected system. If any of the miners are found, their processes will be terminated and files removed from the system.\nDocker images of competitor's miners being removed from the infected system One of the main Xesa functions is terminating competitor's Docker containers if they are running and removing their images from the local Docker repository. The script finishes with another check that the java_c process is running.\nFczyo - persistence and remote access setup The second auxiliary module, fczyo, is similar to xesa.txt, but it covers slightly different areas of the system for termination. The execution starts with adding two of the public DNS servers, 1.1.1.1 and 8.8.8.8, to the beginning of the /etc/resolve.conf file and restarting the DNS resolver to use those public servers. It then continues with terminating competing Docker containers if they are running.\nThe script makes sure that the security processes are not running on the infected system and ensures that crond is running so the scheduled jobs can be executed.\nFczyo attempts to add the following users to the infected system:\n- sysall - system - logger - autoupdater Once the users are created, the script adds them to the list of sudoers so that they can run commands with administrative privileges. The script also adds a public key to the SSH configuration to allow those users access to the host using the client-side private key. Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.\nFczyo checking if the cron job is already configured The next major block of functions is tasked with setting up scheduled cron jobs to ensure that Xanthe modules are downloaded and run from the download server every 30 minutes. It also modifies the file /etc/rc.d/rc.local so Xanthe can be downloaded and run every time the system is started.\nFczyo also attempts to clear bash history, disable and remove ufw and any file belonging to the Sandfly security products.\nProcess-hiding module Xanthe and its auxiliary modules use a shared object, libprocesshider, which is downloaded and installed into /usr/local/lib/libprocesshider.so. The loading of the shared object is enabled by adding the path of the library to the file /etc/ld.so.preload. Ld.so.preload contains a list of user-specified ELF shared libraries to be loaded before all others. This can be used to selectively override functions in other shared libraries.\nProcess tools such as ps use the /proc file system and the readdir function to enumerate all the running processes. If a malicious shared object is used to implement a malicious copy of the readdir function, this function will be called before the standard library function. The malicious function then has the ability to modify the results of the readdir to omit details of some processes. The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.\nConclusion In this post, we documented the previously-undocumented Monero mining botnet Xanthe, which attempts to spread over SSH using existing private keys for authentication. We discovered this botnet when it registered in a Docker honeypot system. The main module contains functions, disabled in this variant, to spread by exploiting incorrectly configured Docker API installations.\nWhile Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep. The installation is not secure by default, and it is easy to leave its API exposed to attackers on a lookout for 'free' resources they can use to run custom containers and conduct attacks.\nWhen setting up organizations' defences, administrators and devops engineers need to make sure all components in their product development and deployment systems are properly configured and secure.\nCoverage Ways our customers can detect and block this threat are listed below.\nAdvanced Malware Protection (AMP) is ideally suited to prevent the execution of the malware used by these threat actors. Exploit Prevention present within AMP is designed to protect customers from unknown attacks such as this automatically.\nCisco Cloud Web Security (CWS) orWeb Security Appliance (WSA) web scanning prevents access to malicious websites and detects malware used in these attacks.\nEmail Security can block malicious emails sent by threat actors as part of their campaign.\nNetwork Security appliances such as Next-Generation Firewall (NGFW), Next-Generation Intrusion Prevention System (NGIPS),Cisco ISR andMeraki MX can detect malicious activity associated with this threat.\nAMP Threat Grid helps identify malicious binaries and builds protection into all Cisco Security products.\nUmbrella, our secure internet gateway (SIG), blocks users from connecting to malicious domains, IPs and URLs, whether users are on or off the corporate network.\nOpen Source Snort Subscriber Rule Set customers can stay up to date by downloading the latest rule pack available for purchase onSnort.org.\nOSQuery Cisco AMP users can use Orbital Advanced Search to run complex OSqueries to see if their endpoints are infected with this specific threat. For specific OSqueries on this threat, click below:\nhttps://github.com/Cisco-Talos/osquery_queries/blob/master/packs/linux_malware.conf",
+  "ID_list": [
+    "T1014",
+    "T1053",
+    "T1089",
+    "T1133",
+    "T1139",
+    "T1184",
+    "T1190",
+    "T1496"
+  ],
+  "Name_list": [
+    "Bash History",
+    "Execution",
+    "Persistence",
+    "Private Keys",
+    "Reconnaissance",
+    "Source",
+    "Sudo"
+  ],
+  "TTP_sentences": {
+    "T1014": [
+      {
+        "sentence": "Attackers are constantly reinventing ways of monetizing their tools.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.",
+        "score": 0.4017
+      },
+      {
+        "sentence": "What's new?",
+        "score": 0.3091
+      },
+      {
+        "sentence": "We believe this is the first time anyone's documented Xanthe's operations.",
+        "score": 0.354
+      },
+      {
+        "sentence": "The actor is actively maintaining all the modules and has been active since March this year.",
+        "score": 0.3404
+      },
+      {
+        "sentence": "The infection starts with the downloader module, which downloads the main installer module, which is also tasked with spreading to other systems on the local and remote networks.",
+        "score": 0.3303
+      },
+      {
+        "sentence": "Two additional bash scripts terminate security services, removing competitor's botnets and ensuring persistence by creating scheduled cron jobs and modifying one of the system startup scripts.",
+        "score": 0.4341
+      },
+      {
+        "sentence": "The main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.",
+        "score": 0.4832
+      },
+      {
+        "sentence": "Defenders need to be constantly vigilant and monitor the behavior of systems within their network.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "Technical case overview Introduction Honeypots are one of the most commonly used systems for collecting new threats and threat intelligence, with a number of open-source implementations.",
+        "score": 0.4396
+      },
+      {
+        "sentence": "Cisco Talos and the Cisco Security & Trust organization deploy numerous honeypots tracking attacks on many platforms, protocols and applications.",
+        "score": 0.336
+      },
+      {
+        "sentence": "Docker has been one of the most popular platforms for managing containers.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "Over time it became a de facto standard for development and deployment of web and cloud applications.",
+        "score": 0.3046
+      },
+      {
+        "sentence": "However, anybody who has worked with Docker quickly realises that the learning curve is quite steep.",
+        "score": 0.373
+      },
+      {
+        "sentence": "Docker honeypot The Cisco Security and Trust organization developed an implementation of a Docker honeypot.",
+        "score": 0.4269
+      },
+      {
+        "sentence": "The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API.",
+        "score": 0.3649
+      },
+      {
+        "sentence": "The server will respond to: - HTTP GET version - HTTP GET ping - HTTP POST create image - HTTP Error Code 500 in almost all other cases The assumption is that this service is running in a cloud provider somewhere.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "When a recon event or the creation of a container is detected, the server will log the event to any of the following services: - Webex Teams - Slack - Mongodb - HTTP Collector As a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks.",
+        "score": 0.412
+      },
+      {
+        "sentence": "This is where we recently spotted the following attempt: Xanthe - a Docker-aware crypto miner The attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script.",
+        "score": 0.3755
+      },
+      {
+        "sentence": "When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "In fact, despite Xanthe having been active since March 2020, only one of the scripts had been detected.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "Older Xanthe versions and the VirusTotal detections The initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "The main Xanthe module starts with an initialization procedure that attempts to download and run two additional modules: xesa.txt and fczyo.",
+        "score": 0.3213
+      },
+      {
+        "sentence": "We describe both in detail in the next section.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "The next procedure downloads a variant of the XMRig miner as java_c, its JSON configuration file and the libprocesshider shared library used for hiding the miner process name in memory.",
+        "score": 0.5297
+      },
+      {
+        "sentence": "The integrity of every downloaded file is verified with a hardcoded MD5 checksum value.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "At the moment of writing this post, the IP address 34[.]92[.]166[.]158 runs an NginX version 1.19.2, which was released in August this year.",
+        "score": 0.367
+      },
+      {
+        "sentence": "Iplogger.org is extensively used throughout the code, with each procedure communicating with a unique logging URL.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "Curl's user agent strings are manually specified for each request depending on the phase and the functionality currently being executed.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "User-agent strings and the associated functionality The execution of the main module continues with making sure that the /tmp directory is mounted and configured to allow execution of the files within it.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running. sshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.",
+        "score": 0.4036
+      },
+      {
+        "sentence": "First, Xanthe configures the SSH daemon to make its configuration less secure and enable some functionality.",
+        "score": 0.3833
+      },
+      {
+        "sentence": "The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "The find is used to search for any filenames starting with the string 'id_rsa' and for files with the '.pem' file extension.",
+        "score": 0.3011
+      },
+      {
+        "sentence": "First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.",
+        "score": 0.4315
+      },
+      {
+        "sentence": "Functions are enabled/disabled by commenting a line using the character # The Docker spreading functionality is contained within the function 'scangogo'.",
+        "score": 0.4026
+      },
+      {
+        "sentence": "If a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.",
+        "score": 0.3386
+      },
+      {
+        "sentence": "Xesa.txt - the killer module Xesa starts initially with removing the system log file and adding a number of IP addresses to the /etc/hosts file so that they are resolved locally by the DNS resolver to 0.0.0.0 and blocked.",
+        "score": 0.4413
+      },
+      {
+        "sentence": "Xesa also attempts to delete several accounts, which seem to be related to competing botnets such as Kinsing.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "The execution continues with running a large number of ps commands to determine if competitive miners are running on the infected system.",
+        "score": 0.3033
+      },
+      {
+        "sentence": "If any of the miners are found, their processes will be terminated and files removed from the system.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "Docker images of competitor's miners being removed from the infected system One of the main Xesa functions is terminating competitor's Docker containers if they are running and removing their images from the local Docker repository.",
+        "score": 0.462
+      },
+      {
+        "sentence": "Fczyo - persistence and remote access setup The second auxiliary module, fczyo, is similar to xesa.txt, but it covers slightly different areas of the system for termination.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "The execution starts with adding two of the public DNS servers, 1.1.1.1 and 8.8.8.8, to the beginning of the /etc/resolve.conf file and restarting the DNS resolver to use those public servers.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "It then continues with terminating competing Docker containers if they are running.",
+        "score": 0.3173
+      },
+      {
+        "sentence": "The script makes sure that the security processes are not running on the infected system and ensures that crond is running so the scheduled jobs can be executed.",
+        "score": 0.3914
+      },
+      {
+        "sentence": "Fczyo attempts to add the following users to the infected system: - sysall - system - logger - autoupdater Once the users are created, the script adds them to the list of sudoers so that they can run commands with administrative privileges.",
+        "score": 0.351
+      },
+      {
+        "sentence": "Fczyo checking if the cron job is already configured The next major block of functions is tasked with setting up scheduled cron jobs to ensure that Xanthe modules are downloaded and run from the download server every 30 minutes.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "It also modifies the file /etc/rc.d/rc.local so Xanthe can be downloaded and run every time the system is started.",
+        "score": 0.3682
+      },
+      {
+        "sentence": "Fczyo also attempts to clear bash history, disable and remove ufw and any file belonging to the Sandfly security products.",
+        "score": 0.4062
+      },
+      {
+        "sentence": "Process-hiding module Xanthe and its auxiliary modules use a shared object, libprocesshider, which is downloaded and installed into /usr/local/lib/libprocesshider.so.",
+        "score": 0.5161
+      },
+      {
+        "sentence": "The loading of the shared object is enabled by adding the path of the library to the file /etc/ld.so.preload.",
+        "score": 0.3477
+      },
+      {
+        "sentence": "Ld.so.preload contains a list of user-specified ELF shared libraries to be loaded before all others.",
+        "score": 0.3574
+      },
+      {
+        "sentence": "This can be used to selectively override functions in other shared libraries.",
+        "score": 0.3068
+      },
+      {
+        "sentence": "Process tools such as ps use the /proc file system and the readdir function to enumerate all the running processes.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "If a malicious shared object is used to implement a malicious copy of the readdir function, this function will be called before the standard library function.",
+        "score": 0.3303
+      },
+      {
+        "sentence": "The malicious function then has the ability to modify the results of the readdir to omit details of some processes.",
+        "score": 0.4096
+      },
+      {
+        "sentence": "The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.",
+        "score": 0.6133
+      },
+      {
+        "sentence": "We discovered this botnet when it registered in a Docker honeypot system.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "The main module contains functions, disabled in this variant, to spread by exploiting incorrectly configured Docker API installations.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "While Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "When setting up organizations' defences, administrators and devops engineers need to make sure all components in their product development and deployment systems are properly configured and secure.",
+        "score": 0.3164
+      },
+      {
+        "sentence": "Coverage Ways our customers can detect and block this threat are listed below.",
+        "score": 0.3641
+      },
+      {
+        "sentence": "Cisco Cloud Web Security (CWS) orWeb Security Appliance (WSA) web scanning prevents access to malicious websites and detects malware used in these attacks.",
+        "score": 0.3517
+      },
+      {
+        "sentence": "Network Security appliances such as Next-Generation Firewall (NGFW), Next-Generation Intrusion Prevention System (NGIPS),Cisco ISR andMeraki MX can detect malicious activity associated with this threat.",
+        "score": 0.3651
+      },
+      {
+        "sentence": "AMP Threat Grid helps identify malicious binaries and builds protection into all Cisco Security products.",
+        "score": 0.3455
+      },
+      {
+        "sentence": "Open Source Snort Subscriber Rule Set customers can stay up to date by downloading the latest rule pack available for purchase onSnort.org.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "OSQuery Cisco AMP users can use Orbital Advanced Search to run complex OSqueries to see if their endpoints are infected with this specific threat.",
+        "score": 0.345
+      },
+      {
+        "sentence": "For specific OSqueries on this threat, click below: https://github.com/Cisco-Talos/osquery_queries/blob/master/packs/linux_malware.conf",
+        "score": 0.4038
+      }
+    ],
+    "T1053": [
+      {
+        "sentence": "Attackers are constantly reinventing ways of monetizing their tools.",
+        "score": 0.3097
+      },
+      {
+        "sentence": "Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.",
+        "score": 0.3839
+      },
+      {
+        "sentence": "We believe this is the first time anyone's documented Xanthe's operations.",
+        "score": 0.3096
+      },
+      {
+        "sentence": "The actor is actively maintaining all the modules and has been active since March this year.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "Two additional bash scripts terminate security services, removing competitor's botnets and ensuring persistence by creating scheduled cron jobs and modifying one of the system startup scripts.",
+        "score": 0.369
+      },
+      {
+        "sentence": "The main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.",
+        "score": 0.4312
+      },
+      {
+        "sentence": "Docker has been one of the most popular platforms for managing containers.",
+        "score": 0.3626
+      },
+      {
+        "sentence": "However, anybody who has worked with Docker quickly realises that the learning curve is quite steep.",
+        "score": 0.3277
+      },
+      {
+        "sentence": "Currently, the service is a script that runs in a shell.",
+        "score": 0.3063
+      },
+      {
+        "sentence": "This is where we recently spotted the following attempt: Xanthe - a Docker-aware crypto miner The attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "The main Xanthe module starts with an initialization procedure that attempts to download and run two additional modules: xesa.txt and fczyo.",
+        "score": 0.3306
+      },
+      {
+        "sentence": "The next procedure downloads a variant of the XMRig miner as java_c, its JSON configuration file and the libprocesshider shared library used for hiding the miner process name in memory.",
+        "score": 0.4579
+      },
+      {
+        "sentence": "The URLs for download are hardcoded in an array per URL, with direct IP addresses 139[.]162[.]124[.]27 and 34[.]92[.]166[.]158 used for download.",
+        "score": 0.3002
+      },
+      {
+        "sentence": "The address 139[.]162[.]124[.]27 runs a Debian Linux distribution with an older Apache version 2.4.10 serving the files.",
+        "score": 0.347
+      },
+      {
+        "sentence": "User-agent strings and the associated functionality The execution of the main module continues with making sure that the /tmp directory is mounted and configured to allow execution of the files within it.",
+        "score": 0.3562
+      },
+      {
+        "sentence": "Next, the procedure checks if the miner is already running in memory by running the ps command.",
+        "score": 0.3379
+      },
+      {
+        "sentence": "First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running. sshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "The author's programming style is similar in all scripts.",
+        "score": 0.321
+      },
+      {
+        "sentence": "If a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "Auxiliary shell scripts As soon as the main module is launched, it downloads and runs the two auxiliary modules, xesa.txt and fczyo.",
+        "score": 0.3273
+      },
+      {
+        "sentence": "The script finishes with another check that the java_c process is running.",
+        "score": 0.3804
+      },
+      {
+        "sentence": "The script makes sure that the security processes are not running on the infected system and ensures that crond is running so the scheduled jobs can be executed.",
+        "score": 0.5003
+      },
+      {
+        "sentence": "Fczyo attempts to add the following users to the infected system: - sysall - system - logger - autoupdater Once the users are created, the script adds them to the list of sudoers so that they can run commands with administrative privileges.",
+        "score": 0.395
+      },
+      {
+        "sentence": "Fczyo checking if the cron job is already configured The next major block of functions is tasked with setting up scheduled cron jobs to ensure that Xanthe modules are downloaded and run from the download server every 30 minutes.",
+        "score": 0.6973
+      },
+      {
+        "sentence": "It also modifies the file /etc/rc.d/rc.local so Xanthe can be downloaded and run every time the system is started.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "Process-hiding module Xanthe and its auxiliary modules use a shared object, libprocesshider, which is downloaded and installed into /usr/local/lib/libprocesshider.so.",
+        "score": 0.4748
+      },
+      {
+        "sentence": "The loading of the shared object is enabled by adding the path of the library to the file /etc/ld.so.preload.",
+        "score": 0.4243
+      },
+      {
+        "sentence": "Ld.so.preload contains a list of user-specified ELF shared libraries to be loaded before all others.",
+        "score": 0.4464
+      },
+      {
+        "sentence": "This can be used to selectively override functions in other shared libraries.",
+        "score": 0.3377
+      },
+      {
+        "sentence": "If a malicious shared object is used to implement a malicious copy of the readdir function, this function will be called before the standard library function.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.",
+        "score": 0.411
+      },
+      {
+        "sentence": "While Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "Advanced Malware Protection (AMP) is ideally suited to prevent the execution of the malware used by these threat actors.",
+        "score": 0.317
+      },
+      {
+        "sentence": "For specific OSqueries on this threat, click below: https://github.com/Cisco-Talos/osquery_queries/blob/master/packs/linux_malware.conf",
+        "score": 0.3317
+      }
+    ],
+    "T1133": [
+      {
+        "sentence": "Attackers are constantly reinventing ways of monetizing their tools.",
+        "score": 0.4195
+      },
+      {
+        "sentence": "Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "The actor employs various methods to spread across the network, like harvesting client-side certificates for spreading to known hosts using ssh, or spreading to systems with an incorrectly configured Docker API.",
+        "score": 0.4946
+      },
+      {
+        "sentence": "We believe this is the first time anyone's documented Xanthe's operations.",
+        "score": 0.3454
+      },
+      {
+        "sentence": "The actor is actively maintaining all the modules and has been active since March this year.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "The main module attempts to spread to other known hosts by stealing the client-side certificates and connecting to them without the requirement for a password.",
+        "score": 0.5014
+      },
+      {
+        "sentence": "Attackers are like water — they look for the smallest crack to seep in, like we see in Xanthe's potential to spread using systems with exposed Docker API.",
+        "score": 0.4515
+      },
+      {
+        "sentence": "Technical case overview Introduction Honeypots are one of the most commonly used systems for collecting new threats and threat intelligence, with a number of open-source implementations.",
+        "score": 0.335
+      },
+      {
+        "sentence": "Cisco Talos and the Cisco Security & Trust organization deploy numerous honeypots tracking attacks on many platforms, protocols and applications.",
+        "score": 0.4036
+      },
+      {
+        "sentence": "Over time it became a de facto standard for development and deployment of web and cloud applications.",
+        "score": 0.4155
+      },
+      {
+        "sentence": "Therefore Docker installations can be easily misconfigured and Docker daemon exposed to external networks with a minimal level of security.",
+        "score": 0.4314
+      },
+      {
+        "sentence": "According to Shodan, there are over 6,000 incorrectly-configured Docker implementations exposed to the internet, and attackers have been actively finding ways to exploit those exposed servers.",
+        "score": 0.4518
+      },
+      {
+        "sentence": "Incorrectly configured Docker installations with exposed, unprotected APIs according to Shodan Docker daemons have been targets of attacks for several years now, and our security teams decided to keep tracking activities related to various actors attempting to exploit them.",
+        "score": 0.4805
+      },
+      {
+        "sentence": "Docker honeypot The Cisco Security and Trust organization developed an implementation of a Docker honeypot.",
+        "score": 0.3667
+      },
+      {
+        "sentence": "The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API.",
+        "score": 0.3939
+      },
+      {
+        "sentence": "Currently, the service is a script that runs in a shell.",
+        "score": 0.3468
+      },
+      {
+        "sentence": "When a recon event or the creation of a container is detected, the server will log the event to any of the following services: - Webex Teams - Slack - Mongodb - HTTP Collector As a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines.",
+        "score": 0.303
+      },
+      {
+        "sentence": "It is also tasked with scanning the network and spreading to other systems over SSH and by exploiting Docker daemon installations with exposed web API.",
+        "score": 0.4756
+      },
+      {
+        "sentence": "At the moment of writing this post, the IP address 34[.]92[.]166[.]158 runs an NginX version 1.19.2, which was released in August this year.",
+        "score": 0.4109
+      },
+      {
+        "sentence": "The address 139[.]162[.]124[.]27 runs a Debian Linux distribution with an older Apache version 2.4.10 serving the files.",
+        "score": 0.3379
+      },
+      {
+        "sentence": "Xanthe uses curl to download its modules and to communicate with the logging URLs.",
+        "score": 0.3527
+      },
+      {
+        "sentence": "Iplogger.org is extensively used throughout the code, with each procedure communicating with a unique logging URL.",
+        "score": 0.3338
+      },
+      {
+        "sentence": "First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running. sshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.",
+        "score": 0.3678
+      },
+      {
+        "sentence": "The daemon is configured to run on ports 22 and 33768 with the root account login, password, client public key and GSSAPIAuthentication (such as Kerberos authentication) enabled.",
+        "score": 0.511
+      },
+      {
+        "sentence": "The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com.",
+        "score": 0.349
+      },
+      {
+        "sentence": "Next, the script uses the find utility to search for instances of client-side certificates, which will be used for authentication to remote hosts.",
+        "score": 0.4127
+      },
+      {
+        "sentence": "Once all possible keys have been found, the script proceeds with finding known hosts, TCP ports and usernames used to connect to those hosts.",
+        "score": 0.4247
+      },
+      {
+        "sentence": "Finally, a loop is entered which iterates over the combination of all known usernames, hosts, keys and ports in an attempt to connect, authenticate on the remote host and launch the command lines to download and execute the main module on the remote system.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.",
+        "score": 0.312
+      },
+      {
+        "sentence": "The function first attempts to install the mass port-scanning utility masscan to scan the local network, as well as the /24 subnet of the external IP address, for the hosts with incorrectly configured Docker API exposed on TCP port 2375.",
+        "score": 0.3807
+      },
+      {
+        "sentence": "If a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "The IP addresses are related to competing botnets and security services such as the Alibaba cloud security center agent.",
+        "score": 0.4182
+      },
+      {
+        "sentence": "Fczyo - persistence and remote access setup The second auxiliary module, fczyo, is similar to xesa.txt, but it covers slightly different areas of the system for termination.",
+        "score": 0.5721
+      },
+      {
+        "sentence": "The script also adds a public key to the SSH configuration to allow those users access to the host using the client-side private key.",
+        "score": 0.3727
+      },
+      {
+        "sentence": "Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.",
+        "score": 0.3673
+      },
+      {
+        "sentence": "Conclusion In this post, we documented the previously-undocumented Monero mining botnet Xanthe, which attempts to spread over SSH using existing private keys for authentication.",
+        "score": 0.469
+      },
+      {
+        "sentence": "We discovered this botnet when it registered in a Docker honeypot system.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "The main module contains functions, disabled in this variant, to spread by exploiting incorrectly configured Docker API installations.",
+        "score": 0.437
+      },
+      {
+        "sentence": "While Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "The installation is not secure by default, and it is easy to leave its API exposed to attackers on a lookout for 'free' resources they can use to run custom containers and conduct attacks.",
+        "score": 0.5083
+      },
+      {
+        "sentence": "Exploit Prevention present within AMP is designed to protect customers from unknown attacks such as this automatically.",
+        "score": 0.4352
+      },
+      {
+        "sentence": "Umbrella, our secure internet gateway (SIG), blocks users from connecting to malicious domains, IPs and URLs, whether users are on or off the corporate network.",
+        "score": 0.3568
+      }
+    ],
+    "T1184": [
+      {
+        "sentence": "Attackers are constantly reinventing ways of monetizing their tools.",
+        "score": 0.348
+      },
+      {
+        "sentence": "Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.",
+        "score": 0.4485
+      },
+      {
+        "sentence": "The actor employs various methods to spread across the network, like harvesting client-side certificates for spreading to known hosts using ssh, or spreading to systems with an incorrectly configured Docker API.",
+        "score": 0.6378
+      },
+      {
+        "sentence": "We believe this is the first time anyone's documented Xanthe's operations.",
+        "score": 0.3687
+      },
+      {
+        "sentence": "The actor is actively maintaining all the modules and has been active since March this year.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "The infection starts with the downloader module, which downloads the main installer module, which is also tasked with spreading to other systems on the local and remote networks.",
+        "score": 0.3939
+      },
+      {
+        "sentence": "The main module attempts to spread to other known hosts by stealing the client-side certificates and connecting to them without the requirement for a password.",
+        "score": 0.6556
+      },
+      {
+        "sentence": "Two additional bash scripts terminate security services, removing competitor's botnets and ensuring persistence by creating scheduled cron jobs and modifying one of the system startup scripts.",
+        "score": 0.3384
+      },
+      {
+        "sentence": "The main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.",
+        "score": 0.3574
+      },
+      {
+        "sentence": "Defenders need to be constantly vigilant and monitor the behavior of systems within their network.",
+        "score": 0.3818
+      },
+      {
+        "sentence": "Attackers are like water — they look for the smallest crack to seep in, like we see in Xanthe's potential to spread using systems with exposed Docker API.",
+        "score": 0.5609
+      },
+      {
+        "sentence": "While organizations need to be focused on protecting their most valuable assets, they should not ignore threats that are not specifically targeted at their infrastructure.",
+        "score": 0.3376
+      },
+      {
+        "sentence": "Technical case overview Introduction Honeypots are one of the most commonly used systems for collecting new threats and threat intelligence, with a number of open-source implementations.",
+        "score": 0.4077
+      },
+      {
+        "sentence": "Cisco Talos and the Cisco Security & Trust organization deploy numerous honeypots tracking attacks on many platforms, protocols and applications.",
+        "score": 0.4422
+      },
+      {
+        "sentence": "Over time it became a de facto standard for development and deployment of web and cloud applications.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "However, anybody who has worked with Docker quickly realises that the learning curve is quite steep.",
+        "score": 0.404
+      },
+      {
+        "sentence": "Therefore Docker installations can be easily misconfigured and Docker daemon exposed to external networks with a minimal level of security.",
+        "score": 0.4829
+      },
+      {
+        "sentence": "According to Shodan, there are over 6,000 incorrectly-configured Docker implementations exposed to the internet, and attackers have been actively finding ways to exploit those exposed servers.",
+        "score": 0.4963
+      },
+      {
+        "sentence": "Incorrectly configured Docker installations with exposed, unprotected APIs according to Shodan Docker daemons have been targets of attacks for several years now, and our security teams decided to keep tracking activities related to various actors attempting to exploit them.",
+        "score": 0.5693
+      },
+      {
+        "sentence": "Docker honeypot The Cisco Security and Trust organization developed an implementation of a Docker honeypot.",
+        "score": 0.4218
+      },
+      {
+        "sentence": "The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API.",
+        "score": 0.437
+      },
+      {
+        "sentence": "Currently, the service is a script that runs in a shell.",
+        "score": 0.3757
+      },
+      {
+        "sentence": "When a recon event or the creation of a container is detected, the server will log the event to any of the following services: - Webex Teams - Slack - Mongodb - HTTP Collector As a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks.",
+        "score": 0.4794
+      },
+      {
+        "sentence": "This is where we recently spotted the following attempt: Xanthe - a Docker-aware crypto miner The attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script.",
+        "score": 0.4387
+      },
+      {
+        "sentence": "When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "In fact, despite Xanthe having been active since March 2020, only one of the scripts had been detected.",
+        "score": 0.3728
+      },
+      {
+        "sentence": "Older Xanthe versions and the VirusTotal detections The initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules.",
+        "score": 0.3545
+      },
+      {
+        "sentence": "It is also tasked with scanning the network and spreading to other systems over SSH and by exploiting Docker daemon installations with exposed web API.",
+        "score": 0.5756
+      },
+      {
+        "sentence": "The main Xanthe module starts with an initialization procedure that attempts to download and run two additional modules: xesa.txt and fczyo.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "We describe both in detail in the next section.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "The next procedure downloads a variant of the XMRig miner as java_c, its JSON configuration file and the libprocesshider shared library used for hiding the miner process name in memory.",
+        "score": 0.3758
+      },
+      {
+        "sentence": "The URLs for download are hardcoded in an array per URL, with direct IP addresses 139[.]162[.]124[.]27 and 34[.]92[.]166[.]158 used for download.",
+        "score": 0.3298
+      },
+      {
+        "sentence": "At the moment of writing this post, the IP address 34[.]92[.]166[.]158 runs an NginX version 1.19.2, which was released in August this year.",
+        "score": 0.4498
+      },
+      {
+        "sentence": "The address 139[.]162[.]124[.]27 runs a Debian Linux distribution with an older Apache version 2.4.10 serving the files.",
+        "score": 0.4451
+      },
+      {
+        "sentence": "Both of the server directories, /files/, used to host the malicious files are open and potentially misconfigured.",
+        "score": 0.301
+      },
+      {
+        "sentence": "Xanthe uses curl to download its modules and to communicate with the logging URLs.",
+        "score": 0.3626
+      },
+      {
+        "sentence": "Iplogger.org is extensively used throughout the code, with each procedure communicating with a unique logging URL.",
+        "score": 0.3913
+      },
+      {
+        "sentence": "First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running. sshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.",
+        "score": 0.6379
+      },
+      {
+        "sentence": "First, Xanthe configures the SSH daemon to make its configuration less secure and enable some functionality.",
+        "score": 0.5486
+      },
+      {
+        "sentence": "The daemon is configured to run on ports 22 and 33768 with the root account login, password, client public key and GSSAPIAuthentication (such as Kerberos authentication) enabled.",
+        "score": 0.6537
+      },
+      {
+        "sentence": "Once the configuration file is modified, the SSH service is restarted.",
+        "score": 0.5744
+      },
+      {
+        "sentence": "The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com.",
+        "score": 0.3996
+      },
+      {
+        "sentence": "Next, the script uses the find utility to search for instances of client-side certificates, which will be used for authentication to remote hosts.",
+        "score": 0.5244
+      },
+      {
+        "sentence": "The find is used to search for any filenames starting with the string 'id_rsa' and for files with the '.pem' file extension.",
+        "score": 0.3211
+      },
+      {
+        "sentence": "The script also uses a combination of 'cat' and 'grep' to find other keys by parsing the SSH configuration files and the bash history file.",
+        "score": 0.4089
+      },
+      {
+        "sentence": "Once all possible keys have been found, the script proceeds with finding known hosts, TCP ports and usernames used to connect to those hosts.",
+        "score": 0.618
+      },
+      {
+        "sentence": "Finally, a loop is entered which iterates over the combination of all known usernames, hosts, keys and ports in an attempt to connect, authenticate on the remote host and launch the command lines to download and execute the main module on the remote system.",
+        "score": 0.5516
+      },
+      {
+        "sentence": "SSH Xanthe-based spreading command Available functionality commented out Although we have seen this bot hitting our Docker honeypots with an attempt to spread, at the time of the analysis the routine for Docker scanning and spreading was commented out.",
+        "score": 0.5216
+      },
+      {
+        "sentence": "First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.",
+        "score": 0.3803
+      },
+      {
+        "sentence": "The function first attempts to install the mass port-scanning utility masscan to scan the local network, as well as the /24 subnet of the external IP address, for the hosts with incorrectly configured Docker API exposed on TCP port 2375.",
+        "score": 0.4334
+      },
+      {
+        "sentence": "If a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.",
+        "score": 0.4819
+      },
+      {
+        "sentence": "Auxiliary shell scripts As soon as the main module is launched, it downloads and runs the two auxiliary modules, xesa.txt and fczyo.",
+        "score": 0.3553
+      },
+      {
+        "sentence": "Xesa.txt - the killer module Xesa starts initially with removing the system log file and adding a number of IP addresses to the /etc/hosts file so that they are resolved locally by the DNS resolver to 0.0.0.0 and blocked.",
+        "score": 0.3292
+      },
+      {
+        "sentence": "The IP addresses are related to competing botnets and security services such as the Alibaba cloud security center agent.",
+        "score": 0.3618
+      },
+      {
+        "sentence": "The execution continues with running a large number of ps commands to determine if competitive miners are running on the infected system.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "The script finishes with another check that the java_c process is running.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "Fczyo - persistence and remote access setup The second auxiliary module, fczyo, is similar to xesa.txt, but it covers slightly different areas of the system for termination.",
+        "score": 0.5168
+      },
+      {
+        "sentence": "The execution starts with adding two of the public DNS servers, 1.1.1.1 and 8.8.8.8, to the beginning of the /etc/resolve.conf file and restarting the DNS resolver to use those public servers.",
+        "score": 0.3096
+      },
+      {
+        "sentence": "It then continues with terminating competing Docker containers if they are running.",
+        "score": 0.3332
+      },
+      {
+        "sentence": "Fczyo attempts to add the following users to the infected system: - sysall - system - logger - autoupdater Once the users are created, the script adds them to the list of sudoers so that they can run commands with administrative privileges.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "The script also adds a public key to the SSH configuration to allow those users access to the host using the client-side private key.",
+        "score": 0.7368
+      },
+      {
+        "sentence": "Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.",
+        "score": 0.4455
+      },
+      {
+        "sentence": "Process-hiding module Xanthe and its auxiliary modules use a shared object, libprocesshider, which is downloaded and installed into /usr/local/lib/libprocesshider.so.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "The loading of the shared object is enabled by adding the path of the library to the file /etc/ld.so.preload.",
+        "score": 0.3392
+      },
+      {
+        "sentence": "The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.",
+        "score": 0.4287
+      },
+      {
+        "sentence": "Conclusion In this post, we documented the previously-undocumented Monero mining botnet Xanthe, which attempts to spread over SSH using existing private keys for authentication.",
+        "score": 0.7917
+      },
+      {
+        "sentence": "We discovered this botnet when it registered in a Docker honeypot system.",
+        "score": 0.4627
+      },
+      {
+        "sentence": "The main module contains functions, disabled in this variant, to spread by exploiting incorrectly configured Docker API installations.",
+        "score": 0.4858
+      },
+      {
+        "sentence": "While Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep.",
+        "score": 0.4032
+      },
+      {
+        "sentence": "The installation is not secure by default, and it is easy to leave its API exposed to attackers on a lookout for 'free' resources they can use to run custom containers and conduct attacks.",
+        "score": 0.4903
+      },
+      {
+        "sentence": "Coverage Ways our customers can detect and block this threat are listed below.",
+        "score": 0.3069
+      },
+      {
+        "sentence": "Exploit Prevention present within AMP is designed to protect customers from unknown attacks such as this automatically.",
+        "score": 0.3912
+      },
+      {
+        "sentence": "Umbrella, our secure internet gateway (SIG), blocks users from connecting to malicious domains, IPs and URLs, whether users are on or off the corporate network.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "Open Source Snort Subscriber Rule Set customers can stay up to date by downloading the latest rule pack available for purchase onSnort.org.",
+        "score": 0.3193
+      }
+    ],
+    "T1190": [
+      {
+        "sentence": "Attackers are constantly reinventing ways of monetizing their tools.",
+        "score": 0.3762
+      },
+      {
+        "sentence": "Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.",
+        "score": 0.4383
+      },
+      {
+        "sentence": "The actor employs various methods to spread across the network, like harvesting client-side certificates for spreading to known hosts using ssh, or spreading to systems with an incorrectly configured Docker API.",
+        "score": 0.5712
+      },
+      {
+        "sentence": "We believe this is the first time anyone's documented Xanthe's operations.",
+        "score": 0.3045
+      },
+      {
+        "sentence": "The actor is actively maintaining all the modules and has been active since March this year.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "The infection starts with the downloader module, which downloads the main installer module, which is also tasked with spreading to other systems on the local and remote networks.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "The main module attempts to spread to other known hosts by stealing the client-side certificates and connecting to them without the requirement for a password.",
+        "score": 0.5417
+      },
+      {
+        "sentence": "Defenders need to be constantly vigilant and monitor the behavior of systems within their network.",
+        "score": 0.3291
+      },
+      {
+        "sentence": "Attackers are like water — they look for the smallest crack to seep in, like we see in Xanthe's potential to spread using systems with exposed Docker API.",
+        "score": 0.7219
+      },
+      {
+        "sentence": "While organizations need to be focused on protecting their most valuable assets, they should not ignore threats that are not specifically targeted at their infrastructure.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "Technical case overview Introduction Honeypots are one of the most commonly used systems for collecting new threats and threat intelligence, with a number of open-source implementations.",
+        "score": 0.4457
+      },
+      {
+        "sentence": "Cisco Talos and the Cisco Security & Trust organization deploy numerous honeypots tracking attacks on many platforms, protocols and applications.",
+        "score": 0.5365
+      },
+      {
+        "sentence": "Over time it became a de facto standard for development and deployment of web and cloud applications.",
+        "score": 0.4636
+      },
+      {
+        "sentence": "However, anybody who has worked with Docker quickly realises that the learning curve is quite steep.",
+        "score": 0.324
+      },
+      {
+        "sentence": "Therefore Docker installations can be easily misconfigured and Docker daemon exposed to external networks with a minimal level of security.",
+        "score": 0.6691
+      },
+      {
+        "sentence": "According to Shodan, there are over 6,000 incorrectly-configured Docker implementations exposed to the internet, and attackers have been actively finding ways to exploit those exposed servers.",
+        "score": 0.8158
+      },
+      {
+        "sentence": "Incorrectly configured Docker installations with exposed, unprotected APIs according to Shodan Docker daemons have been targets of attacks for several years now, and our security teams decided to keep tracking activities related to various actors attempting to exploit them.",
+        "score": 0.7673
+      },
+      {
+        "sentence": "Docker honeypot The Cisco Security and Trust organization developed an implementation of a Docker honeypot.",
+        "score": 0.4546
+      },
+      {
+        "sentence": "The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API.",
+        "score": 0.4584
+      },
+      {
+        "sentence": "The server will respond to: - HTTP GET version - HTTP GET ping - HTTP POST create image - HTTP Error Code 500 in almost all other cases The assumption is that this service is running in a cloud provider somewhere.",
+        "score": 0.3826
+      },
+      {
+        "sentence": "When a recon event or the creation of a container is detected, the server will log the event to any of the following services: - Webex Teams - Slack - Mongodb - HTTP Collector As a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks.",
+        "score": 0.4629
+      },
+      {
+        "sentence": "This is where we recently spotted the following attempt: Xanthe - a Docker-aware crypto miner The attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script.",
+        "score": 0.4268
+      },
+      {
+        "sentence": "When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "In fact, despite Xanthe having been active since March 2020, only one of the scripts had been detected.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "Older Xanthe versions and the VirusTotal detections The initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules.",
+        "score": 0.3256
+      },
+      {
+        "sentence": "It is also tasked with scanning the network and spreading to other systems over SSH and by exploiting Docker daemon installations with exposed web API.",
+        "score": 0.7685
+      },
+      {
+        "sentence": "The URLs for download are hardcoded in an array per URL, with direct IP addresses 139[.]162[.]124[.]27 and 34[.]92[.]166[.]158 used for download.",
+        "score": 0.3342
+      },
+      {
+        "sentence": "At the moment of writing this post, the IP address 34[.]92[.]166[.]158 runs an NginX version 1.19.2, which was released in August this year.",
+        "score": 0.4517
+      },
+      {
+        "sentence": "The address 139[.]162[.]124[.]27 runs a Debian Linux distribution with an older Apache version 2.4.10 serving the files.",
+        "score": 0.4748
+      },
+      {
+        "sentence": "Both of the server directories, /files/, used to host the malicious files are open and potentially misconfigured.",
+        "score": 0.3534
+      },
+      {
+        "sentence": "First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running. sshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.",
+        "score": 0.4811
+      },
+      {
+        "sentence": "The daemon is configured to run on ports 22 and 33768 with the root account login, password, client public key and GSSAPIAuthentication (such as Kerberos authentication) enabled.",
+        "score": 0.385
+      },
+      {
+        "sentence": "The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com.",
+        "score": 0.4231
+      },
+      {
+        "sentence": "Next, the script uses the find utility to search for instances of client-side certificates, which will be used for authentication to remote hosts.",
+        "score": 0.3986
+      },
+      {
+        "sentence": "Once all possible keys have been found, the script proceeds with finding known hosts, TCP ports and usernames used to connect to those hosts.",
+        "score": 0.4499
+      },
+      {
+        "sentence": "Finally, a loop is entered which iterates over the combination of all known usernames, hosts, keys and ports in an attempt to connect, authenticate on the remote host and launch the command lines to download and execute the main module on the remote system.",
+        "score": 0.3838
+      },
+      {
+        "sentence": "SSH Xanthe-based spreading command Available functionality commented out Although we have seen this bot hitting our Docker honeypots with an attempt to spread, at the time of the analysis the routine for Docker scanning and spreading was commented out.",
+        "score": 0.4844
+      },
+      {
+        "sentence": "The author's programming style is similar in all scripts.",
+        "score": 0.3133
+      },
+      {
+        "sentence": "First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "The function first attempts to install the mass port-scanning utility masscan to scan the local network, as well as the /24 subnet of the external IP address, for the hosts with incorrectly configured Docker API exposed on TCP port 2375.",
+        "score": 0.4664
+      },
+      {
+        "sentence": "If a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.",
+        "score": 0.4508
+      },
+      {
+        "sentence": "The IP addresses are related to competing botnets and security services such as the Alibaba cloud security center agent.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "The script also adds a public key to the SSH configuration to allow those users access to the host using the client-side private key.",
+        "score": 0.3153
+      },
+      {
+        "sentence": "Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.",
+        "score": 0.5084
+      },
+      {
+        "sentence": "The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "Conclusion In this post, we documented the previously-undocumented Monero mining botnet Xanthe, which attempts to spread over SSH using existing private keys for authentication.",
+        "score": 0.4363
+      },
+      {
+        "sentence": "We discovered this botnet when it registered in a Docker honeypot system.",
+        "score": 0.4693
+      },
+      {
+        "sentence": "The main module contains functions, disabled in this variant, to spread by exploiting incorrectly configured Docker API installations.",
+        "score": 0.6419
+      },
+      {
+        "sentence": "While Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep.",
+        "score": 0.4185
+      },
+      {
+        "sentence": "The installation is not secure by default, and it is easy to leave its API exposed to attackers on a lookout for 'free' resources they can use to run custom containers and conduct attacks.",
+        "score": 0.6306
+      },
+      {
+        "sentence": "When setting up organizations' defences, administrators and devops engineers need to make sure all components in their product development and deployment systems are properly configured and secure.",
+        "score": 0.3675
+      },
+      {
+        "sentence": "Coverage Ways our customers can detect and block this threat are listed below.",
+        "score": 0.3519
+      },
+      {
+        "sentence": "Exploit Prevention present within AMP is designed to protect customers from unknown attacks such as this automatically.",
+        "score": 0.6531
+      },
+      {
+        "sentence": "Cisco Cloud Web Security (CWS) orWeb Security Appliance (WSA) web scanning prevents access to malicious websites and detects malware used in these attacks.",
+        "score": 0.488
+      },
+      {
+        "sentence": "Network Security appliances such as Next-Generation Firewall (NGFW), Next-Generation Intrusion Prevention System (NGIPS),Cisco ISR andMeraki MX can detect malicious activity associated with this threat.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "AMP Threat Grid helps identify malicious binaries and builds protection into all Cisco Security products.",
+        "score": 0.3391
+      },
+      {
+        "sentence": "Umbrella, our secure internet gateway (SIG), blocks users from connecting to malicious domains, IPs and URLs, whether users are on or off the corporate network.",
+        "score": 0.3959
+      },
+      {
+        "sentence": "OSQuery Cisco AMP users can use Orbital Advanced Search to run complex OSqueries to see if their endpoints are infected with this specific threat.",
+        "score": 0.3895
+      },
+      {
+        "sentence": "For specific OSqueries on this threat, click below: https://github.com/Cisco-Talos/osquery_queries/blob/master/packs/linux_malware.conf",
+        "score": 0.3499
+      }
+    ],
+    "T1496": [
+      {
+        "sentence": "Attackers are constantly reinventing ways of monetizing their tools.",
+        "score": 0.5151
+      },
+      {
+        "sentence": "Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.",
+        "score": 0.6484
+      },
+      {
+        "sentence": "The actor employs various methods to spread across the network, like harvesting client-side certificates for spreading to known hosts using ssh, or spreading to systems with an incorrectly configured Docker API.",
+        "score": 0.439
+      },
+      {
+        "sentence": "We believe this is the first time anyone's documented Xanthe's operations.",
+        "score": 0.431
+      },
+      {
+        "sentence": "The actor is actively maintaining all the modules and has been active since March this year.",
+        "score": 0.3876
+      },
+      {
+        "sentence": "The infection starts with the downloader module, which downloads the main installer module, which is also tasked with spreading to other systems on the local and remote networks.",
+        "score": 0.3462
+      },
+      {
+        "sentence": "The main module attempts to spread to other known hosts by stealing the client-side certificates and connecting to them without the requirement for a password.",
+        "score": 0.4337
+      },
+      {
+        "sentence": "The main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.",
+        "score": 0.4644
+      },
+      {
+        "sentence": "Defenders need to be constantly vigilant and monitor the behavior of systems within their network.",
+        "score": 0.3963
+      },
+      {
+        "sentence": "Attackers are like water — they look for the smallest crack to seep in, like we see in Xanthe's potential to spread using systems with exposed Docker API.",
+        "score": 0.4679
+      },
+      {
+        "sentence": "While organizations need to be focused on protecting their most valuable assets, they should not ignore threats that are not specifically targeted at their infrastructure.",
+        "score": 0.3834
+      },
+      {
+        "sentence": "Technical case overview Introduction Honeypots are one of the most commonly used systems for collecting new threats and threat intelligence, with a number of open-source implementations.",
+        "score": 0.4553
+      },
+      {
+        "sentence": "Cisco Talos and the Cisco Security & Trust organization deploy numerous honeypots tracking attacks on many platforms, protocols and applications.",
+        "score": 0.549
+      },
+      {
+        "sentence": "Docker has been one of the most popular platforms for managing containers.",
+        "score": 0.3289
+      },
+      {
+        "sentence": "Over time it became a de facto standard for development and deployment of web and cloud applications.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "However, anybody who has worked with Docker quickly realises that the learning curve is quite steep.",
+        "score": 0.3292
+      },
+      {
+        "sentence": "Therefore Docker installations can be easily misconfigured and Docker daemon exposed to external networks with a minimal level of security.",
+        "score": 0.3877
+      },
+      {
+        "sentence": "According to Shodan, there are over 6,000 incorrectly-configured Docker implementations exposed to the internet, and attackers have been actively finding ways to exploit those exposed servers.",
+        "score": 0.4621
+      },
+      {
+        "sentence": "Incorrectly configured Docker installations with exposed, unprotected APIs according to Shodan Docker daemons have been targets of attacks for several years now, and our security teams decided to keep tracking activities related to various actors attempting to exploit them.",
+        "score": 0.5017
+      },
+      {
+        "sentence": "Docker honeypot The Cisco Security and Trust organization developed an implementation of a Docker honeypot.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API.",
+        "score": 0.4697
+      },
+      {
+        "sentence": "The server will respond to: - HTTP GET version - HTTP GET ping - HTTP POST create image - HTTP Error Code 500 in almost all other cases The assumption is that this service is running in a cloud provider somewhere.",
+        "score": 0.478
+      },
+      {
+        "sentence": "Currently, the service is a script that runs in a shell.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "When a recon event or the creation of a container is detected, the server will log the event to any of the following services: - Webex Teams - Slack - Mongodb - HTTP Collector As a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks.",
+        "score": 0.5239
+      },
+      {
+        "sentence": "This is where we recently spotted the following attempt: Xanthe - a Docker-aware crypto miner The attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script.",
+        "score": 0.5335
+      },
+      {
+        "sentence": "When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "In fact, despite Xanthe having been active since March 2020, only one of the scripts had been detected.",
+        "score": 0.3405
+      },
+      {
+        "sentence": "Older Xanthe versions and the VirusTotal detections The initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules.",
+        "score": 0.3633
+      },
+      {
+        "sentence": "It is also tasked with scanning the network and spreading to other systems over SSH and by exploiting Docker daemon installations with exposed web API.",
+        "score": 0.4451
+      },
+      {
+        "sentence": "The main Xanthe module starts with an initialization procedure that attempts to download and run two additional modules: xesa.txt and fczyo.",
+        "score": 0.3419
+      },
+      {
+        "sentence": "We describe both in detail in the next section.",
+        "score": 0.3456
+      },
+      {
+        "sentence": "The next procedure downloads a variant of the XMRig miner as java_c, its JSON configuration file and the libprocesshider shared library used for hiding the miner process name in memory.",
+        "score": 0.4256
+      },
+      {
+        "sentence": "If the MD5 checksum is not verified, the download is reattempted.",
+        "score": 0.3045
+      },
+      {
+        "sentence": "The URLs for download are hardcoded in an array per URL, with direct IP addresses 139[.]162[.]124[.]27 and 34[.]92[.]166[.]158 used for download.",
+        "score": 0.4017
+      },
+      {
+        "sentence": "At the moment of writing this post, the IP address 34[.]92[.]166[.]158 runs an NginX version 1.19.2, which was released in August this year.",
+        "score": 0.4977
+      },
+      {
+        "sentence": "The address 139[.]162[.]124[.]27 runs a Debian Linux distribution with an older Apache version 2.4.10 serving the files.",
+        "score": 0.5104
+      },
+      {
+        "sentence": "Xanthe uses curl to download its modules and to communicate with the logging URLs.",
+        "score": 0.3448
+      },
+      {
+        "sentence": "Iplogger.org is extensively used throughout the code, with each procedure communicating with a unique logging URL.",
+        "score": 0.3585
+      },
+      {
+        "sentence": "Curl's user agent strings are manually specified for each request depending on the phase and the functionality currently being executed.",
+        "score": 0.336
+      },
+      {
+        "sentence": "User-agent strings and the associated functionality The execution of the main module continues with making sure that the /tmp directory is mounted and configured to allow execution of the files within it.",
+        "score": 0.3043
+      },
+      {
+        "sentence": "Next, the procedure checks if the miner is already running in memory by running the ps command.",
+        "score": 0.3841
+      },
+      {
+        "sentence": "First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running. sshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.",
+        "score": 0.3949
+      },
+      {
+        "sentence": "The daemon is configured to run on ports 22 and 33768 with the root account login, password, client public key and GSSAPIAuthentication (such as Kerberos authentication) enabled.",
+        "score": 0.4731
+      },
+      {
+        "sentence": "The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com.",
+        "score": 0.4456
+      },
+      {
+        "sentence": "Next, the script uses the find utility to search for instances of client-side certificates, which will be used for authentication to remote hosts.",
+        "score": 0.396
+      },
+      {
+        "sentence": "Once all possible keys have been found, the script proceeds with finding known hosts, TCP ports and usernames used to connect to those hosts.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "Finally, a loop is entered which iterates over the combination of all known usernames, hosts, keys and ports in an attempt to connect, authenticate on the remote host and launch the command lines to download and execute the main module on the remote system.",
+        "score": 0.4056
+      },
+      {
+        "sentence": "SSH Xanthe-based spreading command Available functionality commented out Although we have seen this bot hitting our Docker honeypots with an attempt to spread, at the time of the analysis the routine for Docker scanning and spreading was commented out.",
+        "score": 0.4481
+      },
+      {
+        "sentence": "First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.",
+        "score": 0.4169
+      },
+      {
+        "sentence": "Functions are enabled/disabled by commenting a line using the character # The Docker spreading functionality is contained within the function 'scangogo'.",
+        "score": 0.3048
+      },
+      {
+        "sentence": "The function first attempts to install the mass port-scanning utility masscan to scan the local network, as well as the /24 subnet of the external IP address, for the hosts with incorrectly configured Docker API exposed on TCP port 2375.",
+        "score": 0.5075
+      },
+      {
+        "sentence": "If a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.",
+        "score": 0.5059
+      },
+      {
+        "sentence": "Auxiliary shell scripts As soon as the main module is launched, it downloads and runs the two auxiliary modules, xesa.txt and fczyo.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "The IP addresses are related to competing botnets and security services such as the Alibaba cloud security center agent.",
+        "score": 0.4984
+      },
+      {
+        "sentence": "Xesa also attempts to delete several accounts, which seem to be related to competing botnets such as Kinsing.",
+        "score": 0.3158
+      },
+      {
+        "sentence": "The execution continues with running a large number of ps commands to determine if competitive miners are running on the infected system.",
+        "score": 0.4511
+      },
+      {
+        "sentence": "If any of the miners are found, their processes will be terminated and files removed from the system.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "Docker images of competitor's miners being removed from the infected system One of the main Xesa functions is terminating competitor's Docker containers if they are running and removing their images from the local Docker repository.",
+        "score": 0.3806
+      },
+      {
+        "sentence": "The script finishes with another check that the java_c process is running.",
+        "score": 0.34
+      },
+      {
+        "sentence": "The execution starts with adding two of the public DNS servers, 1.1.1.1 and 8.8.8.8, to the beginning of the /etc/resolve.conf file and restarting the DNS resolver to use those public servers.",
+        "score": 0.3381
+      },
+      {
+        "sentence": "It then continues with terminating competing Docker containers if they are running.",
+        "score": 0.4087
+      },
+      {
+        "sentence": "The script makes sure that the security processes are not running on the infected system and ensures that crond is running so the scheduled jobs can be executed.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "Fczyo attempts to add the following users to the infected system: - sysall - system - logger - autoupdater Once the users are created, the script adds them to the list of sudoers so that they can run commands with administrative privileges.",
+        "score": 0.3199
+      },
+      {
+        "sentence": "Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.",
+        "score": 0.3918
+      },
+      {
+        "sentence": "Fczyo checking if the cron job is already configured The next major block of functions is tasked with setting up scheduled cron jobs to ensure that Xanthe modules are downloaded and run from the download server every 30 minutes.",
+        "score": 0.404
+      },
+      {
+        "sentence": "Process-hiding module Xanthe and its auxiliary modules use a shared object, libprocesshider, which is downloaded and installed into /usr/local/lib/libprocesshider.so.",
+        "score": 0.3584
+      },
+      {
+        "sentence": "The loading of the shared object is enabled by adding the path of the library to the file /etc/ld.so.preload.",
+        "score": 0.3843
+      },
+      {
+        "sentence": "Ld.so.preload contains a list of user-specified ELF shared libraries to be loaded before all others.",
+        "score": 0.3803
+      },
+      {
+        "sentence": "This can be used to selectively override functions in other shared libraries.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "If a malicious shared object is used to implement a malicious copy of the readdir function, this function will be called before the standard library function.",
+        "score": 0.3553
+      },
+      {
+        "sentence": "The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.",
+        "score": 0.3625
+      },
+      {
+        "sentence": "Conclusion In this post, we documented the previously-undocumented Monero mining botnet Xanthe, which attempts to spread over SSH using existing private keys for authentication.",
+        "score": 0.5157
+      },
+      {
+        "sentence": "We discovered this botnet when it registered in a Docker honeypot system.",
+        "score": 0.5451
+      },
+      {
+        "sentence": "The main module contains functions, disabled in this variant, to spread by exploiting incorrectly configured Docker API installations.",
+        "score": 0.4346
+      },
+      {
+        "sentence": "While Docker remains an essential tool for development and deployment of applications, it is worth remembering that its learning curve is steep.",
+        "score": 0.4011
+      },
+      {
+        "sentence": "The installation is not secure by default, and it is easy to leave its API exposed to attackers on a lookout for 'free' resources they can use to run custom containers and conduct attacks.",
+        "score": 0.5821
+      },
+      {
+        "sentence": "Coverage Ways our customers can detect and block this threat are listed below.",
+        "score": 0.3523
+      },
+      {
+        "sentence": "Advanced Malware Protection (AMP) is ideally suited to prevent the execution of the malware used by these threat actors.",
+        "score": 0.3959
+      },
+      {
+        "sentence": "Exploit Prevention present within AMP is designed to protect customers from unknown attacks such as this automatically.",
+        "score": 0.4084
+      },
+      {
+        "sentence": "Cisco Cloud Web Security (CWS) orWeb Security Appliance (WSA) web scanning prevents access to malicious websites and detects malware used in these attacks.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "Network Security appliances such as Next-Generation Firewall (NGFW), Next-Generation Intrusion Prevention System (NGIPS),Cisco ISR andMeraki MX can detect malicious activity associated with this threat.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "AMP Threat Grid helps identify malicious binaries and builds protection into all Cisco Security products.",
+        "score": 0.3198
+      },
+      {
+        "sentence": "Umbrella, our secure internet gateway (SIG), blocks users from connecting to malicious domains, IPs and URLs, whether users are on or off the corporate network.",
+        "score": 0.3799
+      },
+      {
+        "sentence": "OSQuery Cisco AMP users can use Orbital Advanced Search to run complex OSqueries to see if their endpoints are infected with this specific threat.",
+        "score": 0.4265
+      },
+      {
+        "sentence": "For specific OSqueries on this threat, click below: https://github.com/Cisco-Talos/osquery_queries/blob/master/packs/linux_malware.conf",
+        "score": 0.4448
+      }
+    ],
+    "T1139": [
+      {
+        "sentence": "Cisco Talos recently discovered an interesting campaign affecting Linux systems employing a multi-modular botnet with several ways to spread and a payload focused on providing financial benefits for the attacker by mining Monero online currency.",
+        "score": 0.3565
+      },
+      {
+        "sentence": "We believe this is the first time anyone's documented Xanthe's operations.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "Two additional bash scripts terminate security services, removing competitor's botnets and ensuring persistence by creating scheduled cron jobs and modifying one of the system startup scripts.",
+        "score": 0.4166
+      },
+      {
+        "sentence": "The main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "However, anybody who has worked with Docker quickly realises that the learning curve is quite steep.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Incorrectly configured Docker installations with exposed, unprotected APIs according to Shodan Docker daemons have been targets of attacks for several years now, and our security teams decided to keep tracking activities related to various actors attempting to exploit them.",
+        "score": 0.3151
+      },
+      {
+        "sentence": "The Docker honeypot is a simple server that emulates some aspects of the Docker HTTP API.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "Currently, the service is a script that runs in a shell.",
+        "score": 0.503
+      },
+      {
+        "sentence": "When a recon event or the creation of a container is detected, the server will log the event to any of the following services: - Webex Teams - Slack - Mongodb - HTTP Collector As a part of reconnaissance, the honeypots log suspicious activity related to the potential Docker attacks.",
+        "score": 0.3752
+      },
+      {
+        "sentence": "This is where we recently spotted the following attempt: Xanthe - a Docker-aware crypto miner The attempt belongs to a relatively unknown crypto mining botnet, which we will call Xanthe, based on the file name of the main spreading script.",
+        "score": 0.3995
+      },
+      {
+        "sentence": "When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines.",
+        "score": 0.3598
+      },
+      {
+        "sentence": "In fact, despite Xanthe having been active since March 2020, only one of the scripts had been detected.",
+        "score": 0.3679
+      },
+      {
+        "sentence": "Older Xanthe versions and the VirusTotal detections The initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules.",
+        "score": 0.3467
+      },
+      {
+        "sentence": "The next procedure downloads a variant of the XMRig miner as java_c, its JSON configuration file and the libprocesshider shared library used for hiding the miner process name in memory.",
+        "score": 0.3233
+      },
+      {
+        "sentence": "Both of the server directories, /files/, used to host the malicious files are open and potentially misconfigured.",
+        "score": 0.366
+      },
+      {
+        "sentence": "Xanthe uses curl to download its modules and to communicate with the logging URLs.",
+        "score": 0.3103
+      },
+      {
+        "sentence": "Iplogger.org is extensively used throughout the code, with each procedure communicating with a unique logging URL.",
+        "score": 0.3638
+      },
+      {
+        "sentence": "Curl's user agent strings are manually specified for each request depending on the phase and the functionality currently being executed.",
+        "score": 0.3384
+      },
+      {
+        "sentence": "User-agent strings and the associated functionality The execution of the main module continues with making sure that the /tmp directory is mounted and configured to allow execution of the files within it.",
+        "score": 0.4611
+      },
+      {
+        "sentence": "Next, the procedure checks if the miner is already running in memory by running the ps command.",
+        "score": 0.3649
+      },
+      {
+        "sentence": "First, the loading of the libprocesshider is disabled, then ps is used to make sure the java_c process is running. sshd configuration and spreading The main infection vector for this variant of Xanthe seems to be SSH, which is achieved by specifying client-side certificates stored for known hosts.",
+        "score": 0.327
+      },
+      {
+        "sentence": "First, Xanthe configures the SSH daemon to make its configuration less secure and enable some functionality.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "The daemon is configured to run on ports 22 and 33768 with the root account login, password, client public key and GSSAPIAuthentication (such as Kerberos authentication) enabled.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "Once the configuration file is modified, the SSH service is restarted.",
+        "score": 0.4574
+      },
+      {
+        "sentence": "The function starts with a fetch of the externally-visible IP address of the infected host by connecting to icanhazip.com.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "Next, the script uses the find utility to search for instances of client-side certificates, which will be used for authentication to remote hosts.",
+        "score": 0.3567
+      },
+      {
+        "sentence": "The find is used to search for any filenames starting with the string 'id_rsa' and for files with the '.pem' file extension.",
+        "score": 0.3752
+      },
+      {
+        "sentence": "The script also uses a combination of 'cat' and 'grep' to find other keys by parsing the SSH configuration files and the bash history file.",
+        "score": 0.6237
+      },
+      {
+        "sentence": "Once all possible keys have been found, the script proceeds with finding known hosts, TCP ports and usernames used to connect to those hosts.",
+        "score": 0.4755
+      },
+      {
+        "sentence": "Finally, a loop is entered which iterates over the combination of all known usernames, hosts, keys and ports in an attempt to connect, authenticate on the remote host and launch the command lines to download and execute the main module on the remote system.",
+        "score": 0.6066
+      },
+      {
+        "sentence": "SSH Xanthe-based spreading command Available functionality commented out Although we have seen this bot hitting our Docker honeypots with an attempt to spread, at the time of the analysis the routine for Docker scanning and spreading was commented out.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "The author's programming style is similar in all scripts.",
+        "score": 0.3871
+      },
+      {
+        "sentence": "First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.",
+        "score": 0.4124
+      },
+      {
+        "sentence": "Functions are enabled/disabled by commenting a line using the character # The Docker spreading functionality is contained within the function 'scangogo'.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "The function first attempts to install the mass port-scanning utility masscan to scan the local network, as well as the /24 subnet of the external IP address, for the hosts with incorrectly configured Docker API exposed on TCP port 2375.",
+        "score": 0.3185
+      },
+      {
+        "sentence": "If a suitable exposed Docker API is found, Xanthe will attempt to run Docker with the parameter pointing to the remote host, create a new container based on the busybox image and run the command to launch the downloader bash script pop.sh.",
+        "score": 0.4146
+      },
+      {
+        "sentence": "Auxiliary shell scripts As soon as the main module is launched, it downloads and runs the two auxiliary modules, xesa.txt and fczyo.",
+        "score": 0.4958
+      },
+      {
+        "sentence": "Xesa.txt - the killer module Xesa starts initially with removing the system log file and adding a number of IP addresses to the /etc/hosts file so that they are resolved locally by the DNS resolver to 0.0.0.0 and blocked.",
+        "score": 0.4406
+      },
+      {
+        "sentence": "Xesa also attempts to delete several accounts, which seem to be related to competing botnets such as Kinsing.",
+        "score": 0.4857
+      },
+      {
+        "sentence": "The execution continues with running a large number of ps commands to determine if competitive miners are running on the infected system.",
+        "score": 0.3796
+      },
+      {
+        "sentence": "If any of the miners are found, their processes will be terminated and files removed from the system.",
+        "score": 0.3847
+      },
+      {
+        "sentence": "Docker images of competitor's miners being removed from the infected system One of the main Xesa functions is terminating competitor's Docker containers if they are running and removing their images from the local Docker repository.",
+        "score": 0.3984
+      },
+      {
+        "sentence": "The script finishes with another check that the java_c process is running.",
+        "score": 0.3654
+      },
+      {
+        "sentence": "It then continues with terminating competing Docker containers if they are running.",
+        "score": 0.3143
+      },
+      {
+        "sentence": "The script makes sure that the security processes are not running on the infected system and ensures that crond is running so the scheduled jobs can be executed.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "Fczyo attempts to add the following users to the infected system: - sysall - system - logger - autoupdater Once the users are created, the script adds them to the list of sudoers so that they can run commands with administrative privileges.",
+        "score": 0.5761
+      },
+      {
+        "sentence": "The script also adds a public key to the SSH configuration to allow those users access to the host using the client-side private key.",
+        "score": 0.4331
+      },
+      {
+        "sentence": "Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.",
+        "score": 0.3398
+      },
+      {
+        "sentence": "Fczyo checking if the cron job is already configured The next major block of functions is tasked with setting up scheduled cron jobs to ensure that Xanthe modules are downloaded and run from the download server every 30 minutes.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "It also modifies the file /etc/rc.d/rc.local so Xanthe can be downloaded and run every time the system is started.",
+        "score": 0.3521
+      },
+      {
+        "sentence": "Fczyo also attempts to clear bash history, disable and remove ufw and any file belonging to the Sandfly security products.",
+        "score": 0.4457
+      },
+      {
+        "sentence": "Ld.so.preload contains a list of user-specified ELF shared libraries to be loaded before all others.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "Process tools such as ps use the /proc file system and the readdir function to enumerate all the running processes.",
+        "score": 0.3655
+      },
+      {
+        "sentence": "The malicious function then has the ability to modify the results of the readdir to omit details of some processes.",
+        "score": 0.4022
+      },
+      {
+        "sentence": "The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.",
+        "score": 0.4414
+      },
+      {
+        "sentence": "Conclusion In this post, we documented the previously-undocumented Monero mining botnet Xanthe, which attempts to spread over SSH using existing private keys for authentication.",
+        "score": 0.3781
+      },
+      {
+        "sentence": "We discovered this botnet when it registered in a Docker honeypot system.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "The installation is not secure by default, and it is easy to leave its API exposed to attackers on a lookout for 'free' resources they can use to run custom containers and conduct attacks.",
+        "score": 0.3043
+      },
+      {
+        "sentence": "For specific OSqueries on this threat, click below: https://github.com/Cisco-Talos/osquery_queries/blob/master/packs/linux_malware.conf",
+        "score": 0.4151
+      }
+    ],
+    "T1089": [
+      {
+        "sentence": "Two additional bash scripts terminate security services, removing competitor's botnets and ensuring persistence by creating scheduled cron jobs and modifying one of the system startup scripts.",
+        "score": 0.6767
+      },
+      {
+        "sentence": "The main payload is a variant of the XMRig Monero mining program that is protected with a shared object developed to hide the presence of the miner's process from various tools for process enumeration.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "Defenders need to be constantly vigilant and monitor the behavior of systems within their network.",
+        "score": 0.3068
+      },
+      {
+        "sentence": "When investigating open-source information, we found earlier samples of the bot on VirusTotal detected by a very few anti-malware engines.",
+        "score": 0.4154
+      },
+      {
+        "sentence": "Older Xanthe versions and the VirusTotal detections The initial script, pop.sh, is a simple downloader script which downloads and runs the main bot module xanthe.sh, which then downloads and runs all additional modules.",
+        "score": 0.3181
+      },
+      {
+        "sentence": "First, Xanthe configures the SSH daemon to make its configuration less secure and enable some functionality.",
+        "score": 0.4625
+      },
+      {
+        "sentence": "Once the configuration file is modified, the SSH service is restarted.",
+        "score": 0.3298
+      },
+      {
+        "sentence": "First the functions are defined and implemented, with all the flow defined towards the bottom of the script, where the actor can choose which functionality to exhibit by commenting out undesirable function calls.",
+        "score": 0.3167
+      },
+      {
+        "sentence": "Functions are enabled/disabled by commenting a line using the character # The Docker spreading functionality is contained within the function 'scangogo'.",
+        "score": 0.3961
+      },
+      {
+        "sentence": "Xesa.txt - the killer module Xesa starts initially with removing the system log file and adding a number of IP addresses to the /etc/hosts file so that they are resolved locally by the DNS resolver to 0.0.0.0 and blocked.",
+        "score": 0.5691
+      },
+      {
+        "sentence": "The IP addresses are related to competing botnets and security services such as the Alibaba cloud security center agent.",
+        "score": 0.3489
+      },
+      {
+        "sentence": "Xesa also attempts to delete several accounts, which seem to be related to competing botnets such as Kinsing.",
+        "score": 0.4619
+      },
+      {
+        "sentence": "If any of the miners are found, their processes will be terminated and files removed from the system.",
+        "score": 0.3703
+      },
+      {
+        "sentence": "Docker images of competitor's miners being removed from the infected system One of the main Xesa functions is terminating competitor's Docker containers if they are running and removing their images from the local Docker repository.",
+        "score": 0.5273
+      },
+      {
+        "sentence": "The execution starts with adding two of the public DNS servers, 1.1.1.1 and 8.8.8.8, to the beginning of the /etc/resolve.conf file and restarting the DNS resolver to use those public servers.",
+        "score": 0.3277
+      },
+      {
+        "sentence": "The script makes sure that the security processes are not running on the infected system and ensures that crond is running so the scheduled jobs can be executed.",
+        "score": 0.5348
+      },
+      {
+        "sentence": "Iptables are used to configure the firewall to allow connections coming from the IP address 64[.]225[.]46[.]44 and to drop all incoming connections to ports 2375 and 2376, presumably to avoid reinfection of the system by other bots scanning for misconfigured Docker API installations.",
+        "score": 0.3479
+      },
+      {
+        "sentence": "It also modifies the file /etc/rc.d/rc.local so Xanthe can be downloaded and run every time the system is started.",
+        "score": 0.3953
+      },
+      {
+        "sentence": "Fczyo also attempts to clear bash history, disable and remove ufw and any file belonging to the Sandfly security products.",
+        "score": 0.798
+      },
+      {
+        "sentence": "This can be used to selectively override functions in other shared libraries.",
+        "score": 0.319
+      },
+      {
+        "sentence": "The malicious function then has the ability to modify the results of the readdir to omit details of some processes.",
+        "score": 0.4402
+      },
+      {
+        "sentence": "The source code of the library is publicly available on Github, so the attacker only had to modify a hardcoded string containing the name of the process executable that needs to be hidden, in our case java_c.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "Coverage Ways our customers can detect and block this threat are listed below.",
+        "score": 0.3884
+      },
+      {
+        "sentence": "Advanced Malware Protection (AMP) is ideally suited to prevent the execution of the malware used by these threat actors.",
+        "score": 0.3046
+      },
+      {
+        "sentence": "Cisco Cloud Web Security (CWS) orWeb Security Appliance (WSA) web scanning prevents access to malicious websites and detects malware used in these attacks.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "Network Security appliances such as Next-Generation Firewall (NGFW), Next-Generation Intrusion Prevention System (NGIPS),Cisco ISR andMeraki MX can detect malicious activity associated with this threat.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "AMP Threat Grid helps identify malicious binaries and builds protection into all Cisco Security products.",
+        "score": 0.3344
+      },
+      {
+        "sentence": "Umbrella, our secure internet gateway (SIG), blocks users from connecting to malicious domains, IPs and URLs, whether users are on or off the corporate network.",
+        "score": 0.3049
+      },
+      {
+        "sentence": "Open Source Snort Subscriber Rule Set customers can stay up to date by downloading the latest rule pack available for purchase onSnort.org.",
+        "score": 0.3901
+      }
+    ]
+  }
+}

@@ -1,0 +1,244 @@
+{
+  "original_txt": "Infiltrating Defenses: Abusing VMware in MITRE’s Cyber Intrusion\nWritten by and Charles Clancy.\n⚠️ This post has moved to our new blog and is kept here for archival purposes. https://ctid.mitre.org/blog/2024/05/22/infiltrating-defenses-abusing-vmware-in-mitres-cyber-intrusion/\nThis is the third and final blog post in a series detailing MITRE’s encounter with a state-sponsored cyber threat actor in our research and experimentation network, NERVE. It builds upon the insights shared in our April 19, 2024 post, “Advanced Cyber Threats Impact Even the Most Prepared” and May 3, 2024 post “Technical Deep Dive: Understanding the Anatomy of a Cyber Intrusion”. We continue to work across MITRE, including our Information Security Team, to help all security teams understand and defend against this threat.\nIn this post of our series, we provide technical details of new behavior employed by the adversary, who aligns with Google Mandiant’s UNC5221, and how the BRICKSTORM backdoor and BEEFLUSH web shell abused VMs in VMware through a privileged user account, VPXUSER, to establish persistence within the impacted environment. We will also provide detection scripts, from MITRE and CrowdStrike, to find this activity in other environments and go over how Secure Boot serves as a barrier against the adversary technique.\nRecap from Parts One & Two\nIn our first blog post, we shared the experience of facing a cyber intrusion that targeted MITRE’s Networked Experimentation, Research, and Virtualization Environment (NERVE) through two Ivanti Connect Secure zero-day vulnerabilities that bypassed our multi-factor authentication. The adversary maneuvered within the research network via VMware infrastructure using a compromised administrator account, then employed a combination of backdoors and web shells to maintain persistence and harvest credentials.\nIn our second blog post, we took a deep dive into the technical details of the intrusion, including a timeline of events, indicators of compromise, and malware analysis. Additionally, we disclosed novel aspects not previously reported by Mandiant or other threat intelligence sources, including:\n- Details on the BEEFLUSH web shell; and\n- Unique components of the BUSHWALK web shell seen in our incident.\nBefore delving into the techniques employed by the adversary to abuse VMware infrastructure, it is essential to understand the overarching context: the adversary had already gained administrative access to NERVE ESXi infrastructure.\nCreated Rogue VMs\nRogue VMs are created and managed through service accounts directly on the hypervisor, rather than through the vCenter administrative console. As a result, these VMs do not appear in the inventory.\nAs we said in the second post, “On January 5, 2024, the adversary escalated their attack with manipulated VMs and compromised administrative credentials to establish control over the infrastructure. Specifically, their actions included attempted enablement of SSH, destruction of one of their own VMs, and file downloads.”\nThe adversary created their own rogue VMs within the VMware environment, leveraging compromised vCenter Server access. They wrote and deployed a JSP web shell (BEEFLUSH) under the vCenter Server’s Tomcat server to execute a Python-based tunneling tool, facilitating SSH connections between adversary-created VMs and the ESXi hypervisor infrastructure.\nBy deploying rogue VMs, adversaries can evade detection by hiding their activities from centralized management interfaces like vCenter. This allows them to maintain control over compromised systems while minimizing the risk of discovery.\nDetecting Adversary Activity in VMware Ecosystem\nIn VMware’s environment, spotting adversary activity demands meticulous scrutiny. For instance, adversaries might enable SSH on hypervisors and log in by routing traffic through the vCenter Server. This technique underscores the importance of monitoring SSH activity for signs of unauthorized access.\nWhat to Look for:\n- Anomalous SSH Enablement: Keep a close watch for unexpected occurrences of “SSH login enabled” messages. Any activation of SSH outside the normal administrative cycle could indicate malicious activity.\n- Unusual SSH Sessions: Monitor for deviations from the expected pattern of SSH sessions being opened. Look out for instances where “SSH session was opened for” messages occur unexpectedly or at unusual times.\nDeploying Rogue VMs\nAs we said in the second post, “Moving forward to January 7, 2024, the adversary accessed VMs and deployed malicious payloads, the BRICKSTORM backdoor and the BEEFLUSH web shell. The adversary also used a default VMware account, VPXUSER, to make seven API calls that enumerated a list of mounted and unmounted drives.”\nThe adversary bypassed detection mechanisms by deploying rogue VMs, as VPXUSER, directly onto hypervisors using SFTP to write files then executed them with /bin/vmx\n. By doing this, these rogue VMs were not discoverable via vCenter, the ESXi web interface, and even some on-hypervisor command-line utilities that query the API.\nThese rogue VMs contained the BRICKSTORM backdoor and persistence mechanisms, see blog post 2, that were configured with dual network interfaces for communication with both the Internet/C2 and core administrative subnets within the prototyping network.\nAdversaries often can leverage the vpxuser account to perform various administrative tasks, such as enumerating VMs, accessing configuration settings, and interacting with the underlying hypervisor infrastructure. Additionally, adversaries may deploy rogue VMs directly onto hypervisors to evade detection mechanisms and maintain persistence within the environment. Rogue VMs, which are created and operated without proper authorization and management by the hypervisor, provide adversaries with a stealthy foothold for conducting malicious activities. These VMs can bypass visibility controls within VMware management interfaces, making them difficult to detect and mitigate.\nDetecting Rogue VMs\nSafeguarding against rogue VMs and any ensuing persistence demands a vigilant approach. Simply using the hypervisor management interface to manage VMs is often insufficient and can be pointless when it comes to dealing with rogue VMs. This is because rogue VMs operate outside the standard management processes and do not adhere to established security policies, making them difficult to detect and manage through the GUI alone. Instead, one needs special tools or techniques to identify and mitigate the risks associated with rogue VMs effectively.\nWhat to Look For:\nCommand-Line Usage: Utilize the following commands on an ESXi hypervisor to identify unregistered VMs:\nvim-cmd vmsvc/getallvms\nesxcli vm process list | grep Display\nComparison of VM Lists: Compare the output of vim-cmd\n(API-based VM check) with the list of running VMs obtained from esxcli\n.\n- Differences in the list of VMs between the output of a\nvim-cmd\n(that will check for VMs via the API) and the list of running VMs thatesxcli\nsees (which directly queries the host hypervisor) indicate a potential problem. A VM running on a hypervisor that is not seen via the registered VM data via API warrants further investigation as a possible unregistered/rogue VM.\nDetecting VMware Persistence\nTo address the persistence of these rogue VMs, it is crucial to scrutinize the hypervisor’s startup scripts.\nWhat to Look For\nPersistence Mechanism: Monitor for modification of the legitimate /etc/rc.local.d/local.sh\nfile to include the following line:\n/bin/vmx -x /vmfs/volumes/<REDACTED_VOLUME>/<REDACTED_VM_NAME>/<REDACTED_VM_NAME>.vmx 2>/dev/null 0>/dev/null &\nPersistence Identification: Search for invocations of the /bin/vmx\nbinary within /etc/rc.local.d/\nor more specifically by manually reviewing the local.sh\nstartup script with the following commands:\ngrep -r \\/bin\\/vmx /etc/rc.local.d/\ncat /etc/rc.local.d/local.sh\nSuspicious VMware Detection Scripts\nMITRE is sharing two scripts designed to identify and mitigate potential threats within the VMware environment. The first script, developed by MITRE, Invoke-HiddenVMQuery is written in PowerShell and serves to detect malicious activities. It scans for anomalous invocations of the /bin/vmx\nbinary within rc.local.d\nscripts.\nFurthermore, it checks for the presence of rogue VMs by cross-referencing data obtained from two sources: the vim-cmd\nutility, which queries VMs via the API, and the list of running VMs retrieved by esxcli\n, a command-line interface directly querying the host hypervisor. Any VM detected running on a hypervisor but not listed via the registered VM data via API warrants immediate investigation as a potential threat.\nWe are also sharing a PowerShell script, VirtualGHOST, that CrowdStrike prepared to help detect evidence of unregistered VMs using PowerCLI and help scale hunting exercises by executing the scripts remotely. Thanks to CrowdStrike for their collaboration in identifying these adversary tactics, techniques, and procedures (TTPs).\nBy leveraging these scripts, organizations can identify and respond to suspicious activities, bolstering their cybersecurity defenses against evolving threats.\nRecommended Mitigation Strategy\nBased on consultation with the VMware PSIRT team, the most effective countermeasure to thwart the persistence mechanism is to enable secure boot. Secure boot is a security feature designed to verify the integrity of a host’s boot process, mitigating the risk of unauthorized modifications.\nEnabling secure boot serves as one defense against adversaries seeking to establish persistent access within the VMware environment. By verifying the integrity of the boot process, secure boot prevents malicious actors from injecting unauthorized code.\nThis countermeasure aligns with the MITRE ATT&CK Mitigation: Boot Integrity (M1046).\nBy fortifying the boot process with secure boot, organizations can thwart adversaries’ efforts to evade detection and maintain unauthorized access to critical systems.\nFor detailed information on this feature and its implementation, please refer to the following resource: VMware Secure Boot Documentation.\nConclusion\nAs adversaries continue to evolve their tactics and techniques, it is imperative for organizations to remain vigilant and adaptive in defending against cyber threats. By understanding and countering their new adversary behaviors, we can bolster our defenses and safeguard critical assets against future intrusions.\nFor additional IOCs and context, including for more detail on the exploits, backdoors, and C2 involved, please see our prior post.\nAbout the Center for Threat-Informed Defense\nThe Center for Threat-Informed Defense is a non-profit, privately funded research and development organization operated by MITRE Engenuity. The Center’s mission is to advance the state of the art and the state of the practice in threat-informed defense globally. Comprised of participant organizations from around the globe with highly sophisticated security teams, the Center builds on MITRE ATT&CK, an important foundation for threat-informed defense used by security teams and vendors in their enterprise security operations. Because the Center operates for the public good, outputs of its research and development are available publicly and for the benefit of all.\n© 2024 MITRE Engenuity, LLC. Approved for Public Release. Document number CT0117.",
+  "sanitized_txt": "Infiltrating Defenses: Abusing VMware in MITRE’s Cyber Intrusion Written by and Charles Clancy.\n⚠️ This post has moved to our new blog and is kept here for archival purposes. https://ctid.mitre.org/blog/2024/05/22/infiltrating-defenses-abusing-vmware-in-mitres-cyber-intrusion/ This is the third and final blog post in a series detailing MITRE’s encounter with a state-sponsored cyber threat actor in our research and experimentation network, NERVE. It builds upon the insights shared in our April 19, 2024 post, “Advanced Cyber Threats Impact Even the Most Prepared” and May 3, 2024 post “Technical Deep Dive: Understanding the Anatomy of a Cyber Intrusion”. We continue to work across MITRE, including our Information Security Team, to help all security teams understand and defend against this threat.\nIn this post of our series, we provide technical details of new behavior employed by the adversary, who aligns with Google Mandiant’s UNC5221, and how the BRICKSTORM backdoor and BEEFLUSH web shell abused VMs in VMware through a privileged user account, VPXUSER, to establish persistence within the impacted environment. We will also provide detection scripts, from MITRE and CrowdStrike, to find this activity in other environments and go over how Secure Boot serves as a barrier against the adversary technique.\nRecap from Parts One & Two In our first blog post, we shared the experience of facing a cyber intrusion that targeted MITRE’s Networked Experimentation, Research, and Virtualization Environment (NERVE) through two Ivanti Connect Secure zero-day vulnerabilities that bypassed our multi-factor authentication. The adversary maneuvered within the research network via VMware infrastructure using a compromised administrator account, then employed a combination of backdoors and web shells to maintain persistence and harvest credentials.\nIn our second blog post, we took a deep dive into the technical details of the intrusion, including a timeline of events, indicators of compromise, and malware analysis. Additionally, we disclosed novel aspects not previously reported by Mandiant or other threat intelligence sources, including:\n- Details on the BEEFLUSH web shell; and - Unique components of the BUSHWALK web shell seen in our incident.\nBefore delving into the techniques employed by the adversary to abuse VMware infrastructure, it is essential to understand the overarching context: the adversary had already gained administrative access to NERVE ESXi infrastructure.\nCreated Rogue VMs Rogue VMs are created and managed through service accounts directly on the hypervisor, rather than through the vCenter administrative console. As a result, these VMs do not appear in the inventory.\nAs we said in the second post, “On January 5, 2024, the adversary escalated their attack with manipulated VMs and compromised administrative credentials to establish control over the infrastructure. Specifically, their actions included attempted enablement of SSH, destruction of one of their own VMs, and file downloads.” The adversary created their own rogue VMs within the VMware environment, leveraging compromised vCenter Server access. They wrote and deployed a JSP web shell (BEEFLUSH) under the vCenter Server’s Tomcat server to execute a Python-based tunneling tool, facilitating SSH connections between adversary-created VMs and the ESXi hypervisor infrastructure.\nBy deploying rogue VMs, adversaries can evade detection by hiding their activities from centralized management interfaces like vCenter. This allows them to maintain control over compromised systems while minimizing the risk of discovery.\nDetecting Adversary Activity in VMware Ecosystem In VMware’s environment, spotting adversary activity demands meticulous scrutiny. For instance, adversaries might enable SSH on hypervisors and log in by routing traffic through the vCenter Server. This technique underscores the importance of monitoring SSH activity for signs of unauthorized access.\nWhat to Look for:\n- Anomalous SSH Enablement: Keep a close watch for unexpected occurrences of “SSH login enabled” messages. Any activation of SSH outside the normal administrative cycle could indicate malicious activity.\n- Unusual SSH Sessions: Monitor for deviations from the expected pattern of SSH sessions being opened. Look out for instances where “SSH session was opened for” messages occur unexpectedly or at unusual times.\nDeploying Rogue VMs As we said in the second post, “Moving forward to January 7, 2024, the adversary accessed VMs and deployed malicious payloads, the BRICKSTORM backdoor and the BEEFLUSH web shell. The adversary also used a default VMware account, VPXUSER, to make seven API calls that enumerated a list of mounted and unmounted drives.” The adversary bypassed detection mechanisms by deploying rogue VMs, as VPXUSER, directly onto hypervisors using SFTP to write files then executed them with /bin/vmx . By doing this, these rogue VMs were not discoverable via vCenter, the ESXi web interface, and even some on-hypervisor command-line utilities that query the API.\nThese rogue VMs contained the BRICKSTORM backdoor and persistence mechanisms, see blog post 2, that were configured with dual network interfaces for communication with both the Internet/C2 and core administrative subnets within the prototyping network.\nAdversaries often can leverage the vpxuser account to perform various administrative tasks, such as enumerating VMs, accessing configuration settings, and interacting with the underlying hypervisor infrastructure. Additionally, adversaries may deploy rogue VMs directly onto hypervisors to evade detection mechanisms and maintain persistence within the environment. Rogue VMs, which are created and operated without proper authorization and management by the hypervisor, provide adversaries with a stealthy foothold for conducting malicious activities. These VMs can bypass visibility controls within VMware management interfaces, making them difficult to detect and mitigate.\nDetecting Rogue VMs Safeguarding against rogue VMs and any ensuing persistence demands a vigilant approach. Simply using the hypervisor management interface to manage VMs is often insufficient and can be pointless when it comes to dealing with rogue VMs. This is because rogue VMs operate outside the standard management processes and do not adhere to established security policies, making them difficult to detect and manage through the GUI alone. Instead, one needs special tools or techniques to identify and mitigate the risks associated with rogue VMs effectively.\nWhat to Look For:\nCommand-Line Usage: Utilize the following commands on an ESXi hypervisor to identify unregistered VMs:\nvim-cmd vmsvc/getallvms esxcli vm process list | grep Display Comparison of VM Lists: Compare the output of vim-cmd (API-based VM check) with the list of running VMs obtained from esxcli .\n- Differences in the list of VMs between the output of a vim-cmd (that will check for VMs via the API) and the list of running VMs thatesxcli sees (which directly queries the host hypervisor) indicate a potential problem. A VM running on a hypervisor that is not seen via the registered VM data via API warrants further investigation as a possible unregistered/rogue VM.\nDetecting VMware Persistence To address the persistence of these rogue VMs, it is crucial to scrutinize the hypervisor’s startup scripts.\nWhat to Look For Persistence Mechanism: Monitor for modification of the legitimate /etc/rc.local.d/local.sh file to include the following line:\n/bin/vmx -x /vmfs/volumes/<REDACTED_VOLUME>/<REDACTED_VM_NAME>/<REDACTED_VM_NAME>.vmx 2>/dev/null 0>/dev/null & Persistence Identification: Search for invocations of the /bin/vmx binary within /etc/rc.local.d/ or more specifically by manually reviewing the local.sh startup script with the following commands:\ngrep -r \\/bin\\/vmx /etc/rc.local.d/ cat /etc/rc.local.d/local.sh Suspicious VMware Detection Scripts MITRE is sharing two scripts designed to identify and mitigate potential threats within the VMware environment. The first script, developed by MITRE, Invoke-HiddenVMQuery is written in PowerShell and serves to detect malicious activities. It scans for anomalous invocations of the /bin/vmx binary within rc.local.d scripts.\nFurthermore, it checks for the presence of rogue VMs by cross-referencing data obtained from two sources: the vim-cmd utility, which queries VMs via the API, and the list of running VMs retrieved by esxcli , a command-line interface directly querying the host hypervisor. Any VM detected running on a hypervisor but not listed via the registered VM data via API warrants immediate investigation as a potential threat.\nWe are also sharing a PowerShell script, VirtualGHOST, that CrowdStrike prepared to help detect evidence of unregistered VMs using PowerCLI and help scale hunting exercises by executing the scripts remotely. Thanks to CrowdStrike for their collaboration in identifying these adversary tactics, techniques, and procedures (TTPs).\nBy leveraging these scripts, organizations can identify and respond to suspicious activities, bolstering their cybersecurity defenses against evolving threats.\nRecommended Mitigation Strategy Based on consultation with the VMware PSIRT team, the most effective countermeasure to thwart the persistence mechanism is to enable secure boot. Secure boot is a security feature designed to verify the integrity of a host’s boot process, mitigating the risk of unauthorized modifications.\nEnabling secure boot serves as one defense against adversaries seeking to establish persistent access within the VMware environment. By verifying the integrity of the boot process, secure boot prevents malicious actors from injecting unauthorized code.\nThis countermeasure aligns with the MITRE ATT&CK Mitigation: Boot Integrity (M1046).\nBy fortifying the boot process with secure boot, organizations can thwart adversaries’ efforts to evade detection and maintain unauthorized access to critical systems.\nFor detailed information on this feature and its implementation, please refer to the following resource: VMware Secure Boot Documentation.\nConclusion As adversaries continue to evolve their tactics and techniques, it is imperative for organizations to remain vigilant and adaptive in defending against cyber threats. By understanding and countering their new adversary behaviors, we can bolster our defenses and safeguard critical assets against future intrusions.\nFor additional IOCs and context, including for more detail on the exploits, backdoors, and C2 involved, please see our prior post.\nAbout the Center for Threat-Informed Defense The Center for Threat-Informed Defense is a non-profit, privately funded research and development organization operated by MITRE Engenuity. The Center’s mission is to advance the state of the art and the state of the practice in threat-informed defense globally. Comprised of participant organizations from around the globe with highly sophisticated security teams, the Center builds on MITRE ATT&CK, an important foundation for threat-informed defense used by security teams and vendors in their enterprise security operations. Because the Center operates for the public good, outputs of its research and development are available publicly and for the benefit of all.\n© 2024 MITRE Engenuity, LLC. Approved for Public Release. Document number CT0117.",
+  "ID_list": [
+    "T1564.006"
+  ],
+  "Name_list": [
+    "Discovery",
+    "Hypervisor",
+    "Impact",
+    "Persistence",
+    "PowerShell",
+    "Source",
+    "Web Shell"
+  ],
+  "TTP_sentences": {
+    "T1564.006": [
+      {
+        "sentence": "Infiltrating Defenses: Abusing VMware in MITRE’s Cyber Intrusion Written by and Charles Clancy. ⚠️ This post has moved to our new blog and is kept here for archival purposes. https://ctid.mitre.org/blog/2024/05/22/infiltrating-defenses-abusing-vmware-in-mitres-cyber-intrusion/ This is the third and final blog post in a series detailing MITRE’s encounter with a state-sponsored cyber threat actor in our research and experimentation network, NERVE.",
+        "score": 0.5465
+      },
+      {
+        "sentence": "It builds upon the insights shared in our April 19, 2024 post, “Advanced Cyber Threats Impact Even the Most Prepared” and May 3, 2024 post “Technical Deep Dive: Understanding the Anatomy of a Cyber Intrusion”.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "We continue to work across MITRE, including our Information Security Team, to help all security teams understand and defend against this threat.",
+        "score": 0.3834
+      },
+      {
+        "sentence": "In this post of our series, we provide technical details of new behavior employed by the adversary, who aligns with Google Mandiant’s UNC5221, and how the BRICKSTORM backdoor and BEEFLUSH web shell abused VMs in VMware through a privileged user account, VPXUSER, to establish persistence within the impacted environment.",
+        "score": 0.5868
+      },
+      {
+        "sentence": "We will also provide detection scripts, from MITRE and CrowdStrike, to find this activity in other environments and go over how Secure Boot serves as a barrier against the adversary technique.",
+        "score": 0.5539
+      },
+      {
+        "sentence": "Recap from Parts One & Two In our first blog post, we shared the experience of facing a cyber intrusion that targeted MITRE’s Networked Experimentation, Research, and Virtualization Environment (NERVE) through two Ivanti Connect Secure zero-day vulnerabilities that bypassed our multi-factor authentication.",
+        "score": 0.392
+      },
+      {
+        "sentence": "The adversary maneuvered within the research network via VMware infrastructure using a compromised administrator account, then employed a combination of backdoors and web shells to maintain persistence and harvest credentials.",
+        "score": 0.506
+      },
+      {
+        "sentence": "In our second blog post, we took a deep dive into the technical details of the intrusion, including a timeline of events, indicators of compromise, and malware analysis.",
+        "score": 0.4927
+      },
+      {
+        "sentence": "Additionally, we disclosed novel aspects not previously reported by Mandiant or other threat intelligence sources, including: - Details on the BEEFLUSH web shell; and - Unique components of the BUSHWALK web shell seen in our incident.",
+        "score": 0.4754
+      },
+      {
+        "sentence": "Before delving into the techniques employed by the adversary to abuse VMware infrastructure, it is essential to understand the overarching context: the adversary had already gained administrative access to NERVE ESXi infrastructure.",
+        "score": 0.593
+      },
+      {
+        "sentence": "Created Rogue VMs Rogue VMs are created and managed through service accounts directly on the hypervisor, rather than through the vCenter administrative console.",
+        "score": 0.5252
+      },
+      {
+        "sentence": "As a result, these VMs do not appear in the inventory.",
+        "score": 0.5042
+      },
+      {
+        "sentence": "As we said in the second post, “On January 5, 2024, the adversary escalated their attack with manipulated VMs and compromised administrative credentials to establish control over the infrastructure.",
+        "score": 0.4342
+      },
+      {
+        "sentence": "Specifically, their actions included attempted enablement of SSH, destruction of one of their own VMs, and file downloads.” The adversary created their own rogue VMs within the VMware environment, leveraging compromised vCenter Server access.",
+        "score": 0.5218
+      },
+      {
+        "sentence": "They wrote and deployed a JSP web shell (BEEFLUSH) under the vCenter Server’s Tomcat server to execute a Python-based tunneling tool, facilitating SSH connections between adversary-created VMs and the ESXi hypervisor infrastructure.",
+        "score": 0.5141
+      },
+      {
+        "sentence": "By deploying rogue VMs, adversaries can evade detection by hiding their activities from centralized management interfaces like vCenter.",
+        "score": 0.6606
+      },
+      {
+        "sentence": "This allows them to maintain control over compromised systems while minimizing the risk of discovery.",
+        "score": 0.4613
+      },
+      {
+        "sentence": "Detecting Adversary Activity in VMware Ecosystem In VMware’s environment, spotting adversary activity demands meticulous scrutiny.",
+        "score": 0.5363
+      },
+      {
+        "sentence": "For instance, adversaries might enable SSH on hypervisors and log in by routing traffic through the vCenter Server.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "Any activation of SSH outside the normal administrative cycle could indicate malicious activity. - Unusual SSH Sessions: Monitor for deviations from the expected pattern of SSH sessions being opened.",
+        "score": 0.3356
+      },
+      {
+        "sentence": "Deploying Rogue VMs As we said in the second post, “Moving forward to January 7, 2024, the adversary accessed VMs and deployed malicious payloads, the BRICKSTORM backdoor and the BEEFLUSH web shell.",
+        "score": 0.5137
+      },
+      {
+        "sentence": "The adversary also used a default VMware account, VPXUSER, to make seven API calls that enumerated a list of mounted and unmounted drives.” The adversary bypassed detection mechanisms by deploying rogue VMs, as VPXUSER, directly onto hypervisors using SFTP to write files then executed them with /bin/vmx .",
+        "score": 0.5513
+      },
+      {
+        "sentence": "By doing this, these rogue VMs were not discoverable via vCenter, the ESXi web interface, and even some on-hypervisor command-line utilities that query the API.",
+        "score": 0.4149
+      },
+      {
+        "sentence": "These rogue VMs contained the BRICKSTORM backdoor and persistence mechanisms, see blog post 2, that were configured with dual network interfaces for communication with both the Internet/C2 and core administrative subnets within the prototyping network.",
+        "score": 0.516
+      },
+      {
+        "sentence": "Adversaries often can leverage the vpxuser account to perform various administrative tasks, such as enumerating VMs, accessing configuration settings, and interacting with the underlying hypervisor infrastructure.",
+        "score": 0.5598
+      },
+      {
+        "sentence": "Additionally, adversaries may deploy rogue VMs directly onto hypervisors to evade detection mechanisms and maintain persistence within the environment.",
+        "score": 0.6462
+      },
+      {
+        "sentence": "Rogue VMs, which are created and operated without proper authorization and management by the hypervisor, provide adversaries with a stealthy foothold for conducting malicious activities.",
+        "score": 0.6461
+      },
+      {
+        "sentence": "These VMs can bypass visibility controls within VMware management interfaces, making them difficult to detect and mitigate.",
+        "score": 0.5467
+      },
+      {
+        "sentence": "Detecting Rogue VMs Safeguarding against rogue VMs and any ensuing persistence demands a vigilant approach.",
+        "score": 0.4593
+      },
+      {
+        "sentence": "Simply using the hypervisor management interface to manage VMs is often insufficient and can be pointless when it comes to dealing with rogue VMs.",
+        "score": 0.5822
+      },
+      {
+        "sentence": "This is because rogue VMs operate outside the standard management processes and do not adhere to established security policies, making them difficult to detect and manage through the GUI alone.",
+        "score": 0.5508
+      },
+      {
+        "sentence": "Instead, one needs special tools or techniques to identify and mitigate the risks associated with rogue VMs effectively.",
+        "score": 0.4581
+      },
+      {
+        "sentence": "A VM running on a hypervisor that is not seen via the registered VM data via API warrants further investigation as a possible unregistered/rogue VM.",
+        "score": 0.6218
+      },
+      {
+        "sentence": "Detecting VMware Persistence To address the persistence of these rogue VMs, it is crucial to scrutinize the hypervisor’s startup scripts.",
+        "score": 0.5513
+      },
+      {
+        "sentence": "The first script, developed by MITRE, Invoke-HiddenVMQuery is written in PowerShell and serves to detect malicious activities.",
+        "score": 0.5384
+      },
+      {
+        "sentence": "It scans for anomalous invocations of the /bin/vmx binary within rc.local.d scripts.",
+        "score": 0.4065
+      },
+      {
+        "sentence": "Furthermore, it checks for the presence of rogue VMs by cross-referencing data obtained from two sources: the vim-cmd utility, which queries VMs via the API, and the list of running VMs retrieved by esxcli , a command-line interface directly querying the host hypervisor.",
+        "score": 0.3785
+      },
+      {
+        "sentence": "Any VM detected running on a hypervisor but not listed via the registered VM data via API warrants immediate investigation as a potential threat.",
+        "score": 0.568
+      },
+      {
+        "sentence": "We are also sharing a PowerShell script, VirtualGHOST, that CrowdStrike prepared to help detect evidence of unregistered VMs using PowerCLI and help scale hunting exercises by executing the scripts remotely.",
+        "score": 0.5185
+      },
+      {
+        "sentence": "Thanks to CrowdStrike for their collaboration in identifying these adversary tactics, techniques, and procedures (TTPs).",
+        "score": 0.3485
+      },
+      {
+        "sentence": "By leveraging these scripts, organizations can identify and respond to suspicious activities, bolstering their cybersecurity defenses against evolving threats.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "Recommended Mitigation Strategy Based on consultation with the VMware PSIRT team, the most effective countermeasure to thwart the persistence mechanism is to enable secure boot.",
+        "score": 0.4581
+      },
+      {
+        "sentence": "Secure boot is a security feature designed to verify the integrity of a host’s boot process, mitigating the risk of unauthorized modifications.",
+        "score": 0.4381
+      },
+      {
+        "sentence": "Enabling secure boot serves as one defense against adversaries seeking to establish persistent access within the VMware environment.",
+        "score": 0.5342
+      },
+      {
+        "sentence": "By verifying the integrity of the boot process, secure boot prevents malicious actors from injecting unauthorized code.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "This countermeasure aligns with the MITRE ATT&CK Mitigation: Boot Integrity (M1046).",
+        "score": 0.3663
+      },
+      {
+        "sentence": "By fortifying the boot process with secure boot, organizations can thwart adversaries’ efforts to evade detection and maintain unauthorized access to critical systems.",
+        "score": 0.4677
+      },
+      {
+        "sentence": "For detailed information on this feature and its implementation, please refer to the following resource: VMware Secure Boot Documentation.",
+        "score": 0.519
+      },
+      {
+        "sentence": "Conclusion As adversaries continue to evolve their tactics and techniques, it is imperative for organizations to remain vigilant and adaptive in defending against cyber threats.",
+        "score": 0.4423
+      },
+      {
+        "sentence": "By understanding and countering their new adversary behaviors, we can bolster our defenses and safeguard critical assets against future intrusions.",
+        "score": 0.4085
+      },
+      {
+        "sentence": "For additional IOCs and context, including for more detail on the exploits, backdoors, and C2 involved, please see our prior post.",
+        "score": 0.3988
+      },
+      {
+        "sentence": "About the Center for Threat-Informed Defense The Center for Threat-Informed Defense is a non-profit, privately funded research and development organization operated by MITRE Engenuity.",
+        "score": 0.4563
+      },
+      {
+        "sentence": "The Center’s mission is to advance the state of the art and the state of the practice in threat-informed defense globally.",
+        "score": 0.3694
+      },
+      {
+        "sentence": "Comprised of participant organizations from around the globe with highly sophisticated security teams, the Center builds on MITRE ATT&CK, an important foundation for threat-informed defense used by security teams and vendors in their enterprise security operations.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "Because the Center operates for the public good, outputs of its research and development are available publicly and for the benefit of all. © 2024 MITRE Engenuity, LLC.",
+        "score": 0.457
+      },
+      {
+        "sentence": "Document number CT0117.",
+        "score": 0.3386
+      }
+    ]
+  }
+}

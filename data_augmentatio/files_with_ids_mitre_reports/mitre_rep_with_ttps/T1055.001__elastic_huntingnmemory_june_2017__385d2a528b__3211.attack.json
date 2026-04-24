@@ -1,0 +1,387 @@
+{
+  "original_txt": "Threat Hunters are charged with the difficult task of sifting through vast sources of diverse data to pinpoint adversarial activity at any stage in the attack lifecycle. To be successful, hunters must continually hone their subject matter expertise on the latest attacker techniques and detection methods. Memory resident malware, which presents itself in many forms, is an attacker technique that has existed for over a decade. The popularity of memory resident malware has steadily increased over time, possibly resulting from the proliferation of code and knowledge of in memory techniques. More likely, its popularity reflects the success of memory-based techniques to evade detection by security products and practitioners. Once limited to advanced adversaries, memory resident techniques are now commonplace for all levels of adversary sophistication. I will examine the most common of these memory based attacker techniques, and walk through our team’s research to craft a scalable, low noise approach to hunting for adversaries that are hiding in memory.\nAttacker Techniques\nBefore I address memory hunting methods to detect adversaries in your network, it is helpful to understand the common forms of memory resident malware. These techniques include shellcode injection, reflective DLL injection, memory module, process and module hollowing, and Gargoyle (ROP/APC).\nSHELLCODE INJECTION\nShellcode injection is the most basic in-memory technique and has also been around the longest. The basic ‘recipe’ for shellcode injection is a four step process. These steps are: 1) open a target process (OpenProcess); 2) allocate a chunk of memory in the process (VirtualAllocEx); 3) write the shellcode payload to the newly allocated section (WriteProcessMemory); and 4) create a new thread in the remote process to execute the shellcode (CreateRemoteThread). The venerable Poison Ivy malware uses this technique, which is a big reason why so many APT groups were drawn to it over the years.\nIf you pull up a Poison Ivy samplewith x64dbg and set a breakpoint on VirtualAllocEx, you will soon locate the chunk of code responsible for the injection.\nIn the first image, the push 40 instruction preceding the call to VirtualAllocEx corresponds to page access protection value of PAGE_EXECUTE_READWRITE. In the following screenshot from ProcessHacker of the memory layout of a Poison Ivy implant, you can see it allocates a number of these RWX sections.\nTypical code sections are of type ‘Image’ and map to a file on disk. However, these are type ‘Private’ and do not map to a file on disk. They are therefore referred to as unbacked executable sections or floating code. Threads starting from these types of memory regions are anomalous and a good indicator of malicious activity. ProcessHacker can also show you the call stack of the malware threads. There are multiple functions in the call stack which do not map to memory associated with loaded modules.\nREFLECTIVE DLL INJECTION\nReflective DLL injection, originally developed by Steven Fewer, is another type of in memory attacker technique. Metasploit’s Meterperter payload was one of the first attempts to fully weaponize the technique, but many malware families use it today. Reflective DLL injection works by creating a DLL that maps itself into memory when executed, instead of relying on the Window’s loader. The injection process is identical to shellcode injection, except the shellcode is replaced with a self-mapping DLL. The self-mapping component added to the DLL is responsible for resolving import addresses, fixing relocations, and calling the DllMain function. Attackers benefit from the ability to code in higher level languages like C/C++ instead of assembly.\nClassic reflective DLL injection, such as that used by Meterpreter, is easy for hunters to find. It leaves large RWX memory sections in the process, even when the meterpreter session is closed. The start of these unbacked executable memory sections contain the full MZ/PE header, as shown in the images below. However, keep in mind that other reflective DLL implementations could wipe the headers and fix the memory leak.\nThe DLLs loaded in memory also conveniently export a self-describing function called ReflectiveLoader().\nMEMORY MODULE\nMemory module is another memory resident attacker technique. It is similar to Reflective DLL injection except the injector or loader is responsible for mapping the target DLL into memory instead of the DLL mapping itself. Essentially, the memory module loader re-implements the LoadLibrary function, but it works on a buffer in memory instead of a file on disk. The original implementation was designed for mapping in the current process, but updated techniques can map the module into remote processes. Most implementations respect the section permissions of the target DLL and avoid the noisy RWX approach.\nNetTraveler is one malware family that uses a memory module style technique. When NetTraveler starts, it unpacks the core functionality and maps it into memory. The page permissions more closely resemble a legitimate DLL, however the memory regions are still private as opposed to image.\nThe active threads have start addresses at these private regions. The callstack also reveals these malicious sections.\nWinnti is yet another malware sample that uses the Memory Module technique. They had a minor slip on the section permissions of the first page, as you can see below.\nHowever, the Winnti sample was notable because the MZ/PE headers in the DLL were erased, making it more difficult to detect.\nPROCESS HOLLOWING\nProcess hollowing is another technique attackers use to prevent their malware from being detected by security products and hunters. It involves creating a suspended process, unmapping (hollowing) the original executable from the process, allocating and writing a new payload to the process, redirecting the execution of the original thread to the new payload with SetThreadContext, and finally calling ResumeThread to complete. More stealthy variants use Create/Map section APIs to avoid WriteProcessMemory. Others modify the entry point with a jump instead of using SetThreadContext.\nDarkComet is one of many malware families that use process hollowing techniques. Several artifacts can be used to detect process hollowing. One dead giveaway for this activity is a process being spawned with the CREATE_SUSPENDED flag, as shown in the following screenshot from a DarkComet sample.\nMODULE OVERWRITING\nSo far, all techniques discussed have led to the execution of non-image backed code, and were therefore fairly straightforward to detect. Module overwriting, on the other hand, avoids this requirement, making it much more difficult to detect. This technique consists of mapping an unused module into a target process and then overwriting the module with its own payload. Flame was the first widely publicized malware family to use this technique. More recently, Careto and Odinaff malware families have used module overwriting techniques. Various techniques can be used to reliably detect module overwriting, which involves comparing memory to associated data on disk.\nGARGOYLE\nGargoyle is a proof of concept technique for memory resident malware that can evade detection from many security products. It accomplishes this feat by laying dormant with read-only page protections. It then periodically wakes up, using an asynchronous procedure call, and executes a ROP chain to mark its payload as executable before jumping to it. After the payload finishes executing, Gargoyle again masks its page permissions and goes back to sleep. One way to detect this attacker technique is to examine threads and user APCs for evidence of ROP chains.\nDetecting In-Memory Attacks\nGiven the proliferation and accessibility of these techniques, security personnel must be vigilant for memory-based attacker techniques and proactively hunt for them on their networks. However, most products cannot generically detect in-memory attacks at scale, leaving defenders with an enormous gap in their ability to protect against these attacks. Endgame has done significant research to bring low-noise detection capabilities into our product for each method mentioned above.\nGiven the immense size and impact of this detection gap, it is important to raise all boats, not just those of our customers. For this reason, we collaborated with Jared Atkinson on his powershell tool called Get-InjectedThreads, which implements a relatively low-noise method of detecting in memory threats. It scans active threads on the system for suspicious start addresses. Hunters leverage it to scan hosts in their networks and quickly identify many memory resident malware techniques. The script works by querying each active thread with the NtQueryInformationThread function to retrieve its start address. The start address is then queried with the VirtualQueryEx function to determine the associated section properties. If the memory region where the thread started is unbacked and executable (i.e. not image type and has execute bit set), then the thread is considered injected. The following screenshot shows a sample detection when run on a system infected with a 9002 RAT sample.\nThe script will catch a variety of malware families leveraging the shellcode injection, reflective DLL, memory module, and some process hollowing techniques. However, it is no replacement for security products that comprehensively prevent in-memory attacks, such as Endgame.\nEnterprise In-Memory Detection at Scale\nEndgame has built detections for each of these techniques (and many more) into our enterprise security platform, offering best in market capabilities to locate in-memory threats. We do not simply rely on naïve approaches like monitoring well-known system call sequences for process injection, but efficiently analyze memory to find all known evasion capabilities. This provides our users with thread-level visibility on injected code, as well as sophisticated follow-on actions like examining the injected code and suspending only a malicious injected thread to remediate the threat. Our platform is effective both in stopping injection as it is happening in real time as well as locating already resident adversaries hiding in memory, locating threats across tens of thousands of hosts in seconds.\nLike any signatureless detection technique, false positives (FPs) are an important consideration. As we researched and implemented our technique-based preventions for each adversary technique described above, we initially encountered FPs at every step of the way. Handling these correctly in our product is of paramount importance.\nMost FPs are related to security software, Just-In-Time (JIT) compiled code, or DRM protected/packed applications. Security products sometimes inject code to some or all processes on the system to enhance their behavioral detection capabilities. The downside is if the product is sloppy in its methods, it can actually harm the security of the system and make hunting for real in memory threats more difficult. JIT code, another potential area for false positives, generates assembly code at runtime which lives in unbacked or floating memory regions. .NET or Java applications are a couple of examples which use JIT techniques. Fortunately, this type of code is easier to identify and filter than rogue security products. Lastly, applications packed or protected with Digital Rights Management (DRM) schemes should be kept in mind. These applications may decrypt or deobfuscate their core functionality in memory to deter debugging and reverse engineering. However, the same techniques are used by malware to evade detection and deter analysis from security practitioners.\nThrough careful design decisions and extensive testing, we have managed to achieve very low false positive rates, allowing Endgame users to root out in-memory threats rapidly.\nConclusion\nAdversaries will continue to innovate new techniques to avoid detection and accomplish their objectives. Memory resident techniques are no exception, and have been a thorn in the side of endpoint security defenders for over a decade. Fortunately, by understanding the latest techniques, we can turn the tables and use this knowledge to develop new high fidelity detection methods. At Endgame, our comprehensive approach to these attacks have led us to a market leading position for fileless attack detection (adding to our other key technologies). For more on hunting for in-memory attacks, check out our slides from our SANS Threat Hunting and IR Summit presentation.",
+  "sanitized_txt": "Threat Hunters are charged with the difficult task of sifting through vast sources of diverse data to pinpoint adversarial activity at any stage in the attack lifecycle. To be successful, hunters must continually hone their subject matter expertise on the latest attacker techniques and detection methods. Memory resident malware, which presents itself in many forms, is an attacker technique that has existed for over a decade. The popularity of memory resident malware has steadily increased over time, possibly resulting from the proliferation of code and knowledge of in memory techniques. More likely, its popularity reflects the success of memory-based techniques to evade detection by security products and practitioners. Once limited to advanced adversaries, memory resident techniques are now commonplace for all levels of adversary sophistication. I will examine the most common of these memory based attacker techniques, and walk through our team’s research to craft a scalable, low noise approach to hunting for adversaries that are hiding in memory.\nAttacker Techniques Before I address memory hunting methods to detect adversaries in your network, it is helpful to understand the common forms of memory resident malware. These techniques include shellcode injection, reflective DLL injection, memory module, process and module hollowing, and Gargoyle (ROP/APC).\nSHELLCODE INJECTION Shellcode injection is the most basic in-memory technique and has also been around the longest. The basic ‘recipe’ for shellcode injection is a four step process. These steps are: 1) open a target process (OpenProcess); 2) allocate a chunk of memory in the process (VirtualAllocEx); 3) write the shellcode payload to the newly allocated section (WriteProcessMemory); and 4) create a new thread in the remote process to execute the shellcode (CreateRemoteThread). The venerable Poison Ivy malware uses this technique, which is a big reason why so many APT groups were drawn to it over the years.\nIf you pull up a Poison Ivy samplewith x64dbg and set a breakpoint on VirtualAllocEx, you will soon locate the chunk of code responsible for the injection.\nIn the first image, the push 40 instruction preceding the call to VirtualAllocEx corresponds to page access protection value of PAGE_EXECUTE_READWRITE. In the following screenshot from ProcessHacker of the memory layout of a Poison Ivy implant, you can see it allocates a number of these RWX sections.\nTypical code sections are of type ‘Image’ and map to a file on disk. However, these are type ‘Private’ and do not map to a file on disk. They are therefore referred to as unbacked executable sections or floating code. Threads starting from these types of memory regions are anomalous and a good indicator of malicious activity. ProcessHacker can also show you the call stack of the malware threads. There are multiple functions in the call stack which do not map to memory associated with loaded modules.\nREFLECTIVE DLL INJECTION Reflective DLL injection, originally developed by Steven Fewer, is another type of in memory attacker technique. Metasploit’s Meterperter payload was one of the first attempts to fully weaponize the technique, but many malware families use it today. Reflective DLL injection works by creating a DLL that maps itself into memory when executed, instead of relying on the Window’s loader. The injection process is identical to shellcode injection, except the shellcode is replaced with a self-mapping DLL. The self-mapping component added to the DLL is responsible for resolving import addresses, fixing relocations, and calling the DllMain function. Attackers benefit from the ability to code in higher level languages like C/C++ instead of assembly.\nClassic reflective DLL injection, such as that used by Meterpreter, is easy for hunters to find. It leaves large RWX memory sections in the process, even when the meterpreter session is closed. The start of these unbacked executable memory sections contain the full MZ/PE header, as shown in the images below. However, keep in mind that other reflective DLL implementations could wipe the headers and fix the memory leak.\nThe DLLs loaded in memory also conveniently export a self-describing function called ReflectiveLoader().\nMEMORY MODULE Memory module is another memory resident attacker technique. It is similar to Reflective DLL injection except the injector or loader is responsible for mapping the target DLL into memory instead of the DLL mapping itself. Essentially, the memory module loader re-implements the LoadLibrary function, but it works on a buffer in memory instead of a file on disk. The original implementation was designed for mapping in the current process, but updated techniques can map the module into remote processes. Most implementations respect the section permissions of the target DLL and avoid the noisy RWX approach.\nNetTraveler is one malware family that uses a memory module style technique. When NetTraveler starts, it unpacks the core functionality and maps it into memory. The page permissions more closely resemble a legitimate DLL, however the memory regions are still private as opposed to image.\nThe active threads have start addresses at these private regions. The callstack also reveals these malicious sections.\nWinnti is yet another malware sample that uses the Memory Module technique. They had a minor slip on the section permissions of the first page, as you can see below.\nHowever, the Winnti sample was notable because the MZ/PE headers in the DLL were erased, making it more difficult to detect.\nPROCESS HOLLOWING Process hollowing is another technique attackers use to prevent their malware from being detected by security products and hunters. It involves creating a suspended process, unmapping (hollowing) the original executable from the process, allocating and writing a new payload to the process, redirecting the execution of the original thread to the new payload with SetThreadContext, and finally calling ResumeThread to complete. More stealthy variants use Create/Map section APIs to avoid WriteProcessMemory. Others modify the entry point with a jump instead of using SetThreadContext.\nDarkComet is one of many malware families that use process hollowing techniques. Several artifacts can be used to detect process hollowing. One dead giveaway for this activity is a process being spawned with the CREATE_SUSPENDED flag, as shown in the following screenshot from a DarkComet sample.\nMODULE OVERWRITING So far, all techniques discussed have led to the execution of non-image backed code, and were therefore fairly straightforward to detect. Module overwriting, on the other hand, avoids this requirement, making it much more difficult to detect. This technique consists of mapping an unused module into a target process and then overwriting the module with its own payload. Flame was the first widely publicized malware family to use this technique. More recently, Careto and Odinaff malware families have used module overwriting techniques. Various techniques can be used to reliably detect module overwriting, which involves comparing memory to associated data on disk.\nGARGOYLE Gargoyle is a proof of concept technique for memory resident malware that can evade detection from many security products. It accomplishes this feat by laying dormant with read-only page protections. It then periodically wakes up, using an asynchronous procedure call, and executes a ROP chain to mark its payload as executable before jumping to it. After the payload finishes executing, Gargoyle again masks its page permissions and goes back to sleep. One way to detect this attacker technique is to examine threads and user APCs for evidence of ROP chains.\nDetecting In-Memory Attacks Given the proliferation and accessibility of these techniques, security personnel must be vigilant for memory-based attacker techniques and proactively hunt for them on their networks. However, most products cannot generically detect in-memory attacks at scale, leaving defenders with an enormous gap in their ability to protect against these attacks. Endgame has done significant research to bring low-noise detection capabilities into our product for each method mentioned above.\nGiven the immense size and impact of this detection gap, it is important to raise all boats, not just those of our customers. For this reason, we collaborated with Jared Atkinson on his powershell tool called Get-InjectedThreads, which implements a relatively low-noise method of detecting in memory threats. It scans active threads on the system for suspicious start addresses. Hunters leverage it to scan hosts in their networks and quickly identify many memory resident malware techniques. The script works by querying each active thread with the NtQueryInformationThread function to retrieve its start address. The start address is then queried with the VirtualQueryEx function to determine the associated section properties. If the memory region where the thread started is unbacked and executable (i.e. not image type and has execute bit set), then the thread is considered injected. The following screenshot shows a sample detection when run on a system infected with a 9002 RAT sample.\nThe script will catch a variety of malware families leveraging the shellcode injection, reflective DLL, memory module, and some process hollowing techniques. However, it is no replacement for security products that comprehensively prevent in-memory attacks, such as Endgame.\nEnterprise In-Memory Detection at Scale Endgame has built detections for each of these techniques (and many more) into our enterprise security platform, offering best in market capabilities to locate in-memory threats. We do not simply rely on naïve approaches like monitoring well-known system call sequences for process injection, but efficiently analyze memory to find all known evasion capabilities. This provides our users with thread-level visibility on injected code, as well as sophisticated follow-on actions like examining the injected code and suspending only a malicious injected thread to remediate the threat. Our platform is effective both in stopping injection as it is happening in real time as well as locating already resident adversaries hiding in memory, locating threats across tens of thousands of hosts in seconds.\nLike any signatureless detection technique, false positives (FPs) are an important consideration. As we researched and implemented our technique-based preventions for each adversary technique described above, we initially encountered FPs at every step of the way. Handling these correctly in our product is of paramount importance.\nMost FPs are related to security software, Just-In-Time (JIT) compiled code, or DRM protected/packed applications. Security products sometimes inject code to some or all processes on the system to enhance their behavioral detection capabilities. The downside is if the product is sloppy in its methods, it can actually harm the security of the system and make hunting for real in memory threats more difficult. JIT code, another potential area for false positives, generates assembly code at runtime which lives in unbacked or floating memory regions. .NET or Java applications are a couple of examples which use JIT techniques. Fortunately, this type of code is easier to identify and filter than rogue security products. Lastly, applications packed or protected with Digital Rights Management (DRM) schemes should be kept in mind. These applications may decrypt or deobfuscate their core functionality in memory to deter debugging and reverse engineering. However, the same techniques are used by malware to evade detection and deter analysis from security practitioners.\nThrough careful design decisions and extensive testing, we have managed to achieve very low false positive rates, allowing Endgame users to root out in-memory threats rapidly.\nConclusion Adversaries will continue to innovate new techniques to avoid detection and accomplish their objectives. Memory resident techniques are no exception, and have been a thorn in the side of endpoint security defenders for over a decade. Fortunately, by understanding the latest techniques, we can turn the tables and use this knowledge to develop new high fidelity detection methods. At Endgame, our comprehensive approach to these attacks have led us to a market leading position for fileless attack detection (adding to our other key technologies). For more on hunting for in-memory attacks, check out our slides from our SANS Threat Hunting and IR Summit presentation.",
+  "ID_list": [
+    "T1055.001"
+  ],
+  "Name_list": [
+    "Execution",
+    "Impact",
+    "PowerShell",
+    "Process Hollowing",
+    "Process Injection",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1055.001": [
+      {
+        "sentence": "Memory resident malware, which presents itself in many forms, is an attacker technique that has existed for over a decade.",
+        "score": 0.6133
+      },
+      {
+        "sentence": "The popularity of memory resident malware has steadily increased over time, possibly resulting from the proliferation of code and knowledge of in memory techniques.",
+        "score": 0.6585
+      },
+      {
+        "sentence": "More likely, its popularity reflects the success of memory-based techniques to evade detection by security products and practitioners.",
+        "score": 0.5201
+      },
+      {
+        "sentence": "Once limited to advanced adversaries, memory resident techniques are now commonplace for all levels of adversary sophistication.",
+        "score": 0.632
+      },
+      {
+        "sentence": "I will examine the most common of these memory based attacker techniques, and walk through our team’s research to craft a scalable, low noise approach to hunting for adversaries that are hiding in memory.",
+        "score": 0.5074
+      },
+      {
+        "sentence": "Attacker Techniques Before I address memory hunting methods to detect adversaries in your network, it is helpful to understand the common forms of memory resident malware.",
+        "score": 0.5872
+      },
+      {
+        "sentence": "These techniques include shellcode injection, reflective DLL injection, memory module, process and module hollowing, and Gargoyle (ROP/APC).",
+        "score": 0.7927
+      },
+      {
+        "sentence": "SHELLCODE INJECTION Shellcode injection is the most basic in-memory technique and has also been around the longest.",
+        "score": 0.6889
+      },
+      {
+        "sentence": "The basic ‘recipe’ for shellcode injection is a four step process.",
+        "score": 0.6514
+      },
+      {
+        "sentence": "These steps are: 1) open a target process (OpenProcess); 2) allocate a chunk of memory in the process (VirtualAllocEx); 3) write the shellcode payload to the newly allocated section (WriteProcessMemory); and 4) create a new thread in the remote process to execute the shellcode (CreateRemoteThread).",
+        "score": 0.7166
+      },
+      {
+        "sentence": "The venerable Poison Ivy malware uses this technique, which is a big reason why so many APT groups were drawn to it over the years.",
+        "score": 0.4039
+      },
+      {
+        "sentence": "If you pull up a Poison Ivy samplewith x64dbg and set a breakpoint on VirtualAllocEx, you will soon locate the chunk of code responsible for the injection.",
+        "score": 0.7246
+      },
+      {
+        "sentence": "In the first image, the push 40 instruction preceding the call to VirtualAllocEx corresponds to page access protection value of PAGE_EXECUTE_READWRITE.",
+        "score": 0.5849
+      },
+      {
+        "sentence": "In the following screenshot from ProcessHacker of the memory layout of a Poison Ivy implant, you can see it allocates a number of these RWX sections.",
+        "score": 0.6694
+      },
+      {
+        "sentence": "Typical code sections are of type ‘Image’ and map to a file on disk.",
+        "score": 0.4338
+      },
+      {
+        "sentence": "They are therefore referred to as unbacked executable sections or floating code.",
+        "score": 0.4913
+      },
+      {
+        "sentence": "Threads starting from these types of memory regions are anomalous and a good indicator of malicious activity.",
+        "score": 0.5933
+      },
+      {
+        "sentence": "ProcessHacker can also show you the call stack of the malware threads.",
+        "score": 0.4741
+      },
+      {
+        "sentence": "There are multiple functions in the call stack which do not map to memory associated with loaded modules.",
+        "score": 0.678
+      },
+      {
+        "sentence": "REFLECTIVE DLL INJECTION Reflective DLL injection, originally developed by Steven Fewer, is another type of in memory attacker technique.",
+        "score": 0.7082
+      },
+      {
+        "sentence": "Metasploit’s Meterperter payload was one of the first attempts to fully weaponize the technique, but many malware families use it today.",
+        "score": 0.442
+      },
+      {
+        "sentence": "Reflective DLL injection works by creating a DLL that maps itself into memory when executed, instead of relying on the Window’s loader.",
+        "score": 0.8695
+      },
+      {
+        "sentence": "The injection process is identical to shellcode injection, except the shellcode is replaced with a self-mapping DLL.",
+        "score": 0.7909
+      },
+      {
+        "sentence": "The self-mapping component added to the DLL is responsible for resolving import addresses, fixing relocations, and calling the DllMain function.",
+        "score": 0.7263
+      },
+      {
+        "sentence": "Attackers benefit from the ability to code in higher level languages like C/C++ instead of assembly.",
+        "score": 0.4505
+      },
+      {
+        "sentence": "Classic reflective DLL injection, such as that used by Meterpreter, is easy for hunters to find.",
+        "score": 0.6541
+      },
+      {
+        "sentence": "It leaves large RWX memory sections in the process, even when the meterpreter session is closed.",
+        "score": 0.5178
+      },
+      {
+        "sentence": "The start of these unbacked executable memory sections contain the full MZ/PE header, as shown in the images below.",
+        "score": 0.5764
+      },
+      {
+        "sentence": "However, keep in mind that other reflective DLL implementations could wipe the headers and fix the memory leak.",
+        "score": 0.5611
+      },
+      {
+        "sentence": "The DLLs loaded in memory also conveniently export a self-describing function called ReflectiveLoader().",
+        "score": 0.7385
+      },
+      {
+        "sentence": "MEMORY MODULE Memory module is another memory resident attacker technique.",
+        "score": 0.6404
+      },
+      {
+        "sentence": "It is similar to Reflective DLL injection except the injector or loader is responsible for mapping the target DLL into memory instead of the DLL mapping itself.",
+        "score": 0.8667
+      },
+      {
+        "sentence": "Essentially, the memory module loader re-implements the LoadLibrary function, but it works on a buffer in memory instead of a file on disk.",
+        "score": 0.6586
+      },
+      {
+        "sentence": "The original implementation was designed for mapping in the current process, but updated techniques can map the module into remote processes.",
+        "score": 0.7219
+      },
+      {
+        "sentence": "Most implementations respect the section permissions of the target DLL and avoid the noisy RWX approach.",
+        "score": 0.6139
+      },
+      {
+        "sentence": "NetTraveler is one malware family that uses a memory module style technique.",
+        "score": 0.5952
+      },
+      {
+        "sentence": "When NetTraveler starts, it unpacks the core functionality and maps it into memory.",
+        "score": 0.631
+      },
+      {
+        "sentence": "The page permissions more closely resemble a legitimate DLL, however the memory regions are still private as opposed to image.",
+        "score": 0.5816
+      },
+      {
+        "sentence": "The active threads have start addresses at these private regions.",
+        "score": 0.5512
+      },
+      {
+        "sentence": "The callstack also reveals these malicious sections.",
+        "score": 0.5582
+      },
+      {
+        "sentence": "Winnti is yet another malware sample that uses the Memory Module technique.",
+        "score": 0.6015
+      },
+      {
+        "sentence": "They had a minor slip on the section permissions of the first page, as you can see below.",
+        "score": 0.3716
+      },
+      {
+        "sentence": "However, the Winnti sample was notable because the MZ/PE headers in the DLL were erased, making it more difficult to detect.",
+        "score": 0.5344
+      },
+      {
+        "sentence": "PROCESS HOLLOWING Process hollowing is another technique attackers use to prevent their malware from being detected by security products and hunters.",
+        "score": 0.6747
+      },
+      {
+        "sentence": "It involves creating a suspended process, unmapping (hollowing) the original executable from the process, allocating and writing a new payload to the process, redirecting the execution of the original thread to the new payload with SetThreadContext, and finally calling ResumeThread to complete.",
+        "score": 0.7591
+      },
+      {
+        "sentence": "More stealthy variants use Create/Map section APIs to avoid WriteProcessMemory.",
+        "score": 0.6298
+      },
+      {
+        "sentence": "Others modify the entry point with a jump instead of using SetThreadContext.",
+        "score": 0.6288
+      },
+      {
+        "sentence": "DarkComet is one of many malware families that use process hollowing techniques.",
+        "score": 0.7196
+      },
+      {
+        "sentence": "Several artifacts can be used to detect process hollowing.",
+        "score": 0.6314
+      },
+      {
+        "sentence": "One dead giveaway for this activity is a process being spawned with the CREATE_SUSPENDED flag, as shown in the following screenshot from a DarkComet sample.",
+        "score": 0.4501
+      },
+      {
+        "sentence": "MODULE OVERWRITING So far, all techniques discussed have led to the execution of non-image backed code, and were therefore fairly straightforward to detect.",
+        "score": 0.6259
+      },
+      {
+        "sentence": "Module overwriting, on the other hand, avoids this requirement, making it much more difficult to detect.",
+        "score": 0.5694
+      },
+      {
+        "sentence": "This technique consists of mapping an unused module into a target process and then overwriting the module with its own payload.",
+        "score": 0.8054
+      },
+      {
+        "sentence": "Flame was the first widely publicized malware family to use this technique.",
+        "score": 0.3554
+      },
+      {
+        "sentence": "More recently, Careto and Odinaff malware families have used module overwriting techniques.",
+        "score": 0.5793
+      },
+      {
+        "sentence": "Various techniques can be used to reliably detect module overwriting, which involves comparing memory to associated data on disk.",
+        "score": 0.5307
+      },
+      {
+        "sentence": "GARGOYLE Gargoyle is a proof of concept technique for memory resident malware that can evade detection from many security products.",
+        "score": 0.5267
+      },
+      {
+        "sentence": "It accomplishes this feat by laying dormant with read-only page protections.",
+        "score": 0.4529
+      },
+      {
+        "sentence": "It then periodically wakes up, using an asynchronous procedure call, and executes a ROP chain to mark its payload as executable before jumping to it.",
+        "score": 0.5986
+      },
+      {
+        "sentence": "After the payload finishes executing, Gargoyle again masks its page permissions and goes back to sleep.",
+        "score": 0.4774
+      },
+      {
+        "sentence": "One way to detect this attacker technique is to examine threads and user APCs for evidence of ROP chains.",
+        "score": 0.4419
+      },
+      {
+        "sentence": "Detecting In-Memory Attacks Given the proliferation and accessibility of these techniques, security personnel must be vigilant for memory-based attacker techniques and proactively hunt for them on their networks.",
+        "score": 0.5139
+      },
+      {
+        "sentence": "However, most products cannot generically detect in-memory attacks at scale, leaving defenders with an enormous gap in their ability to protect against these attacks.",
+        "score": 0.5053
+      },
+      {
+        "sentence": "Endgame has done significant research to bring low-noise detection capabilities into our product for each method mentioned above.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "Given the immense size and impact of this detection gap, it is important to raise all boats, not just those of our customers.",
+        "score": 0.3477
+      },
+      {
+        "sentence": "For this reason, we collaborated with Jared Atkinson on his powershell tool called Get-InjectedThreads, which implements a relatively low-noise method of detecting in memory threats.",
+        "score": 0.6911
+      },
+      {
+        "sentence": "Hunters leverage it to scan hosts in their networks and quickly identify many memory resident malware techniques.",
+        "score": 0.4206
+      },
+      {
+        "sentence": "The script works by querying each active thread with the NtQueryInformationThread function to retrieve its start address.",
+        "score": 0.4819
+      },
+      {
+        "sentence": "The start address is then queried with the VirtualQueryEx function to determine the associated section properties.",
+        "score": 0.4679
+      },
+      {
+        "sentence": "If the memory region where the thread started is unbacked and executable (i.e. not image type and has execute bit set), then the thread is considered injected.",
+        "score": 0.674
+      },
+      {
+        "sentence": "The script will catch a variety of malware families leveraging the shellcode injection, reflective DLL, memory module, and some process hollowing techniques.",
+        "score": 0.7437
+      },
+      {
+        "sentence": "However, it is no replacement for security products that comprehensively prevent in-memory attacks, such as Endgame.",
+        "score": 0.5335
+      },
+      {
+        "sentence": "Enterprise In-Memory Detection at Scale Endgame has built detections for each of these techniques (and many more) into our enterprise security platform, offering best in market capabilities to locate in-memory threats.",
+        "score": 0.5073
+      },
+      {
+        "sentence": "We do not simply rely on naïve approaches like monitoring well-known system call sequences for process injection, but efficiently analyze memory to find all known evasion capabilities.",
+        "score": 0.6435
+      },
+      {
+        "sentence": "This provides our users with thread-level visibility on injected code, as well as sophisticated follow-on actions like examining the injected code and suspending only a malicious injected thread to remediate the threat.",
+        "score": 0.6533
+      },
+      {
+        "sentence": "Our platform is effective both in stopping injection as it is happening in real time as well as locating already resident adversaries hiding in memory, locating threats across tens of thousands of hosts in seconds.",
+        "score": 0.6611
+      },
+      {
+        "sentence": "As we researched and implemented our technique-based preventions for each adversary technique described above, we initially encountered FPs at every step of the way.",
+        "score": 0.4632
+      },
+      {
+        "sentence": "Handling these correctly in our product is of paramount importance.",
+        "score": 0.3594
+      },
+      {
+        "sentence": "Most FPs are related to security software, Just-In-Time (JIT) compiled code, or DRM protected/packed applications.",
+        "score": 0.4983
+      },
+      {
+        "sentence": "Security products sometimes inject code to some or all processes on the system to enhance their behavioral detection capabilities.",
+        "score": 0.6851
+      },
+      {
+        "sentence": "The downside is if the product is sloppy in its methods, it can actually harm the security of the system and make hunting for real in memory threats more difficult.",
+        "score": 0.4768
+      },
+      {
+        "sentence": "JIT code, another potential area for false positives, generates assembly code at runtime which lives in unbacked or floating memory regions. .NET or Java applications are a couple of examples which use JIT techniques.",
+        "score": 0.6224
+      },
+      {
+        "sentence": "Fortunately, this type of code is easier to identify and filter than rogue security products.",
+        "score": 0.3762
+      },
+      {
+        "sentence": "Lastly, applications packed or protected with Digital Rights Management (DRM) schemes should be kept in mind.",
+        "score": 0.4529
+      },
+      {
+        "sentence": "These applications may decrypt or deobfuscate their core functionality in memory to deter debugging and reverse engineering.",
+        "score": 0.4667
+      },
+      {
+        "sentence": "However, the same techniques are used by malware to evade detection and deter analysis from security practitioners.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "Through careful design decisions and extensive testing, we have managed to achieve very low false positive rates, allowing Endgame users to root out in-memory threats rapidly.",
+        "score": 0.4646
+      },
+      {
+        "sentence": "Conclusion Adversaries will continue to innovate new techniques to avoid detection and accomplish their objectives.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "Memory resident techniques are no exception, and have been a thorn in the side of endpoint security defenders for over a decade.",
+        "score": 0.597
+      },
+      {
+        "sentence": "Fortunately, by understanding the latest techniques, we can turn the tables and use this knowledge to develop new high fidelity detection methods.",
+        "score": 0.3944
+      },
+      {
+        "sentence": "At Endgame, our comprehensive approach to these attacks have led us to a market leading position for fileless attack detection (adding to our other key technologies).",
+        "score": 0.3634
+      },
+      {
+        "sentence": "For more on hunting for in-memory attacks, check out our slides from our SANS Threat Hunting and IR Summit presentation.",
+        "score": 0.5079
+      }
+    ]
+  }
+}

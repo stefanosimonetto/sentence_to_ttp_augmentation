@@ -1,0 +1,2342 @@
+{
+  "original_txt": "Summary\nThe Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators. Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader. One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.\nIn this blog, I will briefly share a Python script I developed to crack the password protected maldocs in the event an analyst does not have access to the original email message containing the password. Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document. Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein. Let’s go!\nValak Overview\nThe Valak malware was first discovered around December 2019. It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors. In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns. However, Valak is a modular framework that has the capability to download additional plugins to facilitate infostealing and reconnaissance. Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.\nCracking the ZIP Archive\nThe recent Valak campaigns that I have observed have all been delivered via zipped email attachments that are password protected. The ZIP archive contains a Microsoft Word document that is weaponized with macros. The password is provided in the body of the email. This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.\nMany analysts are likely to have access to the original email and thus can easily recover the password. However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar. I found myself in this same spot earlier this week as I was looking into Valak samples. I had obtained the ZIP from , but I did not have access to the original email. I needed to get inside to get a peek at those sweet IOCs.\nUltimately, my solution was to write a quick program in Python to brute-force the password and extract the archive’s contents. The password cracking portion is based on a regex of the known password naming convention, so it should be noted that if/when the actors change this convention this script would need to be updated. In future revisions I also plan to add the capability to pass a dictionary file to the program as an argument that will help extend its functionality. I’m certainly no Pythonista, so YMMV, but this does get the job done. Please feel free to use and/or suggest changes on the github:\nUsing the program is very simple as you can see below. Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive. It will extract the file to your working directory and print “extraction succeeded” when the correct password is found. This is compatible with Python3 and you will also need a couple dependencies such as pyzipper and exrex.\nExtracting the VBA Macro\nA Microsoft Office document weaponized with macros is nothing new. These VBA macros are executed when an unsuspecting user clicks “Enable Content,” kicking off the infection chain and leading to the download of next-stage payloads.\nWhether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload. The following document is what I recovered after running the script:\n- Filename: dictate.06.20.doc\n- SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17\nUsually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program. I’ve shown how to do this before, so I won’t go into much detail here. Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code. This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis. We can do better with tools.\nThere are lots of tools available that can help out with macro analysis, but I tend to always gravitate to either oledump or olevba. Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other. I will also give an honorable mention to ViperMonkey. This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time. Unfortunately, I kept getting errors on this sample so I had to do that bit by hand. More on this later in the next section.\noledump.py\nAnyways, oledump is a program written by security researcher, Didier Stevens. As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams. The basic usage for oledump.py is very simple and and will print the document streams.\nAs highlighted in Figure 5 above, the basic command dumps the streams and highlights those that contain VBA macro code. Based on this output we now know that streams A3, A4, A5, A12, and A13 all contain macros. I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments. Possibly the two most important that analysts will need to use is the “decompress” option which is used with the “-v” argument and the “select” option used with “-s”. The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.\nHere we have our first look at the obfuscated code contained within the functions of the macro. An analyst could choose to select all of the streams and dump them out at once, but here they are shown separately. Most of the streams can be skipped over because they are comprised of garbage code. Once we get to stream A13, we finally find something pretty interesting.\nI gotta tell ya, bad guys just love arrays for obfuscating their macros. Rarely do I stumble across a sample that doesn’t contain some sort of array declaration and then subsequent operations on the indices of that array to scramble the code. For now, we can just copy out the dumped macros or write them to a file for future analysis. We have one more tool to discuss before getting into the de-obfuscation .\nolevba\nNext up is olevba, a tool written by security researcher, Philippe Lagadec. It has similar functionality as oledump, but its output is slightly different and comparatively less flexible as it does not have an extensive list of plugins. However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document. This may give analysts a quick boost to speed up an investigation when time constraints are critical. This program can also be ran against multiple files if there is a use-case for a high volume of analyses that require automated workloads. Usage of olevba is also quite simple and can be executed via the command line or used as a python module.\nThe output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro. For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document. Keep in mind that macros are often obfuscated and not necessarily linear in operation.\nIn the next example from the olevba output, we can see suspicious keywords highlighted in red. Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows. The Lib clause is a required statement in the declaration syntax and indicates the macro will be loading a DLL or some other code resource (urlmon in this case).\nFinally, we get to the end of the dumped macro. We can see here that olevba has extracted the same obfuscated array as we observed previously. At the end of the output, is the triage summary, which summarized all of the suspicious keywords that were highlighted in the automated analysis.\nSo, that’s a quick look at two different tools that have similar capability to dump and analyze macros. Both are easy to use and have broad functionality. I use both tools frequently, depending on the task at hand. I would recommend downloading both and keeping them as a part of your kit.\nDe-obfuscating the Macro\nNow that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro. Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes. This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily. The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation. Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple. It’s about 200 lines of mostly junk code. After removing about 75% of the code, we are left with the only lines that perform some operations.\nDespite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection. The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders. Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL. Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library. We also see a command shell opened via an interesting usage of the Exec method with a WshShell object. Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell. I’m no detection engineer, but I think that might cause some problems. Nice.\nFinally, the script launches regsvr32 and loads the downloaded DLL payload into the process. The last block is the encoded array that was covered in the previous section. Decoding this block is easy as long as we pay attention to the split/join functions and do a simple string replacement using the two keys “love” and “xxxxxxx”. The array ultimately decodes into the URL where the actors have stashed the Valak DLL. It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file. Here’s what the final pieces look like all cleaned up:\nConclusion\nSo that’s it, my take on conducting analysis on a recent Valak sample. I’ve shared a few resources and tools that can hopefully enable analysts to improve the velocity and fidelity of their data gathering for triage and investigations. This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve. This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward. Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action. ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.\nIOCs\nhxxp[:]//nwwgbluv65j6g0xgr-xk[.]com/czwih/fxla[.]php?l=gap6[.]cab\nATT&CK Tagging\n- Initial Access\n- Phishing attachment (ATT&CK ID: T1193)\n- Execution\n- User Execution (ATT&CK ID: T1204)\n- Scripting (ATT&CK ID: T1064)\n- Regsvr32 (ATT&CK ID: ID: T1117)\n- Defense Evasion\n- Deobfuscate/Decode Files or Information (ATT&CK ID: T1140)\n- Masquerading (ATT&CK ID: T1036)\n- Process Injection (ATT&CK ID: T1055)\n- Command and Control\n- Remote File Copy (ATT&CK ID: T1105)\nReferences\n[1] https://www.malware-traffic-analysis.net/2020/06/03/index2.html\n[2] https://malpedia.caad.fkie.fraunhofer.de/actor/lunar_spider\n[3] https://www.cybereason.com/blog/valak-more-than-meets-the-eye\n[4] https://github.com/Sec-Soup/valak-cracker\n[5] https://github.com/danifus/pyzipper\n[6] https://github.com/asciimoo/exrex\n[8] https://github.com/Sec-Soup/Array-Decoder/blob/master/arrayDecoder.py\n[10] https://blog.didierstevens.com/programs/oledump-py/\n[11] https://github.com/decalage2/oletools/wiki/olevba\n[12] https://github.com/decalage2/ViperMonkey\n[13] https://wellsr.com/vba/2018/excel/download-files-with-vba-urldownloadtofile/\n[14] https://docs.microsoft.com/en-us/office/vba/language/reference/user-interface-help/declare-statement\n[15] https://www.vbsedit.com/html/5593b353-ef4b-4c99-8ae1-f963bac48929.asp\n[16] https://www.vbsedit.com/html/7b956233-c1aa-4b59-b36d-f3e97a9b02f0.asp\n[17] https://pastebin.com/WmAWQQ06\n[10] https://attack.mitre.org/techniques/T1204/\n[11] https://attack.mitre.org/techniques/T1117/\n[12] https://attack.mitre.org/techniques/T1047/\n[14] https://attack.mitre.org/techniques/T1140/\n[15] https://attack.mitre.org/techniques/T1036/",
+  "sanitized_txt": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators. Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader. One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.\nIn this blog, I will briefly share a Python script I developed to crack the password protected maldocs in the event an analyst does not have access to the original email message containing the password. Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document. Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein. Let’s go!\nValak Overview The Valak malware was first discovered around December 2019. It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors. In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns. However, Valak is a modular framework that has the capability to download additional plugins to facilitate infostealing and reconnaissance. Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.\nCracking the ZIP Archive The recent Valak campaigns that I have observed have all been delivered via zipped email attachments that are password protected. The ZIP archive contains a Microsoft Word document that is weaponized with macros. The password is provided in the body of the email. This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.\nMany analysts are likely to have access to the original email and thus can easily recover the password. However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar. I found myself in this same spot earlier this week as I was looking into Valak samples. I had obtained the ZIP from , but I did not have access to the original email. I needed to get inside to get a peek at those sweet IOCs.\nUltimately, my solution was to write a quick program in Python to brute-force the password and extract the archive’s contents. The password cracking portion is based on a regex of the known password naming convention, so it should be noted that if/when the actors change this convention this script would need to be updated. In future revisions I also plan to add the capability to pass a dictionary file to the program as an argument that will help extend its functionality. I’m certainly no Pythonista, so YMMV, but this does get the job done. Please feel free to use and/or suggest changes on the github:\nUsing the program is very simple as you can see below. Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive. It will extract the file to your working directory and print “extraction succeeded” when the correct password is found. This is compatible with Python3 and you will also need a couple dependencies such as pyzipper and exrex.\nExtracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new. These VBA macros are executed when an unsuspecting user clicks “Enable Content,” kicking off the infection chain and leading to the download of next-stage payloads.\nWhether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload. The following document is what I recovered after running the script:\n- Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program. I’ve shown how to do this before, so I won’t go into much detail here. Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code. This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis. We can do better with tools.\nThere are lots of tools available that can help out with macro analysis, but I tend to always gravitate to either oledump or olevba. Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other. I will also give an honorable mention to ViperMonkey. This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time. Unfortunately, I kept getting errors on this sample so I had to do that bit by hand. More on this later in the next section.\noledump.py Anyways, oledump is a program written by security researcher, Didier Stevens. As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams. The basic usage for oledump.py is very simple and and will print the document streams.\nAs highlighted in Figure 5 above, the basic command dumps the streams and highlights those that contain VBA macro code. Based on this output we now know that streams A3, A4, A5, A12, and A13 all contain macros. I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments. Possibly the two most important that analysts will need to use is the “decompress” option which is used with the “-v” argument and the “select” option used with “-s”. The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.\nHere we have our first look at the obfuscated code contained within the functions of the macro. An analyst could choose to select all of the streams and dump them out at once, but here they are shown separately. Most of the streams can be skipped over because they are comprised of garbage code. Once we get to stream A13, we finally find something pretty interesting.\nI gotta tell ya, bad guys just love arrays for obfuscating their macros. Rarely do I stumble across a sample that doesn’t contain some sort of array declaration and then subsequent operations on the indices of that array to scramble the code. For now, we can just copy out the dumped macros or write them to a file for future analysis. We have one more tool to discuss before getting into the de-obfuscation .\nolevba Next up is olevba, a tool written by security researcher, Philippe Lagadec. It has similar functionality as oledump, but its output is slightly different and comparatively less flexible as it does not have an extensive list of plugins. However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document. This may give analysts a quick boost to speed up an investigation when time constraints are critical. This program can also be ran against multiple files if there is a use-case for a high volume of analyses that require automated workloads. Usage of olevba is also quite simple and can be executed via the command line or used as a python module.\nThe output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro. For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document. Keep in mind that macros are often obfuscated and not necessarily linear in operation.\nIn the next example from the olevba output, we can see suspicious keywords highlighted in red. Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows. The Lib clause is a required statement in the declaration syntax and indicates the macro will be loading a DLL or some other code resource (urlmon in this case).\nFinally, we get to the end of the dumped macro. We can see here that olevba has extracted the same obfuscated array as we observed previously. At the end of the output, is the triage summary, which summarized all of the suspicious keywords that were highlighted in the automated analysis.\nSo, that’s a quick look at two different tools that have similar capability to dump and analyze macros. Both are easy to use and have broad functionality. I use both tools frequently, depending on the task at hand. I would recommend downloading both and keeping them as a part of your kit.\nDe-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro. Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes. This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily. The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation. Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple. It’s about 200 lines of mostly junk code. After removing about 75% of the code, we are left with the only lines that perform some operations.\nDespite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection. The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders. Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL. Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library. We also see a command shell opened via an interesting usage of the Exec method with a WshShell object. Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell. I’m no detection engineer, but I think that might cause some problems. Nice.\nFinally, the script launches regsvr32 and loads the downloaded DLL payload into the process. The last block is the encoded array that was covered in the previous section. Decoding this block is easy as long as we pay attention to the split/join functions and do a simple string replacement using the two keys “love” and “xxxxxxx”. The array ultimately decodes into the URL where the actors have stashed the Valak DLL. It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file. Here’s what the final pieces look like all cleaned up:\nConclusion So that’s it, my take on conducting analysis on a recent Valak sample. I’ve shared a few resources and tools that can hopefully enable analysts to improve the velocity and fidelity of their data gathering for triage and investigations. This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve. This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward. Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action. ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+  "ID_list": [
+    "T1036",
+    "T1047",
+    "T1055",
+    "T1064",
+    "T1105",
+    "T1117",
+    "T1140",
+    "T1193",
+    "T1204"
+  ],
+  "Name_list": [
+    "Execution",
+    "Impact",
+    "Reconnaissance",
+    "Regsvr32",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1036": [
+      {
+        "sentence": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators.",
+        "score": 0.3241
+      },
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.3266
+      },
+      {
+        "sentence": "One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.4043
+      },
+      {
+        "sentence": "Valak Overview The Valak malware was first discovered around December 2019.",
+        "score": 0.318
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.3401
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.3648
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.3032
+      },
+      {
+        "sentence": "This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.",
+        "score": 0.402
+      },
+      {
+        "sentence": "The password cracking portion is based on a regex of the known password naming convention, so it should be noted that if/when the actors change this convention this script would need to be updated.",
+        "score": 0.3278
+      },
+      {
+        "sentence": "Please feel free to use and/or suggest changes on the github: Using the program is very simple as you can see below.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive.",
+        "score": 0.4106
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.3009
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.3562
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.3128
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.3663
+      },
+      {
+        "sentence": "I gotta tell ya, bad guys just love arrays for obfuscating their macros.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "Rarely do I stumble across a sample that doesn’t contain some sort of array declaration and then subsequent operations on the indices of that array to scramble the code.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "We have one more tool to discuss before getting into the de-obfuscation . olevba Next up is olevba, a tool written by security researcher, Philippe Lagadec.",
+        "score": 0.3228
+      },
+      {
+        "sentence": "For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.4125
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes.",
+        "score": 0.515
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.3077
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.4315
+      },
+      {
+        "sentence": "It’s about 200 lines of mostly junk code.",
+        "score": 0.3148
+      },
+      {
+        "sentence": "After removing about 75% of the code, we are left with the only lines that perform some operations.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "Despite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection.",
+        "score": 0.4811
+      },
+      {
+        "sentence": "The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders.",
+        "score": 0.446
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.3098
+      },
+      {
+        "sentence": "Finally, the script launches regsvr32 and loads the downloaded DLL payload into the process.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.3035
+      },
+      {
+        "sentence": "It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file.",
+        "score": 0.3654
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.3218
+      },
+      {
+        "sentence": "This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve.",
+        "score": 0.4617
+      },
+      {
+        "sentence": "ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+        "score": 0.3216
+      }
+    ],
+    "T1047": [
+      {
+        "sentence": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "However, Valak is a modular framework that has the capability to download additional plugins to facilitate infostealing and reconnaissance.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.3025
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.3369
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.3039
+      },
+      {
+        "sentence": "Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other.",
+        "score": 0.3713
+      },
+      {
+        "sentence": "This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time.",
+        "score": 0.319
+      },
+      {
+        "sentence": "The basic usage for oledump.py is very simple and and will print the document streams.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "This program can also be ran against multiple files if there is a use-case for a high volume of analyses that require automated workloads.",
+        "score": 0.3288
+      },
+      {
+        "sentence": "Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows.",
+        "score": 0.3247
+      },
+      {
+        "sentence": "So, that’s a quick look at two different tools that have similar capability to dump and analyze macros.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "I use both tools frequently, depending on the task at hand.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes.",
+        "score": 0.332
+      },
+      {
+        "sentence": "The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.3716
+      },
+      {
+        "sentence": "We also see a command shell opened via an interesting usage of the Exec method with a WshShell object.",
+        "score": 0.3673
+      }
+    ],
+    "T1055": [
+      {
+        "sentence": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators.",
+        "score": 0.338
+      },
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.3687
+      },
+      {
+        "sentence": "One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.",
+        "score": 0.4427
+      },
+      {
+        "sentence": "In this blog, I will briefly share a Python script I developed to crack the password protected maldocs in the event an analyst does not have access to the original email message containing the password.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.4033
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.4536
+      },
+      {
+        "sentence": "Valak Overview The Valak malware was first discovered around December 2019.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.3662
+      },
+      {
+        "sentence": "However, Valak is a modular framework that has the capability to download additional plugins to facilitate infostealing and reconnaissance.",
+        "score": 0.346
+      },
+      {
+        "sentence": "Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.",
+        "score": 0.5493
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.3437
+      },
+      {
+        "sentence": "This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.",
+        "score": 0.3466
+      },
+      {
+        "sentence": "However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar.",
+        "score": 0.3217
+      },
+      {
+        "sentence": "I found myself in this same spot earlier this week as I was looking into Valak samples.",
+        "score": 0.4567
+      },
+      {
+        "sentence": "I had obtained the ZIP from , but I did not have access to the original email.",
+        "score": 0.3062
+      },
+      {
+        "sentence": "I needed to get inside to get a peek at those sweet IOCs.",
+        "score": 0.4207
+      },
+      {
+        "sentence": "In future revisions I also plan to add the capability to pass a dictionary file to the program as an argument that will help extend its functionality.",
+        "score": 0.3787
+      },
+      {
+        "sentence": "I’m certainly no Pythonista, so YMMV, but this does get the job done.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "Please feel free to use and/or suggest changes on the github: Using the program is very simple as you can see below.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.3885
+      },
+      {
+        "sentence": "Whether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload.",
+        "score": 0.4184
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.3589
+      },
+      {
+        "sentence": "I’ve shown how to do this before, so I won’t go into much detail here.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.3615
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.4361
+      },
+      {
+        "sentence": "Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other.",
+        "score": 0.3292
+      },
+      {
+        "sentence": "This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time.",
+        "score": 0.4936
+      },
+      {
+        "sentence": "Unfortunately, I kept getting errors on this sample so I had to do that bit by hand.",
+        "score": 0.3531
+      },
+      {
+        "sentence": "More on this later in the next section. oledump.py Anyways, oledump is a program written by security researcher, Didier Stevens.",
+        "score": 0.386
+      },
+      {
+        "sentence": "As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams.",
+        "score": 0.4901
+      },
+      {
+        "sentence": "As highlighted in Figure 5 above, the basic command dumps the streams and highlights those that contain VBA macro code.",
+        "score": 0.4766
+      },
+      {
+        "sentence": "Based on this output we now know that streams A3, A4, A5, A12, and A13 all contain macros.",
+        "score": 0.4237
+      },
+      {
+        "sentence": "I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments.",
+        "score": 0.3779
+      },
+      {
+        "sentence": "The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.",
+        "score": 0.4467
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.5078
+      },
+      {
+        "sentence": "An analyst could choose to select all of the streams and dump them out at once, but here they are shown separately.",
+        "score": 0.3583
+      },
+      {
+        "sentence": "Most of the streams can be skipped over because they are comprised of garbage code.",
+        "score": 0.4935
+      },
+      {
+        "sentence": "Once we get to stream A13, we finally find something pretty interesting.",
+        "score": 0.4723
+      },
+      {
+        "sentence": "I gotta tell ya, bad guys just love arrays for obfuscating their macros.",
+        "score": 0.4193
+      },
+      {
+        "sentence": "Rarely do I stumble across a sample that doesn’t contain some sort of array declaration and then subsequent operations on the indices of that array to scramble the code.",
+        "score": 0.4786
+      },
+      {
+        "sentence": "For now, we can just copy out the dumped macros or write them to a file for future analysis.",
+        "score": 0.4511
+      },
+      {
+        "sentence": "We have one more tool to discuss before getting into the de-obfuscation . olevba Next up is olevba, a tool written by security researcher, Philippe Lagadec.",
+        "score": 0.438
+      },
+      {
+        "sentence": "However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "Usage of olevba is also quite simple and can be executed via the command line or used as a python module.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "The output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro.",
+        "score": 0.4076
+      },
+      {
+        "sentence": "For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document.",
+        "score": 0.3025
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.4571
+      },
+      {
+        "sentence": "In the next example from the olevba output, we can see suspicious keywords highlighted in red.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows.",
+        "score": 0.36
+      },
+      {
+        "sentence": "The Lib clause is a required statement in the declaration syntax and indicates the macro will be loading a DLL or some other code resource (urlmon in this case).",
+        "score": 0.4662
+      },
+      {
+        "sentence": "Finally, we get to the end of the dumped macro.",
+        "score": 0.5653
+      },
+      {
+        "sentence": "We can see here that olevba has extracted the same obfuscated array as we observed previously.",
+        "score": 0.4462
+      },
+      {
+        "sentence": "So, that’s a quick look at two different tools that have similar capability to dump and analyze macros.",
+        "score": 0.4939
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.4705
+      },
+      {
+        "sentence": "Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes.",
+        "score": 0.4832
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.5155
+      },
+      {
+        "sentence": "The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.4474
+      },
+      {
+        "sentence": "It’s about 200 lines of mostly junk code.",
+        "score": 0.4506
+      },
+      {
+        "sentence": "After removing about 75% of the code, we are left with the only lines that perform some operations.",
+        "score": 0.4351
+      },
+      {
+        "sentence": "Despite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection.",
+        "score": 0.4386
+      },
+      {
+        "sentence": "The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders.",
+        "score": 0.3662
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.4543
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.3596
+      },
+      {
+        "sentence": "We also see a command shell opened via an interesting usage of the Exec method with a WshShell object.",
+        "score": 0.4029
+      },
+      {
+        "sentence": "I’m no detection engineer, but I think that might cause some problems.",
+        "score": 0.3671
+      },
+      {
+        "sentence": "Finally, the script launches regsvr32 and loads the downloaded DLL payload into the process.",
+        "score": 0.5703
+      },
+      {
+        "sentence": "The last block is the encoded array that was covered in the previous section.",
+        "score": 0.4559
+      },
+      {
+        "sentence": "Decoding this block is easy as long as we pay attention to the split/join functions and do a simple string replacement using the two keys “love” and “xxxxxxx”.",
+        "score": 0.3901
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.5002
+      },
+      {
+        "sentence": "It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file.",
+        "score": 0.3437
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.4649
+      },
+      {
+        "sentence": "This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve.",
+        "score": 0.4442
+      },
+      {
+        "sentence": "This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+        "score": 0.3525
+      }
+    ],
+    "T1064": [
+      {
+        "sentence": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators.",
+        "score": 0.4571
+      },
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.6971
+      },
+      {
+        "sentence": "One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.",
+        "score": 0.5369
+      },
+      {
+        "sentence": "In this blog, I will briefly share a Python script I developed to crack the password protected maldocs in the event an analyst does not have access to the original email message containing the password.",
+        "score": 0.5075
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.6957
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.673
+      },
+      {
+        "sentence": "Valak Overview The Valak malware was first discovered around December 2019.",
+        "score": 0.4003
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.4551
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.4333
+      },
+      {
+        "sentence": "However, Valak is a modular framework that has the capability to download additional plugins to facilitate infostealing and reconnaissance.",
+        "score": 0.3802
+      },
+      {
+        "sentence": "Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.",
+        "score": 0.5592
+      },
+      {
+        "sentence": "Cracking the ZIP Archive The recent Valak campaigns that I have observed have all been delivered via zipped email attachments that are password protected.",
+        "score": 0.5521
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.6803
+      },
+      {
+        "sentence": "The password is provided in the body of the email.",
+        "score": 0.4238
+      },
+      {
+        "sentence": "This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.",
+        "score": 0.4806
+      },
+      {
+        "sentence": "Many analysts are likely to have access to the original email and thus can easily recover the password.",
+        "score": 0.3725
+      },
+      {
+        "sentence": "However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar.",
+        "score": 0.4721
+      },
+      {
+        "sentence": "I found myself in this same spot earlier this week as I was looking into Valak samples.",
+        "score": 0.4363
+      },
+      {
+        "sentence": "I had obtained the ZIP from , but I did not have access to the original email.",
+        "score": 0.4454
+      },
+      {
+        "sentence": "I needed to get inside to get a peek at those sweet IOCs.",
+        "score": 0.433
+      },
+      {
+        "sentence": "Ultimately, my solution was to write a quick program in Python to brute-force the password and extract the archive’s contents.",
+        "score": 0.3879
+      },
+      {
+        "sentence": "The password cracking portion is based on a regex of the known password naming convention, so it should be noted that if/when the actors change this convention this script would need to be updated.",
+        "score": 0.4139
+      },
+      {
+        "sentence": "In future revisions I also plan to add the capability to pass a dictionary file to the program as an argument that will help extend its functionality.",
+        "score": 0.4688
+      },
+      {
+        "sentence": "I’m certainly no Pythonista, so YMMV, but this does get the job done.",
+        "score": 0.417
+      },
+      {
+        "sentence": "Please feel free to use and/or suggest changes on the github: Using the program is very simple as you can see below.",
+        "score": 0.5181
+      },
+      {
+        "sentence": "Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive.",
+        "score": 0.5437
+      },
+      {
+        "sentence": "It will extract the file to your working directory and print “extraction succeeded” when the correct password is found.",
+        "score": 0.4107
+      },
+      {
+        "sentence": "This is compatible with Python3 and you will also need a couple dependencies such as pyzipper and exrex.",
+        "score": 0.4579
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.6983
+      },
+      {
+        "sentence": "These VBA macros are executed when an unsuspecting user clicks “Enable Content,” kicking off the infection chain and leading to the download of next-stage payloads.",
+        "score": 0.6589
+      },
+      {
+        "sentence": "Whether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload.",
+        "score": 0.6785
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.7025
+      },
+      {
+        "sentence": "I’ve shown how to do this before, so I won’t go into much detail here.",
+        "score": 0.4329
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.6018
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.6772
+      },
+      {
+        "sentence": "We can do better with tools.",
+        "score": 0.4255
+      },
+      {
+        "sentence": "There are lots of tools available that can help out with macro analysis, but I tend to always gravitate to either oledump or olevba.",
+        "score": 0.5882
+      },
+      {
+        "sentence": "Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other.",
+        "score": 0.5749
+      },
+      {
+        "sentence": "This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time.",
+        "score": 0.5858
+      },
+      {
+        "sentence": "Unfortunately, I kept getting errors on this sample so I had to do that bit by hand.",
+        "score": 0.4953
+      },
+      {
+        "sentence": "More on this later in the next section. oledump.py Anyways, oledump is a program written by security researcher, Didier Stevens.",
+        "score": 0.4198
+      },
+      {
+        "sentence": "As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams.",
+        "score": 0.4855
+      },
+      {
+        "sentence": "The basic usage for oledump.py is very simple and and will print the document streams.",
+        "score": 0.4493
+      },
+      {
+        "sentence": "As highlighted in Figure 5 above, the basic command dumps the streams and highlights those that contain VBA macro code.",
+        "score": 0.5635
+      },
+      {
+        "sentence": "Based on this output we now know that streams A3, A4, A5, A12, and A13 all contain macros.",
+        "score": 0.4917
+      },
+      {
+        "sentence": "I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments.",
+        "score": 0.5402
+      },
+      {
+        "sentence": "Possibly the two most important that analysts will need to use is the “decompress” option which is used with the “-v” argument and the “select” option used with “-s”.",
+        "score": 0.4596
+      },
+      {
+        "sentence": "The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.",
+        "score": 0.5255
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.6137
+      },
+      {
+        "sentence": "An analyst could choose to select all of the streams and dump them out at once, but here they are shown separately.",
+        "score": 0.37
+      },
+      {
+        "sentence": "Most of the streams can be skipped over because they are comprised of garbage code.",
+        "score": 0.4255
+      },
+      {
+        "sentence": "Once we get to stream A13, we finally find something pretty interesting.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "I gotta tell ya, bad guys just love arrays for obfuscating their macros.",
+        "score": 0.4935
+      },
+      {
+        "sentence": "Rarely do I stumble across a sample that doesn’t contain some sort of array declaration and then subsequent operations on the indices of that array to scramble the code.",
+        "score": 0.4958
+      },
+      {
+        "sentence": "For now, we can just copy out the dumped macros or write them to a file for future analysis.",
+        "score": 0.5046
+      },
+      {
+        "sentence": "We have one more tool to discuss before getting into the de-obfuscation . olevba Next up is olevba, a tool written by security researcher, Philippe Lagadec.",
+        "score": 0.4692
+      },
+      {
+        "sentence": "It has similar functionality as oledump, but its output is slightly different and comparatively less flexible as it does not have an extensive list of plugins.",
+        "score": 0.4122
+      },
+      {
+        "sentence": "However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document.",
+        "score": 0.6422
+      },
+      {
+        "sentence": "This may give analysts a quick boost to speed up an investigation when time constraints are critical.",
+        "score": 0.3864
+      },
+      {
+        "sentence": "This program can also be ran against multiple files if there is a use-case for a high volume of analyses that require automated workloads.",
+        "score": 0.4901
+      },
+      {
+        "sentence": "Usage of olevba is also quite simple and can be executed via the command line or used as a python module.",
+        "score": 0.5651
+      },
+      {
+        "sentence": "The output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro.",
+        "score": 0.5413
+      },
+      {
+        "sentence": "For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document.",
+        "score": 0.6169
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.6509
+      },
+      {
+        "sentence": "In the next example from the olevba output, we can see suspicious keywords highlighted in red.",
+        "score": 0.4965
+      },
+      {
+        "sentence": "Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows.",
+        "score": 0.4075
+      },
+      {
+        "sentence": "The Lib clause is a required statement in the declaration syntax and indicates the macro will be loading a DLL or some other code resource (urlmon in this case).",
+        "score": 0.4577
+      },
+      {
+        "sentence": "Finally, we get to the end of the dumped macro.",
+        "score": 0.5126
+      },
+      {
+        "sentence": "We can see here that olevba has extracted the same obfuscated array as we observed previously.",
+        "score": 0.5001
+      },
+      {
+        "sentence": "At the end of the output, is the triage summary, which summarized all of the suspicious keywords that were highlighted in the automated analysis.",
+        "score": 0.4412
+      },
+      {
+        "sentence": "So, that’s a quick look at two different tools that have similar capability to dump and analyze macros.",
+        "score": 0.5536
+      },
+      {
+        "sentence": "Both are easy to use and have broad functionality.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "I use both tools frequently, depending on the task at hand.",
+        "score": 0.461
+      },
+      {
+        "sentence": "I would recommend downloading both and keeping them as a part of your kit.",
+        "score": 0.4069
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.599
+      },
+      {
+        "sentence": "Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes.",
+        "score": 0.5519
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.6047
+      },
+      {
+        "sentence": "The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation.",
+        "score": 0.5302
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.5688
+      },
+      {
+        "sentence": "It’s about 200 lines of mostly junk code.",
+        "score": 0.4916
+      },
+      {
+        "sentence": "After removing about 75% of the code, we are left with the only lines that perform some operations.",
+        "score": 0.55
+      },
+      {
+        "sentence": "Despite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection.",
+        "score": 0.6033
+      },
+      {
+        "sentence": "The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders.",
+        "score": 0.5017
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.5543
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.463
+      },
+      {
+        "sentence": "We also see a command shell opened via an interesting usage of the Exec method with a WshShell object.",
+        "score": 0.5985
+      },
+      {
+        "sentence": "Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell.",
+        "score": 0.5274
+      },
+      {
+        "sentence": "I’m no detection engineer, but I think that might cause some problems.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "Finally, the script launches regsvr32 and loads the downloaded DLL payload into the process.",
+        "score": 0.363
+      },
+      {
+        "sentence": "The last block is the encoded array that was covered in the previous section.",
+        "score": 0.5315
+      },
+      {
+        "sentence": "Decoding this block is easy as long as we pay attention to the split/join functions and do a simple string replacement using the two keys “love” and “xxxxxxx”.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.4231
+      },
+      {
+        "sentence": "It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file.",
+        "score": 0.3882
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.5361
+      },
+      {
+        "sentence": "I’ve shared a few resources and tools that can hopefully enable analysts to improve the velocity and fidelity of their data gathering for triage and investigations.",
+        "score": 0.4597
+      },
+      {
+        "sentence": "This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve.",
+        "score": 0.5503
+      },
+      {
+        "sentence": "This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward.",
+        "score": 0.4311
+      },
+      {
+        "sentence": "Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action.",
+        "score": 0.4377
+      },
+      {
+        "sentence": "ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+        "score": 0.5049
+      }
+    ],
+    "T1105": [
+      {
+        "sentence": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.3615
+      },
+      {
+        "sentence": "One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.3886
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.3719
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.7519
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.4011
+      },
+      {
+        "sentence": "However, Valak is a modular framework that has the capability to download additional plugins to facilitate infostealing and reconnaissance.",
+        "score": 0.7011
+      },
+      {
+        "sentence": "Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.",
+        "score": 0.4579
+      },
+      {
+        "sentence": "Cracking the ZIP Archive The recent Valak campaigns that I have observed have all been delivered via zipped email attachments that are password protected.",
+        "score": 0.3354
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.3901
+      },
+      {
+        "sentence": "However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar.",
+        "score": 0.3765
+      },
+      {
+        "sentence": "I found myself in this same spot earlier this week as I was looking into Valak samples.",
+        "score": 0.3837
+      },
+      {
+        "sentence": "I had obtained the ZIP from , but I did not have access to the original email.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "Ultimately, my solution was to write a quick program in Python to brute-force the password and extract the archive’s contents.",
+        "score": 0.3108
+      },
+      {
+        "sentence": "In future revisions I also plan to add the capability to pass a dictionary file to the program as an argument that will help extend its functionality.",
+        "score": 0.3663
+      },
+      {
+        "sentence": "Please feel free to use and/or suggest changes on the github: Using the program is very simple as you can see below.",
+        "score": 0.3246
+      },
+      {
+        "sentence": "Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive.",
+        "score": 0.3679
+      },
+      {
+        "sentence": "It will extract the file to your working directory and print “extraction succeeded” when the correct password is found.",
+        "score": 0.3441
+      },
+      {
+        "sentence": "This is compatible with Python3 and you will also need a couple dependencies such as pyzipper and exrex.",
+        "score": 0.4339
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.4066
+      },
+      {
+        "sentence": "These VBA macros are executed when an unsuspecting user clicks “Enable Content,” kicking off the infection chain and leading to the download of next-stage payloads.",
+        "score": 0.5583
+      },
+      {
+        "sentence": "Whether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload.",
+        "score": 0.4404
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.3033
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "There are lots of tools available that can help out with macro analysis, but I tend to always gravitate to either oledump or olevba.",
+        "score": 0.3779
+      },
+      {
+        "sentence": "Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time.",
+        "score": 0.3847
+      },
+      {
+        "sentence": "Unfortunately, I kept getting errors on this sample so I had to do that bit by hand.",
+        "score": 0.3262
+      },
+      {
+        "sentence": "As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams.",
+        "score": 0.3689
+      },
+      {
+        "sentence": "The basic usage for oledump.py is very simple and and will print the document streams.",
+        "score": 0.3422
+      },
+      {
+        "sentence": "As highlighted in Figure 5 above, the basic command dumps the streams and highlights those that contain VBA macro code.",
+        "score": 0.4111
+      },
+      {
+        "sentence": "I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments.",
+        "score": 0.3218
+      },
+      {
+        "sentence": "Possibly the two most important that analysts will need to use is the “decompress” option which is used with the “-v” argument and the “select” option used with “-s”.",
+        "score": 0.308
+      },
+      {
+        "sentence": "The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.3462
+      },
+      {
+        "sentence": "Once we get to stream A13, we finally find something pretty interesting.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "I gotta tell ya, bad guys just love arrays for obfuscating their macros.",
+        "score": 0.3007
+      },
+      {
+        "sentence": "For now, we can just copy out the dumped macros or write them to a file for future analysis.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "We have one more tool to discuss before getting into the de-obfuscation . olevba Next up is olevba, a tool written by security researcher, Philippe Lagadec.",
+        "score": 0.3517
+      },
+      {
+        "sentence": "It has similar functionality as oledump, but its output is slightly different and comparatively less flexible as it does not have an extensive list of plugins.",
+        "score": 0.3341
+      },
+      {
+        "sentence": "However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document.",
+        "score": 0.3914
+      },
+      {
+        "sentence": "This program can also be ran against multiple files if there is a use-case for a high volume of analyses that require automated workloads.",
+        "score": 0.3226
+      },
+      {
+        "sentence": "Usage of olevba is also quite simple and can be executed via the command line or used as a python module.",
+        "score": 0.3812
+      },
+      {
+        "sentence": "The output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro.",
+        "score": 0.3464
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.32
+      },
+      {
+        "sentence": "Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows.",
+        "score": 0.7434
+      },
+      {
+        "sentence": "The Lib clause is a required statement in the declaration syntax and indicates the macro will be loading a DLL or some other code resource (urlmon in this case).",
+        "score": 0.5896
+      },
+      {
+        "sentence": "We can see here that olevba has extracted the same obfuscated array as we observed previously.",
+        "score": 0.3278
+      },
+      {
+        "sentence": "So, that’s a quick look at two different tools that have similar capability to dump and analyze macros.",
+        "score": 0.4076
+      },
+      {
+        "sentence": "Both are easy to use and have broad functionality.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "I use both tools frequently, depending on the task at hand.",
+        "score": 0.3598
+      },
+      {
+        "sentence": "I would recommend downloading both and keeping them as a part of your kit.",
+        "score": 0.5513
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.3524
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.4131
+      },
+      {
+        "sentence": "The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation.",
+        "score": 0.439
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "After removing about 75% of the code, we are left with the only lines that perform some operations.",
+        "score": 0.3481
+      },
+      {
+        "sentence": "The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders.",
+        "score": 0.3983
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.7639
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.6929
+      },
+      {
+        "sentence": "We also see a command shell opened via an interesting usage of the Exec method with a WshShell object.",
+        "score": 0.3553
+      },
+      {
+        "sentence": "Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell.",
+        "score": 0.6623
+      },
+      {
+        "sentence": "Finally, the script launches regsvr32 and loads the downloaded DLL payload into the process.",
+        "score": 0.4352
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.4958
+      },
+      {
+        "sentence": "It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file.",
+        "score": 0.5801
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.307
+      },
+      {
+        "sentence": "I’ve shared a few resources and tools that can hopefully enable analysts to improve the velocity and fidelity of their data gathering for triage and investigations.",
+        "score": 0.3405
+      },
+      {
+        "sentence": "This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward.",
+        "score": 0.3099
+      },
+      {
+        "sentence": "Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action.",
+        "score": 0.3758
+      },
+      {
+        "sentence": "ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+        "score": 0.3652
+      }
+    ],
+    "T1193": [
+      {
+        "sentence": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators.",
+        "score": 0.429
+      },
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.5618
+      },
+      {
+        "sentence": "One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.",
+        "score": 0.5218
+      },
+      {
+        "sentence": "In this blog, I will briefly share a Python script I developed to crack the password protected maldocs in the event an analyst does not have access to the original email message containing the password.",
+        "score": 0.6063
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.4941
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.5457
+      },
+      {
+        "sentence": "Valak Overview The Valak malware was first discovered around December 2019.",
+        "score": 0.3473
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.4392
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.396
+      },
+      {
+        "sentence": "Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.",
+        "score": 0.4631
+      },
+      {
+        "sentence": "Cracking the ZIP Archive The recent Valak campaigns that I have observed have all been delivered via zipped email attachments that are password protected.",
+        "score": 0.796
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.6688
+      },
+      {
+        "sentence": "The password is provided in the body of the email.",
+        "score": 0.6305
+      },
+      {
+        "sentence": "This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.",
+        "score": 0.5527
+      },
+      {
+        "sentence": "Many analysts are likely to have access to the original email and thus can easily recover the password.",
+        "score": 0.5024
+      },
+      {
+        "sentence": "However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar.",
+        "score": 0.632
+      },
+      {
+        "sentence": "I found myself in this same spot earlier this week as I was looking into Valak samples.",
+        "score": 0.357
+      },
+      {
+        "sentence": "I had obtained the ZIP from , but I did not have access to the original email.",
+        "score": 0.6618
+      },
+      {
+        "sentence": "I needed to get inside to get a peek at those sweet IOCs.",
+        "score": 0.3815
+      },
+      {
+        "sentence": "Ultimately, my solution was to write a quick program in Python to brute-force the password and extract the archive’s contents.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "The password cracking portion is based on a regex of the known password naming convention, so it should be noted that if/when the actors change this convention this script would need to be updated.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "I’m certainly no Pythonista, so YMMV, but this does get the job done.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "Please feel free to use and/or suggest changes on the github: Using the program is very simple as you can see below.",
+        "score": 0.4014
+      },
+      {
+        "sentence": "Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive.",
+        "score": 0.3538
+      },
+      {
+        "sentence": "It will extract the file to your working directory and print “extraction succeeded” when the correct password is found.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "This is compatible with Python3 and you will also need a couple dependencies such as pyzipper and exrex.",
+        "score": 0.3219
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.6335
+      },
+      {
+        "sentence": "These VBA macros are executed when an unsuspecting user clicks “Enable Content,” kicking off the infection chain and leading to the download of next-stage payloads.",
+        "score": 0.5568
+      },
+      {
+        "sentence": "Whether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload.",
+        "score": 0.6603
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.5664
+      },
+      {
+        "sentence": "I’ve shown how to do this before, so I won’t go into much detail here.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.3557
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.4991
+      },
+      {
+        "sentence": "There are lots of tools available that can help out with macro analysis, but I tend to always gravitate to either oledump or olevba.",
+        "score": 0.3821
+      },
+      {
+        "sentence": "Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other.",
+        "score": 0.3592
+      },
+      {
+        "sentence": "I will also give an honorable mention to ViperMonkey.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "Unfortunately, I kept getting errors on this sample so I had to do that bit by hand.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams.",
+        "score": 0.3147
+      },
+      {
+        "sentence": "The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.",
+        "score": 0.343
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.4634
+      },
+      {
+        "sentence": "I gotta tell ya, bad guys just love arrays for obfuscating their macros.",
+        "score": 0.3479
+      },
+      {
+        "sentence": "Rarely do I stumble across a sample that doesn’t contain some sort of array declaration and then subsequent operations on the indices of that array to scramble the code.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "We have one more tool to discuss before getting into the de-obfuscation . olevba Next up is olevba, a tool written by security researcher, Philippe Lagadec.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "This may give analysts a quick boost to speed up an investigation when time constraints are critical.",
+        "score": 0.3114
+      },
+      {
+        "sentence": "This program can also be ran against multiple files if there is a use-case for a high volume of analyses that require automated workloads.",
+        "score": 0.3092
+      },
+      {
+        "sentence": "The output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro.",
+        "score": 0.3491
+      },
+      {
+        "sentence": "For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document.",
+        "score": 0.5644
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.4477
+      },
+      {
+        "sentence": "In the next example from the olevba output, we can see suspicious keywords highlighted in red.",
+        "score": 0.3102
+      },
+      {
+        "sentence": "Finally, we get to the end of the dumped macro.",
+        "score": 0.3196
+      },
+      {
+        "sentence": "We can see here that olevba has extracted the same obfuscated array as we observed previously.",
+        "score": 0.3764
+      },
+      {
+        "sentence": "At the end of the output, is the triage summary, which summarized all of the suspicious keywords that were highlighted in the automated analysis.",
+        "score": 0.3537
+      },
+      {
+        "sentence": "So, that’s a quick look at two different tools that have similar capability to dump and analyze macros.",
+        "score": 0.3133
+      },
+      {
+        "sentence": "I would recommend downloading both and keeping them as a part of your kit.",
+        "score": 0.4089
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.4649
+      },
+      {
+        "sentence": "Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes.",
+        "score": 0.3922
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.4559
+      },
+      {
+        "sentence": "The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation.",
+        "score": 0.3816
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.544
+      },
+      {
+        "sentence": "It’s about 200 lines of mostly junk code.",
+        "score": 0.3463
+      },
+      {
+        "sentence": "After removing about 75% of the code, we are left with the only lines that perform some operations.",
+        "score": 0.3275
+      },
+      {
+        "sentence": "Despite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection.",
+        "score": 0.5005
+      },
+      {
+        "sentence": "The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders.",
+        "score": 0.4552
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.4099
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "We also see a command shell opened via an interesting usage of the Exec method with a WshShell object.",
+        "score": 0.3039
+      },
+      {
+        "sentence": "Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "I’m no detection engineer, but I think that might cause some problems.",
+        "score": 0.3262
+      },
+      {
+        "sentence": "The last block is the encoded array that was covered in the previous section.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "Decoding this block is easy as long as we pay attention to the split/join functions and do a simple string replacement using the two keys “love” and “xxxxxxx”.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.3441
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.4518
+      },
+      {
+        "sentence": "I’ve shared a few resources and tools that can hopefully enable analysts to improve the velocity and fidelity of their data gathering for triage and investigations.",
+        "score": 0.355
+      },
+      {
+        "sentence": "This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve.",
+        "score": 0.4762
+      },
+      {
+        "sentence": "This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward.",
+        "score": 0.4049
+      },
+      {
+        "sentence": "Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action.",
+        "score": 0.4424
+      },
+      {
+        "sentence": "ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+        "score": 0.4622
+      }
+    ],
+    "T1204": [
+      {
+        "sentence": "Summary The Valak malware variant appears to be an emerging threat due to an increased volume of campaign activity by its operators.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.5063
+      },
+      {
+        "sentence": "One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.",
+        "score": 0.403
+      },
+      {
+        "sentence": "In this blog, I will briefly share a Python script I developed to crack the password protected maldocs in the event an analyst does not have access to the original email message containing the password.",
+        "score": 0.3404
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.4028
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.391
+      },
+      {
+        "sentence": "Valak Overview The Valak malware was first discovered around December 2019.",
+        "score": 0.3158
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.3329
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.3372
+      },
+      {
+        "sentence": "Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.",
+        "score": 0.4746
+      },
+      {
+        "sentence": "Cracking the ZIP Archive The recent Valak campaigns that I have observed have all been delivered via zipped email attachments that are password protected.",
+        "score": 0.4423
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.4569
+      },
+      {
+        "sentence": "The password is provided in the body of the email.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.",
+        "score": 0.5243
+      },
+      {
+        "sentence": "However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "I found myself in this same spot earlier this week as I was looking into Valak samples.",
+        "score": 0.346
+      },
+      {
+        "sentence": "I had obtained the ZIP from , but I did not have access to the original email.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "I needed to get inside to get a peek at those sweet IOCs.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "I’m certainly no Pythonista, so YMMV, but this does get the job done.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Please feel free to use and/or suggest changes on the github: Using the program is very simple as you can see below.",
+        "score": 0.4473
+      },
+      {
+        "sentence": "This is compatible with Python3 and you will also need a couple dependencies such as pyzipper and exrex.",
+        "score": 0.3271
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.4128
+      },
+      {
+        "sentence": "These VBA macros are executed when an unsuspecting user clicks “Enable Content,” kicking off the infection chain and leading to the download of next-stage payloads.",
+        "score": 0.746
+      },
+      {
+        "sentence": "Whether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload.",
+        "score": 0.5254
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.4817
+      },
+      {
+        "sentence": "I’ve shown how to do this before, so I won’t go into much detail here.",
+        "score": 0.3751
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.4368
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "Unfortunately, I kept getting errors on this sample so I had to do that bit by hand.",
+        "score": 0.3575
+      },
+      {
+        "sentence": "The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.",
+        "score": 0.3069
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.3637
+      },
+      {
+        "sentence": "However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document.",
+        "score": 0.338
+      },
+      {
+        "sentence": "For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document.",
+        "score": 0.6327
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.348
+      },
+      {
+        "sentence": "Both are easy to use and have broad functionality.",
+        "score": 0.3596
+      },
+      {
+        "sentence": "I use both tools frequently, depending on the task at hand.",
+        "score": 0.3426
+      },
+      {
+        "sentence": "I would recommend downloading both and keeping them as a part of your kit.",
+        "score": 0.4262
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.3681
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.3564
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.3913
+      },
+      {
+        "sentence": "Despite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection.",
+        "score": 0.3233
+      },
+      {
+        "sentence": "The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders.",
+        "score": 0.3838
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.3966
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.3339
+      },
+      {
+        "sentence": "Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell.",
+        "score": 0.4531
+      },
+      {
+        "sentence": "The last block is the encoded array that was covered in the previous section.",
+        "score": 0.3217
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.3472
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.35
+      },
+      {
+        "sentence": "This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward.",
+        "score": 0.3703
+      },
+      {
+        "sentence": "Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+        "score": 0.3653
+      }
+    ],
+    "T1117": [
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.3196
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.3011
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.348
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.3528
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.",
+        "score": 0.3565
+      },
+      {
+        "sentence": "In future revisions I also plan to add the capability to pass a dictionary file to the program as an argument that will help extend its functionality.",
+        "score": 0.3331
+      },
+      {
+        "sentence": "Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive.",
+        "score": 0.3673
+      },
+      {
+        "sentence": "Whether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.3708
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.3721
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.3892
+      },
+      {
+        "sentence": "This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time.",
+        "score": 0.4044
+      },
+      {
+        "sentence": "As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "As highlighted in Figure 5 above, the basic command dumps the streams and highlights those that contain VBA macro code.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments.",
+        "score": 0.3989
+      },
+      {
+        "sentence": "The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.",
+        "score": 0.3795
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.3941
+      },
+      {
+        "sentence": "I gotta tell ya, bad guys just love arrays for obfuscating their macros.",
+        "score": 0.3325
+      },
+      {
+        "sentence": "For now, we can just copy out the dumped macros or write them to a file for future analysis.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "We have one more tool to discuss before getting into the de-obfuscation . olevba Next up is olevba, a tool written by security researcher, Philippe Lagadec.",
+        "score": 0.3558
+      },
+      {
+        "sentence": "However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document.",
+        "score": 0.3185
+      },
+      {
+        "sentence": "Usage of olevba is also quite simple and can be executed via the command line or used as a python module.",
+        "score": 0.3817
+      },
+      {
+        "sentence": "The output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.3617
+      },
+      {
+        "sentence": "Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows.",
+        "score": 0.3545
+      },
+      {
+        "sentence": "The Lib clause is a required statement in the declaration syntax and indicates the macro will be loading a DLL or some other code resource (urlmon in this case).",
+        "score": 0.4472
+      },
+      {
+        "sentence": "Finally, we get to the end of the dumped macro.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "We can see here that olevba has extracted the same obfuscated array as we observed previously.",
+        "score": 0.3352
+      },
+      {
+        "sentence": "So, that’s a quick look at two different tools that have similar capability to dump and analyze macros.",
+        "score": 0.4089
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.3761
+      },
+      {
+        "sentence": "Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes.",
+        "score": 0.4348
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.3662
+      },
+      {
+        "sentence": "The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.3519
+      },
+      {
+        "sentence": "After removing about 75% of the code, we are left with the only lines that perform some operations.",
+        "score": 0.3434
+      },
+      {
+        "sentence": "Despite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection.",
+        "score": 0.3577
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.4362
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.3898
+      },
+      {
+        "sentence": "We also see a command shell opened via an interesting usage of the Exec method with a WshShell object.",
+        "score": 0.4452
+      },
+      {
+        "sentence": "Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell.",
+        "score": 0.3469
+      },
+      {
+        "sentence": "Finally, the script launches regsvr32 and loads the downloaded DLL payload into the process.",
+        "score": 0.7877
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.4216
+      },
+      {
+        "sentence": "It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file.",
+        "score": 0.3944
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve.",
+        "score": 0.3884
+      }
+    ],
+    "T1140": [
+      {
+        "sentence": "Besides its relative newness, Valak is also noteworthy for a few of its other operational aspects such as an interesting execution chain and some unconventional tactics leveraged in the VB macro script of its maldoc downloader.",
+        "score": 0.3466
+      },
+      {
+        "sentence": "One of these interesting samples of the Valak malware came across my desk earlier this week, so I wanted to share some additional details that may help others in their own analysis and perhaps provide some insight into how to approach its detection, response, and remediation.",
+        "score": 0.4451
+      },
+      {
+        "sentence": "In this blog, I will briefly share a Python script I developed to crack the password protected maldocs in the event an analyst does not have access to the original email message containing the password.",
+        "score": 0.5046
+      },
+      {
+        "sentence": "Next, I will cover a few different methods that can be utilized to extract the VBA macros from the document.",
+        "score": 0.5822
+      },
+      {
+        "sentence": "Finally, I will show a quick how-to with some basic static analysis techniques to de-obfuscate the macro script, and review the anti-analysis/evasion tactics within the document, and extract the indicators of compromise (IOCs) therein.",
+        "score": 0.6969
+      },
+      {
+        "sentence": "Valak Overview The Valak malware was first discovered around December 2019.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "It appears to be generally used as a downloader to deliver secondary malware payloads for other eCrime actors.",
+        "score": 0.535
+      },
+      {
+        "sentence": "In particular, it appears that Lunar Spider‘s Bokbot (IcedID) is a common follow-up malware in recent campaigns.",
+        "score": 0.327
+      },
+      {
+        "sentence": "Security researchers at Cybereason recently produced a great write up detailing these additional capabilities and its overall execution chain so I would recommend checking out this resource for more technical details.",
+        "score": 0.4462
+      },
+      {
+        "sentence": "Cracking the ZIP Archive The recent Valak campaigns that I have observed have all been delivered via zipped email attachments that are password protected.",
+        "score": 0.4607
+      },
+      {
+        "sentence": "The ZIP archive contains a Microsoft Word document that is weaponized with macros.",
+        "score": 0.5013
+      },
+      {
+        "sentence": "The password is provided in the body of the email.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "This tactic serves a dual purpose for the threat actor as it enables some basic sandbox evasion, but also supports the social engineering pretext by building trust with the intended victim and appearing more secure.",
+        "score": 0.3071
+      },
+      {
+        "sentence": "Many analysts are likely to have access to the original email and thus can easily recover the password.",
+        "score": 0.4332
+      },
+      {
+        "sentence": "However, in some cases analysts may encounter scenarios where they obtain the ZIP archive containing the maldoc, but do not have access to the email for a variety of reasons whether due to privacy limitations or simply sourcing issues from an online repository or similar.",
+        "score": 0.4165
+      },
+      {
+        "sentence": "I found myself in this same spot earlier this week as I was looking into Valak samples.",
+        "score": 0.4301
+      },
+      {
+        "sentence": "I had obtained the ZIP from , but I did not have access to the original email.",
+        "score": 0.4506
+      },
+      {
+        "sentence": "I needed to get inside to get a peek at those sweet IOCs.",
+        "score": 0.3689
+      },
+      {
+        "sentence": "Ultimately, my solution was to write a quick program in Python to brute-force the password and extract the archive’s contents.",
+        "score": 0.3218
+      },
+      {
+        "sentence": "The password cracking portion is based on a regex of the known password naming convention, so it should be noted that if/when the actors change this convention this script would need to be updated.",
+        "score": 0.3416
+      },
+      {
+        "sentence": "In future revisions I also plan to add the capability to pass a dictionary file to the program as an argument that will help extend its functionality.",
+        "score": 0.4455
+      },
+      {
+        "sentence": "Please feel free to use and/or suggest changes on the github: Using the program is very simple as you can see below.",
+        "score": 0.4047
+      },
+      {
+        "sentence": "Just invoke the Python interpreter and then the script’s name with the argument “-f” followed by the name of the ZIP archive.",
+        "score": 0.4159
+      },
+      {
+        "sentence": "It will extract the file to your working directory and print “extraction succeeded” when the correct password is found.",
+        "score": 0.4446
+      },
+      {
+        "sentence": "This is compatible with Python3 and you will also need a couple dependencies such as pyzipper and exrex.",
+        "score": 0.402
+      },
+      {
+        "sentence": "Extracting the VBA Macro A Microsoft Office document weaponized with macros is nothing new.",
+        "score": 0.5671
+      },
+      {
+        "sentence": "These VBA macros are executed when an unsuspecting user clicks “Enable Content,” kicking off the infection chain and leading to the download of next-stage payloads.",
+        "score": 0.3801
+      },
+      {
+        "sentence": "Whether opening this particular maldoc with a known password or using my tool, the next step is focused on extracting the VBA macro code from the Word DOC itself, which is the downloader for the initial Valak DLL payload.",
+        "score": 0.6088
+      },
+      {
+        "sentence": "The following document is what I recovered after running the script: - Filename: dictate.06.20.doc - SHA256: a4f1ea5dd434deee93bdf312f658a7a26f767c7683601fa8b23ef096392eef17 Usually, analysts can quickly review these macros by simply opening up the onboard VBA project editor within the MS Word Program.",
+        "score": 0.592
+      },
+      {
+        "sentence": "I’ve shown how to do this before, so I won’t go into much detail here.",
+        "score": 0.4035
+      },
+      {
+        "sentence": "Suffice to say that you can hold down SHIFT while stepping through the macro to disable the auto open function or simply search through the modules contained within the project and copy out the VBA code.",
+        "score": 0.4375
+      },
+      {
+        "sentence": "This approach is fairly straightforward, but can often be slow due to its manual nature, and if the macro is heavily obfuscated, can unnecessarily complicate analysis.",
+        "score": 0.5903
+      },
+      {
+        "sentence": "There are lots of tools available that can help out with macro analysis, but I tend to always gravitate to either oledump or olevba.",
+        "score": 0.4073
+      },
+      {
+        "sentence": "Both work great for this type of task and I will briefly compare/contrast how to use these to extract the macros and also provide a little insight into their pros and cons and maybe why in certain situations you would want to use one over the other.",
+        "score": 0.5132
+      },
+      {
+        "sentence": "This is is a powerful tool that includes similar functionality to dump OLE steams and parse the VBA macro, but also includes a VBA emulation engine that can automatically de-obfuscate the code as well — saving a ton of time.",
+        "score": 0.719
+      },
+      {
+        "sentence": "Unfortunately, I kept getting errors on this sample so I had to do that bit by hand.",
+        "score": 0.3875
+      },
+      {
+        "sentence": "More on this later in the next section. oledump.py Anyways, oledump is a program written by security researcher, Didier Stevens.",
+        "score": 0.3804
+      },
+      {
+        "sentence": "As you might have guessed, it dumps the streams from OLE files (DOC, XLS, PPT, etc…) and has wide variety of plugins that you can use to further manipulate the dumped streams.",
+        "score": 0.5487
+      },
+      {
+        "sentence": "The basic usage for oledump.py is very simple and and will print the document streams.",
+        "score": 0.3294
+      },
+      {
+        "sentence": "As highlighted in Figure 5 above, the basic command dumps the streams and highlights those that contain VBA macro code.",
+        "score": 0.4592
+      },
+      {
+        "sentence": "Based on this output we now know that streams A3, A4, A5, A12, and A13 all contain macros.",
+        "score": 0.3729
+      },
+      {
+        "sentence": "I like oledump for its plugin flexibility and additional analysis capabilities, but it also has many options that come onboard that can be passed as arguments.",
+        "score": 0.3692
+      },
+      {
+        "sentence": "Possibly the two most important that analysts will need to use is the “decompress” option which is used with the “-v” argument and the “select” option used with “-s”.",
+        "score": 0.5439
+      },
+      {
+        "sentence": "The raw dump of the OLE streams are compressed, so using this option combo to select streams of interest is the best way to get the code human readable on the quick.",
+        "score": 0.6293
+      },
+      {
+        "sentence": "Here we have our first look at the obfuscated code contained within the functions of the macro.",
+        "score": 0.6351
+      },
+      {
+        "sentence": "An analyst could choose to select all of the streams and dump them out at once, but here they are shown separately.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "Most of the streams can be skipped over because they are comprised of garbage code.",
+        "score": 0.388
+      },
+      {
+        "sentence": "Once we get to stream A13, we finally find something pretty interesting.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "I gotta tell ya, bad guys just love arrays for obfuscating their macros.",
+        "score": 0.5747
+      },
+      {
+        "sentence": "Rarely do I stumble across a sample that doesn’t contain some sort of array declaration and then subsequent operations on the indices of that array to scramble the code.",
+        "score": 0.4609
+      },
+      {
+        "sentence": "For now, we can just copy out the dumped macros or write them to a file for future analysis.",
+        "score": 0.418
+      },
+      {
+        "sentence": "We have one more tool to discuss before getting into the de-obfuscation . olevba Next up is olevba, a tool written by security researcher, Philippe Lagadec.",
+        "score": 0.725
+      },
+      {
+        "sentence": "However, a noteworthy feature of oledump is its default triage mode that performs an initial analysis of the macro and provides a summary of suspicious strings and operations that are identified in the document.",
+        "score": 0.3926
+      },
+      {
+        "sentence": "This may give analysts a quick boost to speed up an investigation when time constraints are critical.",
+        "score": 0.4788
+      },
+      {
+        "sentence": "This program can also be ran against multiple files if there is a use-case for a high volume of analyses that require automated workloads.",
+        "score": 0.3681
+      },
+      {
+        "sentence": "Usage of olevba is also quite simple and can be executed via the command line or used as a python module.",
+        "score": 0.3306
+      },
+      {
+        "sentence": "The output is for both tools is generally similar, although olevba does include a feature that highlights potentially suspicious keywords in the dumped macro.",
+        "score": 0.5231
+      },
+      {
+        "sentence": "For example, it will highlight the “AutoOpen()” function in bright yellow, which is typically the initial indicator an analyst will seek out as this function is what will immediately execute when a victim opens the document.",
+        "score": 0.466
+      },
+      {
+        "sentence": "Keep in mind that macros are often obfuscated and not necessarily linear in operation.",
+        "score": 0.6057
+      },
+      {
+        "sentence": "In the next example from the olevba output, we can see suspicious keywords highlighted in red.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "Here, we see a declare statement that includes what appears to be capability to download files from via the URLDownloadToFile function, which is part of the urlmon library built in to Windows.",
+        "score": 0.3949
+      },
+      {
+        "sentence": "The Lib clause is a required statement in the declaration syntax and indicates the macro will be loading a DLL or some other code resource (urlmon in this case).",
+        "score": 0.4082
+      },
+      {
+        "sentence": "Finally, we get to the end of the dumped macro.",
+        "score": 0.5093
+      },
+      {
+        "sentence": "We can see here that olevba has extracted the same obfuscated array as we observed previously.",
+        "score": 0.7088
+      },
+      {
+        "sentence": "At the end of the output, is the triage summary, which summarized all of the suspicious keywords that were highlighted in the automated analysis.",
+        "score": 0.304
+      },
+      {
+        "sentence": "So, that’s a quick look at two different tools that have similar capability to dump and analyze macros.",
+        "score": 0.5327
+      },
+      {
+        "sentence": "Both are easy to use and have broad functionality.",
+        "score": 0.367
+      },
+      {
+        "sentence": "I use both tools frequently, depending on the task at hand.",
+        "score": 0.4032
+      },
+      {
+        "sentence": "I would recommend downloading both and keeping them as a part of your kit.",
+        "score": 0.4692
+      },
+      {
+        "sentence": "De-obfuscating the Macro Now that the macro code has been obtained, the final analysis step here is to de-obfuscate the macro.",
+        "score": 0.78
+      },
+      {
+        "sentence": "Obfuscation and anti-analysis techniques are commonly employed to evade detection and avoid complete analysis by automated sandboxes.",
+        "score": 0.4922
+      },
+      {
+        "sentence": "This particular macro for the Valak malware sample is not that complicated and so it can be decoded fairly easily.",
+        "score": 0.7647
+      },
+      {
+        "sentence": "The tools covered above include several options that can aid in this type of de-obfuscation such as manipulating and decoding strings, but it isn’t really necessary in this situation.",
+        "score": 0.8635
+      },
+      {
+        "sentence": "Compared to some of the bizarrely extensive obfuscation in a lot of other eCrime downloaders, this example is downright simple.",
+        "score": 0.5431
+      },
+      {
+        "sentence": "It’s about 200 lines of mostly junk code.",
+        "score": 0.4264
+      },
+      {
+        "sentence": "After removing about 75% of the code, we are left with the only lines that perform some operations.",
+        "score": 0.4967
+      },
+      {
+        "sentence": "Despite the relative simplicity of the macro obfuscation, this macro code is pretty interesting for a few of its features related to evading detection.",
+        "score": 0.4954
+      },
+      {
+        "sentence": "The operators have used a few sneaky tricks that diverge from a lot of classic TTPs that are observed in similar eCrime downloaders.",
+        "score": 0.3825
+      },
+      {
+        "sentence": "Notably, here we see a complete absence of PowerShell and/or the WebClent class to download the payload from the URL.",
+        "score": 0.4524
+      },
+      {
+        "sentence": "Instead we see the usage of the URLDownloadToFile, which is a VBA function along with the urlmon Windows library.",
+        "score": 0.4657
+      },
+      {
+        "sentence": "We also see a command shell opened via an interesting usage of the Exec method with a WshShell object.",
+        "score": 0.3851
+      },
+      {
+        "sentence": "Let me repeat that: the adversary just got shell and downloaded a file without using CMD or PowerShell.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "I’m no detection engineer, but I think that might cause some problems.",
+        "score": 0.3508
+      },
+      {
+        "sentence": "Finally, the script launches regsvr32 and loads the downloaded DLL payload into the process.",
+        "score": 0.3549
+      },
+      {
+        "sentence": "The last block is the encoded array that was covered in the previous section.",
+        "score": 0.6676
+      },
+      {
+        "sentence": "Decoding this block is easy as long as we pay attention to the split/join functions and do a simple string replacement using the two keys “love” and “xxxxxxx”.",
+        "score": 0.5834
+      },
+      {
+        "sentence": "The array ultimately decodes into the URL where the actors have stashed the Valak DLL.",
+        "score": 0.6807
+      },
+      {
+        "sentence": "It also includes an argument to write that downloaded file into the “C:\\ProgramData” directory as a randomly named .dat file.",
+        "score": 0.4429
+      },
+      {
+        "sentence": "Here’s what the final pieces look like all cleaned up: Conclusion So that’s it, my take on conducting analysis on a recent Valak sample.",
+        "score": 0.5552
+      },
+      {
+        "sentence": "I’ve shared a few resources and tools that can hopefully enable analysts to improve the velocity and fidelity of their data gathering for triage and investigations.",
+        "score": 0.3352
+      },
+      {
+        "sentence": "This variant of Valak is deceptively simple in its obfuscation, but definitely has some intriguing evasion and anti-analysis tricks up its sleeve.",
+        "score": 0.5421
+      },
+      {
+        "sentence": "This is a newer threat that is just now emerging into the landscape so it remains to be seen what its ultimate impact may be going forward.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "Its association with other high profile eCrime threats could indicate a continuing trend towards collaboration on high volume campaigns, sophisticated development cycles, and devastating post-intrusion action.",
+        "score": 0.3757
+      },
+      {
+        "sentence": "ATT&CK tagging is provided below, and I’ve included only the IOCs from this specific maldoc, but others from the overall campaign are available thanks to Brad Duncan.",
+        "score": 0.3899
+      }
+    ]
+  }
+}

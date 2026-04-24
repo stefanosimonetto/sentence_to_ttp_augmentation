@@ -1,0 +1,318 @@
+{
+  "original_txt": "Executive Summary\nWhile advanced persistent threats get the most breathless coverage in the news, many threat actors have money on their mind rather than espionage. You can learn a lot about the innovations used by these financially motivated groups by watching banking Trojans.\nBecause attackers constantly create new techniques to evade detection and perform malicious acts, studying monetarily motivated malware can help defenders understand threat actor tactics and protect organizations more effectively. Some of the banking Trojans described here are historically known for being financial malware, but now they’re primarily used as infrastructure to deliver other malware. Which is to say, by preventing techniques used by banking Trojans, you can also stop other types of threats.\nWe’ll survey techniques used by notorious banking Trojan families to evade detection, steal sensitive data and manipulate data. We’ll also describe how those techniques can be blocked. These families include Zeus, Kronos, Trickbot, IcedID, Emotet and Dridex.\nPalo Alto Networks customers are protected from such attacks using Cortex XDR and WildFire.\n| Banking Trojan families' techniques discussed | Zeus, Kronos, Trickbot, IcedID, Emotet, Dridex |\nWhat Are Webinjects?\nWebinjects are modules that can inject HTML or JavaScript before a web page is rendered, and are often used to trick users. They are known to be abused by banking Trojans, as well as being employed to steal credentials and manipulate form data inside web pages. In most banking Trojan families, there is at least one webinjects module.\nAn early stager of the banking Trojan usually injects the banking Trojan’s main bot into a Windows process, and that process injects the webinjects module into the machine’s available web browser processes as shown in Figure 1.\nThe webinjects module hooks the API calls responsible for sending, receiving or encrypting data sent to a web server. By intercepting the data before it is encrypted, the malware can read HTTP-POST headers and manipulate them on the fly.\nBy fully controlling the HTTP headers just before the webpage is rendered, the malware can completely modify the forms and fool the user. The malware may inject HTML or JavaScript code to trick the user into inserting sensitive information, such as a PIN code or credit card number, enabling the malware to collect it. The malware can extract this information and send it to its command and control (C2) server without actually sending the forged headers to the targeted web page server.\n| Chrome (chrome.dll) | Firefox (nspr3.dll / nspr4.dll) | Internet Explorer / Edge (Wininet.dll) |\n| ssl_read | PR_Read | HttpSendRequest |\n| ssl_write | PR_Connect | InternetCloseHandle |\n| PR_Close | InternetReadFile | |\n| PR_Write | InternetQueryDataAvailable | |\n| HttpQueryInfo | ||\n| InternetWriteFile | ||\n| HttpEndRequest | ||\n| InternetQueryOption | ||\n| InternetSetOption | ||\n| HttpOpenRequest | ||\n| InternetConnect |\nTable 1. Frequently hooked API functions.\nHow to Detect Webinjects\nThis technique can be prevented by detecting an injection into a web browser process. The injected thread calls the NtProtectVirtualMemory function where the NewAccessProtection argument is PAGE_EXECUTE_READWRITE and the BaseAddress argument is an address to a library function targeted by banking Trojans.\nFor example, Trickbot uses both VirtualProtect and VirtualProtectEx in its various versions. Inspecting NtProtectVirtualMemory calls covers both.\nSome banking Trojans opt to avoid code injection. Instead, they suspend the remote process threads and install the hooks remotely. Inspecting remote NtProtectVirtualMemory calls can detect this variant technique.\nInfecting Web Browsers During Process Creation\nSome banking Trojans aim to infect a target process as soon as it is launched, by injecting code into a predicted parent process of the real target. Once the banking Trojan executes in the context of the parent process, it hooks process creation library functions and waits until the real target is created.\nInside the hook, the banking Trojan manipulates the process creation flow. Then, for example, it initializes the webinjects module inside the remote process. The explorer.exe and runtimebroker.exe parent processes are frequently abused for this goal, as they usually launch the real targets.\nFor instance, the Karius banking Trojan used this technique by injecting code into explorer.exe and hooking CreateProcessInternalW. The Trojan’s hook handler looked for a spawned web browser process and injected the malicious webinjects module into it.\nHow to Prevent Attempts to Infect Web Browsers During Process Creation\nThis technique can be prevented by looking for an injection into explorer.exe or runtimebroker.exe, where the injected thread hooks process creation functions like NtCreateUserProcess, NtCreateProcessEx, CreateProcessInternalW, CreateProcessA or CreateProcessW.\nNamed Pipe Communication Between Injected Processes\nMany banking Trojans use named pipes to communicate with various processes under the threat actor’s control. To do this, they inject their main bot into a Windows process, and then inject their other modules into different processes according to the module’s purpose. They then establish communication between the different processes using named pipes.\nFor example, Trickbot injects the main bot into svchost.exe. It creates a named pipe server and reflectively injects the webinjects module into web browsers. This injected module connects to the same named pipe as a client to communicate to the main bot and deliver the fetched credentials to the C2 server.\nHow to Prevent Named Pipe Communication Between Injected Processes\nThis technique can be prevented by inspecting named-pipe events. An injected thread creates a named pipe inside a Windows process, and then another injected thread that lives inside a web browser attempts to connect to that same named pipe.\nHeaven’s Gate Injection Technique\nHeaven's Gate is a technique used by malware, which enables a 32-bit (WoW64) process to execute 64-bit code by performing a far jump/call using segment selector 0x33. Modern malware uses Heaven's Gate to inject into both 64-bit and 32-bit processes from a single 32-bit process on x64 systems. This bypasses WoW64 API hooks, it hinders analysis on some debuggers, and it fails emulation on some sandboxes.\nEven though this method is old, it is still effective and frequently used.\nTrickbot and Emotet loaders use Heaven's Gate for process hollowing from a WoW64 process into a 64-bit svchost.exe (For more about process hollowing, see the section on Evasive Process Hollowing By Entrypoint Patching below). The architecture of these two banking Trojans dictates that their main bot persists inside svchost.exe while the web content manipulation and credential stealing modules live inside the browser processes.\nHow to Prevent Heaven's Gate\nA WoW64 process usually goes through the wow64cpu.dll to perform the transition to x64 CPU mode. Heaven's Gate does this transition manually.\nPrevention methods can find Heaven's Gate by inspecting whether a WoW64 process system call didn’t go through the wow64cpu.dll. This can be done by placing hooks on critical APIs, generating a stack trace and inspecting the stack trace for wow64cpu.dll.\nEvasive Process Hollowing by Entrypoint Patching\nProcess hollowing is a process injection technique that creates a new legitimate process in a suspended mode, unmaps its main image and replaces it with malicious code. The malicious code is written into the newly created process and the suspended thread context instruction pointer is changed using NtGetContextThread/NtSetContextThread.\nSecurity product vendors check for main image unmapping combined with the usage of NtGetContextThread/NtSetContextThread to detect process hollowing.\nA known technique for evading detection is to patch the process entry point with a small jump that redirects execution to the payload without actually using NtGetContextThread/NtSetContextThread functions or unmapping the main image. For example, Trickbot and Kronos have both used this technique.\nKronos mapped a suspended svchost.exe into its own process and patched it in its own memory address space. Similar to other banking Trojans, Kronos' main module ran within svchost.exe and orchestrated the whole operation from the remote svchost.exe process.\nTrickbot implemented process hollowing by first using VirtualProtectEx on the process entrypoint, and then writing the hook stub using WriteProcessMemory.\nHow to Prevent Evasive Process Hollowing by Entrypoint Patching\nThis technique can be prevented either by inspecting whether the address argument provided to the calls of NtWriteVirtualMemory or NtProtectVirtualMemory is a remote process entry point or by detecting suspicious remote mapping and reading of svchost.exe memory.\nPE Injection\nCommon injection methods used by banking Trojans involve writing a mapped PE into a remote process using WriteProcessMemory. Some malware families try to obscure the call by wiping artifacts from the buffer, such as wiping the PE header.\nFor example, Zeus variants use this technique to inject themselves into other processes, allowing them to stay hidden, as well as to perform webinjects and to perpetrate financial data theft.\nHow to Prevent PE Injection\nThis technique can be prevented by inspecting the buffer sent to NtWriteVirtualMemory for executable artifacts.\nProcess Injection via Hooking\nHooking can be used as an injection technique. Injecting a banking Trojan’s main payload into a legitimate-looking process maintains stealth and helps avoid endpoint protection detection.\nThis technique utilizes hooking to get code execution, usually by hooking a frequently called API function with a jump to a payload/shellcode. This avoids calling any suspicious APIs often used in code injection techniques like CreateRemoteThread or NtSetContextThread.\nFor instance, IcedID injects its main bot into a hollowed instance of svchost.exe using API hooking. This is also known as the ZwClose technique (ZwClose was the hooked API in Zberp, the first to employ this injection technique in the wild).\nThe injection flow of IcedID is slightly different than that of Zberp. It first hooks NtCreateUserProcess and then calls CreateProcessA to create svchost.exe without any special parameters or argument. In a regular flow, the newly created svchost.exe should terminate right away.\nHowever, because IcedID hooked NtCreateUserProcess, the hook handler is called right after the call to CreateProcessA. In the handler, it performs the following activities:\n- Unhooks NtCreateUserProcess\n- Calls NtCreateUserProcess (which creates svchost.exe)\n- Decompresses a local buffer that contains the payload to inject using RtlDecompressBuffer\n- Allocates memory for the payload at the remote svchost.exe process\n- Writes the payload into the remote svchost.exe using NtAllocateVirtualMemory and ZwWriteVirtualMemory\nFor the execution, IcedID hooks RtlExitUserProcess in the newly created svchost.exe with a jump stub to the payload. As mentioned, svchost.exe was created without any parameters and it will try to exit. However, due to the IcedID hook, it will jump to the payload.\nHow to Prevent Injection via Hooking\nThis technique can be prevented by inspecting calls to NtProtectVirtualMemory and NtWriteVirtualMemory. The provided address argument for NtProtectVirtualMemory is an exported function from one of the Windows libraries, and the NtWriteVirtualMemory written buffer is a hooking stub. In both cases, the remote process has to be a known injection target.\nAtomBombing Injection Technique\nAtomBombing is a technique that allows malware to inject code while avoiding calling suspicious APIs that security vendors are watching. Dridex uses a slightly modified AtomBombing technique that injects one of its stages into a Windows process (usually explorer.exe) and employs various steps to cause financial data theft.\nMalware using the AtomBombing technique first writes the payload into the global atom table, which can be accessed by all processes. They then dispatch an asynchronous procedure call (APC) to the APC queue of a target process thread using NtQueueApcThread, forcing the target process to call GlobalGetAtomA.\nThe target thread then retrieves the payload from the global atom table and inserts it into a read/write (RW) region inside the target process memory space (a code cave inside the kernelbase.dll data section). The payload has to be split into NULL-terminated strings and an atom is created for each string.\nFor the execution, the injector process dispatches another APC using NtQueueApcThread to force the remote process to execute NtSetContextThread. The injected process then calls NtSetContextThread, which invokes a return-oriented programming (ROP) chain that allocates execute/read/write (RWX) memory. The ROP chain then copies the payload from the RW region into the newly allocated RWX region, and lastly, executes it.\nThe unique idea behind AtomBombing is the write-primitive, which allows writing to the remote process using atom tables and APC.\nDridex uses a variation of AtomBombing that queues an APC to call memset to clean an RW region in ntdll.dll. Then, it copies the payload and its import table into the target process using the same write technique into the ntdll.dll RW region.\nFor the execution, Dridex modifies the copied payload memory into executable memory using NtProtectVirtualMemory. Then it hooks GlobalGetAtomA by calling NtProtectVirtualMemory and by using the same write primitive. Finally, it queues an APC into the patched GlobalGetAtomA to get the payload running.\nHow to Prevent AtomBombing and its Variants\nThese techniques can be prevented by inspecting whether the arguments provided to NtQueueApcThread/NtSetContextThread calls point to a suspicious API – the APC routine argument in the case of NtQueueApcThread, or the new instruction pointer in the context argument in the case of NtSetContextThread. Both API calls have to be called into a remote process.\nConclusion\nThreat actors who are in it for the money use a wide range of malware techniques for injection and financial fraud, and they are always looking for new ways to develop evasive techniques. We have explored some of the more interesting banking Trojan techniques and how they’re used to steal victims’ sensitive data. And finally, we describe how these techniques can be used to detect malicious behavior, so it can be prevented.\nPalo Alto Networks customers using Cortex XDR receive protections from such attacks in different layers, including the following:\n- Local Analysis Machine Learning module\n- Behavioral Threat Protection\n- Behavioral indicators of compromise (BIOC) and Analytics BIOCs rules\nThese layers identify the tactics and techniques that banking Trojans use at different stages of their execution.\nPalo Alto Networks customers also receive protections against the attacks discussed here through the WildFire cloud-delivered security subscription for the Next-Generation Firewall.\nIndicators of Compromise\n- Trickbot\n- testnewinj32Dll.dll: 4becc0d518a97cc31427cd08348958cda4e00487c7ec0ac38fdcd53bbe36b5cc\n- Webinjects: ef6603a7ef46177ecba194148f72d396d0ddae47e3d6e86cf43085e34b3a64d4\n- Emotet: dd20506b3c65472d58ccc0a018cb67c65fab6718023fd4b16e148e64e69e5740\n- Kronos: aad98f57ce0d2d2bb1494d82157d07e1f80fb6ee02dd5f95cd6a1a2dc40141bc\n- Zeus: 0f409bc42d5cd8d28abf6d950066e991bf9f4c7bd0e234d6af9754af7ad52aa6\n- IcedID: 358af26358a436a38d75ac5de22ae07c4d59a8d50241f4fff02c489aa69e462f\n- Dridex: ffbd79ba40502a1373b8991909739a60a95e745829d2e15c4d312176bbfb5b3e",
+  "sanitized_txt": "Executive Summary While advanced persistent threats get the most breathless coverage in the news, many threat actors have money on their mind rather than espionage. You can learn a lot about the innovations used by these financially motivated groups by watching banking Trojans.\nBecause attackers constantly create new techniques to evade detection and perform malicious acts, studying monetarily motivated malware can help defenders understand threat actor tactics and protect organizations more effectively. Some of the banking Trojans described here are historically known for being financial malware, but now they’re primarily used as infrastructure to deliver other malware. Which is to say, by preventing techniques used by banking Trojans, you can also stop other types of threats.\nWe’ll survey techniques used by notorious banking Trojan families to evade detection, steal sensitive data and manipulate data. We’ll also describe how those techniques can be blocked. These families include Zeus, Kronos, Trickbot, IcedID, Emotet and Dridex.\nPalo Alto Networks customers are protected from such attacks using Cortex XDR and WildFire.\n| Banking Trojan families' techniques discussed | Zeus, Kronos, Trickbot, IcedID, Emotet, Dridex | What Are Webinjects?\nWebinjects are modules that can inject HTML or JavaScript before a web page is rendered, and are often used to trick users. They are known to be abused by banking Trojans, as well as being employed to steal credentials and manipulate form data inside web pages. In most banking Trojan families, there is at least one webinjects module.\nAn early stager of the banking Trojan usually injects the banking Trojan’s main bot into a Windows process, and that process injects the webinjects module into the machine’s available web browser processes as shown in Figure 1.\nThe webinjects module hooks the API calls responsible for sending, receiving or encrypting data sent to a web server. By intercepting the data before it is encrypted, the malware can read HTTP-POST headers and manipulate them on the fly.\nBy fully controlling the HTTP headers just before the webpage is rendered, the malware can completely modify the forms and fool the user. The malware may inject HTML or JavaScript code to trick the user into inserting sensitive information, such as a PIN code or credit card number, enabling the malware to collect it. The malware can extract this information and send it to its command and control (C2) server without actually sending the forged headers to the targeted web page server.\n| Chrome (chrome.dll) | Firefox (nspr3.dll / nspr4.dll) | Internet Explorer / Edge (Wininet.dll) | | ssl_read | PR_Read | HttpSendRequest | | ssl_write | PR_Connect | InternetCloseHandle | | PR_Close | InternetReadFile | | | PR_Write | InternetQueryDataAvailable | | | HttpQueryInfo | || | InternetWriteFile | || | HttpEndRequest | || | InternetQueryOption | || | InternetSetOption | || | HttpOpenRequest | || | InternetConnect | Table 1. Frequently hooked API functions.\nHow to Detect Webinjects This technique can be prevented by detecting an injection into a web browser process. The injected thread calls the NtProtectVirtualMemory function where the NewAccessProtection argument is PAGE_EXECUTE_READWRITE and the BaseAddress argument is an address to a library function targeted by banking Trojans.\nFor example, Trickbot uses both VirtualProtect and VirtualProtectEx in its various versions. Inspecting NtProtectVirtualMemory calls covers both.\nSome banking Trojans opt to avoid code injection. Instead, they suspend the remote process threads and install the hooks remotely. Inspecting remote NtProtectVirtualMemory calls can detect this variant technique.\nInfecting Web Browsers During Process Creation Some banking Trojans aim to infect a target process as soon as it is launched, by injecting code into a predicted parent process of the real target. Once the banking Trojan executes in the context of the parent process, it hooks process creation library functions and waits until the real target is created.\nInside the hook, the banking Trojan manipulates the process creation flow. Then, for example, it initializes the webinjects module inside the remote process. The explorer.exe and runtimebroker.exe parent processes are frequently abused for this goal, as they usually launch the real targets.\nFor instance, the Karius banking Trojan used this technique by injecting code into explorer.exe and hooking CreateProcessInternalW. The Trojan’s hook handler looked for a spawned web browser process and injected the malicious webinjects module into it.\nHow to Prevent Attempts to Infect Web Browsers During Process Creation This technique can be prevented by looking for an injection into explorer.exe or runtimebroker.exe, where the injected thread hooks process creation functions like NtCreateUserProcess, NtCreateProcessEx, CreateProcessInternalW, CreateProcessA or CreateProcessW.\nNamed Pipe Communication Between Injected Processes Many banking Trojans use named pipes to communicate with various processes under the threat actor’s control. To do this, they inject their main bot into a Windows process, and then inject their other modules into different processes according to the module’s purpose. They then establish communication between the different processes using named pipes.\nFor example, Trickbot injects the main bot into svchost.exe. It creates a named pipe server and reflectively injects the webinjects module into web browsers. This injected module connects to the same named pipe as a client to communicate to the main bot and deliver the fetched credentials to the C2 server.\nHow to Prevent Named Pipe Communication Between Injected Processes This technique can be prevented by inspecting named-pipe events. An injected thread creates a named pipe inside a Windows process, and then another injected thread that lives inside a web browser attempts to connect to that same named pipe.\nHeaven’s Gate Injection Technique Heaven's Gate is a technique used by malware, which enables a 32-bit (WoW64) process to execute 64-bit code by performing a far jump/call using segment selector 0x33. Modern malware uses Heaven's Gate to inject into both 64-bit and 32-bit processes from a single 32-bit process on x64 systems. This bypasses WoW64 API hooks, it hinders analysis on some debuggers, and it fails emulation on some sandboxes.\nEven though this method is old, it is still effective and frequently used.\nTrickbot and Emotet loaders use Heaven's Gate for process hollowing from a WoW64 process into a 64-bit svchost.exe (For more about process hollowing, see the section on Evasive Process Hollowing By Entrypoint Patching below). The architecture of these two banking Trojans dictates that their main bot persists inside svchost.exe while the web content manipulation and credential stealing modules live inside the browser processes.\nHow to Prevent Heaven's Gate A WoW64 process usually goes through the wow64cpu.dll to perform the transition to x64 CPU mode. Heaven's Gate does this transition manually.\nPrevention methods can find Heaven's Gate by inspecting whether a WoW64 process system call didn’t go through the wow64cpu.dll. This can be done by placing hooks on critical APIs, generating a stack trace and inspecting the stack trace for wow64cpu.dll.\nEvasive Process Hollowing by Entrypoint Patching Process hollowing is a process injection technique that creates a new legitimate process in a suspended mode, unmaps its main image and replaces it with malicious code. The malicious code is written into the newly created process and the suspended thread context instruction pointer is changed using NtGetContextThread/NtSetContextThread.\nSecurity product vendors check for main image unmapping combined with the usage of NtGetContextThread/NtSetContextThread to detect process hollowing.\nA known technique for evading detection is to patch the process entry point with a small jump that redirects execution to the payload without actually using NtGetContextThread/NtSetContextThread functions or unmapping the main image. For example, Trickbot and Kronos have both used this technique.\nKronos mapped a suspended svchost.exe into its own process and patched it in its own memory address space. Similar to other banking Trojans, Kronos' main module ran within svchost.exe and orchestrated the whole operation from the remote svchost.exe process.\nTrickbot implemented process hollowing by first using VirtualProtectEx on the process entrypoint, and then writing the hook stub using WriteProcessMemory.\nHow to Prevent Evasive Process Hollowing by Entrypoint Patching This technique can be prevented either by inspecting whether the address argument provided to the calls of NtWriteVirtualMemory or NtProtectVirtualMemory is a remote process entry point or by detecting suspicious remote mapping and reading of svchost.exe memory.\nPE Injection Common injection methods used by banking Trojans involve writing a mapped PE into a remote process using WriteProcessMemory. Some malware families try to obscure the call by wiping artifacts from the buffer, such as wiping the PE header.\nFor example, Zeus variants use this technique to inject themselves into other processes, allowing them to stay hidden, as well as to perform webinjects and to perpetrate financial data theft.\nHow to Prevent PE Injection This technique can be prevented by inspecting the buffer sent to NtWriteVirtualMemory for executable artifacts.\nProcess Injection via Hooking Hooking can be used as an injection technique. Injecting a banking Trojan’s main payload into a legitimate-looking process maintains stealth and helps avoid endpoint protection detection.\nThis technique utilizes hooking to get code execution, usually by hooking a frequently called API function with a jump to a payload/shellcode. This avoids calling any suspicious APIs often used in code injection techniques like CreateRemoteThread or NtSetContextThread.\nFor instance, IcedID injects its main bot into a hollowed instance of svchost.exe using API hooking. This is also known as the ZwClose technique (ZwClose was the hooked API in Zberp, the first to employ this injection technique in the wild).\nThe injection flow of IcedID is slightly different than that of Zberp. It first hooks NtCreateUserProcess and then calls CreateProcessA to create svchost.exe without any special parameters or argument. In a regular flow, the newly created svchost.exe should terminate right away.\nHowever, because IcedID hooked NtCreateUserProcess, the hook handler is called right after the call to CreateProcessA. In the handler, it performs the following activities:\n- Unhooks NtCreateUserProcess - Calls NtCreateUserProcess (which creates svchost.exe) - Decompresses a local buffer that contains the payload to inject using RtlDecompressBuffer - Allocates memory for the payload at the remote svchost.exe process - Writes the payload into the remote svchost.exe using NtAllocateVirtualMemory and ZwWriteVirtualMemory For the execution, IcedID hooks RtlExitUserProcess in the newly created svchost.exe with a jump stub to the payload. As mentioned, svchost.exe was created without any parameters and it will try to exit. However, due to the IcedID hook, it will jump to the payload.\nHow to Prevent Injection via Hooking This technique can be prevented by inspecting calls to NtProtectVirtualMemory and NtWriteVirtualMemory. The provided address argument for NtProtectVirtualMemory is an exported function from one of the Windows libraries, and the NtWriteVirtualMemory written buffer is a hooking stub. In both cases, the remote process has to be a known injection target.\nAtomBombing Injection Technique AtomBombing is a technique that allows malware to inject code while avoiding calling suspicious APIs that security vendors are watching. Dridex uses a slightly modified AtomBombing technique that injects one of its stages into a Windows process (usually explorer.exe) and employs various steps to cause financial data theft.\nMalware using the AtomBombing technique first writes the payload into the global atom table, which can be accessed by all processes. They then dispatch an asynchronous procedure call (APC) to the APC queue of a target process thread using NtQueueApcThread, forcing the target process to call GlobalGetAtomA.\nThe target thread then retrieves the payload from the global atom table and inserts it into a read/write (RW) region inside the target process memory space (a code cave inside the kernelbase.dll data section). The payload has to be split into NULL-terminated strings and an atom is created for each string.\nFor the execution, the injector process dispatches another APC using NtQueueApcThread to force the remote process to execute NtSetContextThread. The injected process then calls NtSetContextThread, which invokes a return-oriented programming (ROP) chain that allocates execute/read/write (RWX) memory. The ROP chain then copies the payload from the RW region into the newly allocated RWX region, and lastly, executes it.\nThe unique idea behind AtomBombing is the write-primitive, which allows writing to the remote process using atom tables and APC.\nDridex uses a variation of AtomBombing that queues an APC to call memset to clean an RW region in ntdll.dll. Then, it copies the payload and its import table into the target process using the same write technique into the ntdll.dll RW region.\nFor the execution, Dridex modifies the copied payload memory into executable memory using NtProtectVirtualMemory. Then it hooks GlobalGetAtomA by calling NtProtectVirtualMemory and by using the same write primitive. Finally, it queues an APC into the patched GlobalGetAtomA to get the payload running.\nHow to Prevent AtomBombing and its Variants These techniques can be prevented by inspecting whether the arguments provided to NtQueueApcThread/NtSetContextThread calls point to a suspicious API – the APC routine argument in the case of NtQueueApcThread, or the new instruction pointer in the context argument in the case of NtSetContextThread. Both API calls have to be called into a remote process.\nConclusion Threat actors who are in it for the money use a wide range of malware techniques for injection and financial fraud, and they are always looking for new ways to develop evasive techniques. We have explored some of the more interesting banking Trojan techniques and how they’re used to steal victims’ sensitive data. And finally, we describe how these techniques can be used to detect malicious behavior, so it can be prevented.\nPalo Alto Networks customers using Cortex XDR receive protections from such attacks in different layers, including the following:\n- Local Analysis Machine Learning module - Behavioral Threat Protection - Behavioral indicators of compromise (BIOC) and Analytics BIOCs rules These layers identify the tactics and techniques that banking Trojans use at different stages of their execution.\nPalo Alto Networks customers also receive protections against the attacks discussed here through the WildFire cloud-delivered security subscription for the Next-Generation Firewall.\nIndicators of Compromise - Trickbot - testnewinj32Dll.dll: 4becc0d518a97cc31427cd08348958cda4e00487c7ec0ac38fdcd53bbe36b5cc - Webinjects: ef6603a7ef46177ecba194148f72d396d0ddae47e3d6e86cf43085e34b3a64d4 - Emotet: dd20506b3c65472d58ccc0a018cb67c65fab6718023fd4b16e148e64e69e5740 - Kronos: aad98f57ce0d2d2bb1494d82157d07e1f80fb6ee02dd5f95cd6a1a2dc40141bc - Zeus: 0f409bc42d5cd8d28abf6d950066e991bf9f4c7bd0e234d6af9754af7ad52aa6 - IcedID: 358af26358a436a38d75ac5de22ae07c4d59a8d50241f4fff02c489aa69e462f - Dridex: ffbd79ba40502a1373b8991909739a60a95e745829d2e15c4d312176bbfb5b3e",
+  "ID_list": [
+    "T1554"
+  ],
+  "Name_list": [
+    "Command and Control",
+    "Execution",
+    "Hooking",
+    "Process Hollowing",
+    "Process Injection"
+  ],
+  "TTP_sentences": {
+    "T1554": [
+      {
+        "sentence": "Executive Summary While advanced persistent threats get the most breathless coverage in the news, many threat actors have money on their mind rather than espionage.",
+        "score": 0.4004
+      },
+      {
+        "sentence": "You can learn a lot about the innovations used by these financially motivated groups by watching banking Trojans.",
+        "score": 0.4412
+      },
+      {
+        "sentence": "Because attackers constantly create new techniques to evade detection and perform malicious acts, studying monetarily motivated malware can help defenders understand threat actor tactics and protect organizations more effectively.",
+        "score": 0.4676
+      },
+      {
+        "sentence": "Some of the banking Trojans described here are historically known for being financial malware, but now they’re primarily used as infrastructure to deliver other malware.",
+        "score": 0.5183
+      },
+      {
+        "sentence": "Which is to say, by preventing techniques used by banking Trojans, you can also stop other types of threats.",
+        "score": 0.489
+      },
+      {
+        "sentence": "We’ll survey techniques used by notorious banking Trojan families to evade detection, steal sensitive data and manipulate data.",
+        "score": 0.47
+      },
+      {
+        "sentence": "These families include Zeus, Kronos, Trickbot, IcedID, Emotet and Dridex.",
+        "score": 0.4322
+      },
+      {
+        "sentence": "Palo Alto Networks customers are protected from such attacks using Cortex XDR and WildFire. | Banking Trojan families' techniques discussed | Zeus, Kronos, Trickbot, IcedID, Emotet, Dridex | What Are Webinjects?",
+        "score": 0.4151
+      },
+      {
+        "sentence": "Webinjects are modules that can inject HTML or JavaScript before a web page is rendered, and are often used to trick users.",
+        "score": 0.3755
+      },
+      {
+        "sentence": "They are known to be abused by banking Trojans, as well as being employed to steal credentials and manipulate form data inside web pages.",
+        "score": 0.4624
+      },
+      {
+        "sentence": "In most banking Trojan families, there is at least one webinjects module.",
+        "score": 0.4383
+      },
+      {
+        "sentence": "An early stager of the banking Trojan usually injects the banking Trojan’s main bot into a Windows process, and that process injects the webinjects module into the machine’s available web browser processes as shown in Figure 1.",
+        "score": 0.4331
+      },
+      {
+        "sentence": "The webinjects module hooks the API calls responsible for sending, receiving or encrypting data sent to a web server.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "By fully controlling the HTTP headers just before the webpage is rendered, the malware can completely modify the forms and fool the user.",
+        "score": 0.361
+      },
+      {
+        "sentence": "The malware may inject HTML or JavaScript code to trick the user into inserting sensitive information, such as a PIN code or credit card number, enabling the malware to collect it.",
+        "score": 0.3807
+      },
+      {
+        "sentence": "Frequently hooked API functions.",
+        "score": 0.3568
+      },
+      {
+        "sentence": "How to Detect Webinjects This technique can be prevented by detecting an injection into a web browser process.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "The injected thread calls the NtProtectVirtualMemory function where the NewAccessProtection argument is PAGE_EXECUTE_READWRITE and the BaseAddress argument is an address to a library function targeted by banking Trojans.",
+        "score": 0.3805
+      },
+      {
+        "sentence": "For example, Trickbot uses both VirtualProtect and VirtualProtectEx in its various versions.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "Some banking Trojans opt to avoid code injection.",
+        "score": 0.376
+      },
+      {
+        "sentence": "Instead, they suspend the remote process threads and install the hooks remotely.",
+        "score": 0.4918
+      },
+      {
+        "sentence": "Infecting Web Browsers During Process Creation Some banking Trojans aim to infect a target process as soon as it is launched, by injecting code into a predicted parent process of the real target.",
+        "score": 0.4923
+      },
+      {
+        "sentence": "Once the banking Trojan executes in the context of the parent process, it hooks process creation library functions and waits until the real target is created.",
+        "score": 0.4336
+      },
+      {
+        "sentence": "Inside the hook, the banking Trojan manipulates the process creation flow.",
+        "score": 0.488
+      },
+      {
+        "sentence": "Then, for example, it initializes the webinjects module inside the remote process.",
+        "score": 0.426
+      },
+      {
+        "sentence": "The explorer.exe and runtimebroker.exe parent processes are frequently abused for this goal, as they usually launch the real targets.",
+        "score": 0.3103
+      },
+      {
+        "sentence": "For instance, the Karius banking Trojan used this technique by injecting code into explorer.exe and hooking CreateProcessInternalW.",
+        "score": 0.342
+      },
+      {
+        "sentence": "The Trojan’s hook handler looked for a spawned web browser process and injected the malicious webinjects module into it.",
+        "score": 0.3503
+      },
+      {
+        "sentence": "How to Prevent Attempts to Infect Web Browsers During Process Creation This technique can be prevented by looking for an injection into explorer.exe or runtimebroker.exe, where the injected thread hooks process creation functions like NtCreateUserProcess, NtCreateProcessEx, CreateProcessInternalW, CreateProcessA or CreateProcessW.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "To do this, they inject their main bot into a Windows process, and then inject their other modules into different processes according to the module’s purpose.",
+        "score": 0.3899
+      },
+      {
+        "sentence": "For example, Trickbot injects the main bot into svchost.exe.",
+        "score": 0.4305
+      },
+      {
+        "sentence": "Modern malware uses Heaven's Gate to inject into both 64-bit and 32-bit processes from a single 32-bit process on x64 systems.",
+        "score": 0.3637
+      },
+      {
+        "sentence": "This bypasses WoW64 API hooks, it hinders analysis on some debuggers, and it fails emulation on some sandboxes.",
+        "score": 0.3143
+      },
+      {
+        "sentence": "Even though this method is old, it is still effective and frequently used.",
+        "score": 0.3056
+      },
+      {
+        "sentence": "Trickbot and Emotet loaders use Heaven's Gate for process hollowing from a WoW64 process into a 64-bit svchost.exe (For more about process hollowing, see the section on Evasive Process Hollowing By Entrypoint Patching below).",
+        "score": 0.3653
+      },
+      {
+        "sentence": "The architecture of these two banking Trojans dictates that their main bot persists inside svchost.exe while the web content manipulation and credential stealing modules live inside the browser processes.",
+        "score": 0.4741
+      },
+      {
+        "sentence": "How to Prevent Heaven's Gate A WoW64 process usually goes through the wow64cpu.dll to perform the transition to x64 CPU mode.",
+        "score": 0.3314
+      },
+      {
+        "sentence": "Prevention methods can find Heaven's Gate by inspecting whether a WoW64 process system call didn’t go through the wow64cpu.dll.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "This can be done by placing hooks on critical APIs, generating a stack trace and inspecting the stack trace for wow64cpu.dll.",
+        "score": 0.3105
+      },
+      {
+        "sentence": "Evasive Process Hollowing by Entrypoint Patching Process hollowing is a process injection technique that creates a new legitimate process in a suspended mode, unmaps its main image and replaces it with malicious code.",
+        "score": 0.411
+      },
+      {
+        "sentence": "The malicious code is written into the newly created process and the suspended thread context instruction pointer is changed using NtGetContextThread/NtSetContextThread.",
+        "score": 0.4419
+      },
+      {
+        "sentence": "A known technique for evading detection is to patch the process entry point with a small jump that redirects execution to the payload without actually using NtGetContextThread/NtSetContextThread functions or unmapping the main image.",
+        "score": 0.4697
+      },
+      {
+        "sentence": "For example, Trickbot and Kronos have both used this technique.",
+        "score": 0.4899
+      },
+      {
+        "sentence": "Kronos mapped a suspended svchost.exe into its own process and patched it in its own memory address space.",
+        "score": 0.35
+      },
+      {
+        "sentence": "Similar to other banking Trojans, Kronos' main module ran within svchost.exe and orchestrated the whole operation from the remote svchost.exe process.",
+        "score": 0.424
+      },
+      {
+        "sentence": "How to Prevent Evasive Process Hollowing by Entrypoint Patching This technique can be prevented either by inspecting whether the address argument provided to the calls of NtWriteVirtualMemory or NtProtectVirtualMemory is a remote process entry point or by detecting suspicious remote mapping and reading of svchost.exe memory.",
+        "score": 0.3508
+      },
+      {
+        "sentence": "PE Injection Common injection methods used by banking Trojans involve writing a mapped PE into a remote process using WriteProcessMemory.",
+        "score": 0.3014
+      },
+      {
+        "sentence": "Some malware families try to obscure the call by wiping artifacts from the buffer, such as wiping the PE header.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "For example, Zeus variants use this technique to inject themselves into other processes, allowing them to stay hidden, as well as to perform webinjects and to perpetrate financial data theft.",
+        "score": 0.4503
+      },
+      {
+        "sentence": "How to Prevent PE Injection This technique can be prevented by inspecting the buffer sent to NtWriteVirtualMemory for executable artifacts.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "Process Injection via Hooking Hooking can be used as an injection technique.",
+        "score": 0.3205
+      },
+      {
+        "sentence": "Injecting a banking Trojan’s main payload into a legitimate-looking process maintains stealth and helps avoid endpoint protection detection.",
+        "score": 0.5498
+      },
+      {
+        "sentence": "This technique utilizes hooking to get code execution, usually by hooking a frequently called API function with a jump to a payload/shellcode.",
+        "score": 0.3655
+      },
+      {
+        "sentence": "For instance, IcedID injects its main bot into a hollowed instance of svchost.exe using API hooking.",
+        "score": 0.4126
+      },
+      {
+        "sentence": "This is also known as the ZwClose technique (ZwClose was the hooked API in Zberp, the first to employ this injection technique in the wild).",
+        "score": 0.3131
+      },
+      {
+        "sentence": "The injection flow of IcedID is slightly different than that of Zberp.",
+        "score": 0.3038
+      },
+      {
+        "sentence": "In a regular flow, the newly created svchost.exe should terminate right away.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "As mentioned, svchost.exe was created without any parameters and it will try to exit.",
+        "score": 0.3017
+      },
+      {
+        "sentence": "However, due to the IcedID hook, it will jump to the payload.",
+        "score": 0.366
+      },
+      {
+        "sentence": "How to Prevent Injection via Hooking This technique can be prevented by inspecting calls to NtProtectVirtualMemory and NtWriteVirtualMemory.",
+        "score": 0.3174
+      },
+      {
+        "sentence": "The provided address argument for NtProtectVirtualMemory is an exported function from one of the Windows libraries, and the NtWriteVirtualMemory written buffer is a hooking stub.",
+        "score": 0.3021
+      },
+      {
+        "sentence": "AtomBombing Injection Technique AtomBombing is a technique that allows malware to inject code while avoiding calling suspicious APIs that security vendors are watching.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "Dridex uses a slightly modified AtomBombing technique that injects one of its stages into a Windows process (usually explorer.exe) and employs various steps to cause financial data theft.",
+        "score": 0.432
+      },
+      {
+        "sentence": "Malware using the AtomBombing technique first writes the payload into the global atom table, which can be accessed by all processes.",
+        "score": 0.3644
+      },
+      {
+        "sentence": "The target thread then retrieves the payload from the global atom table and inserts it into a read/write (RW) region inside the target process memory space (a code cave inside the kernelbase.dll data section).",
+        "score": 0.3929
+      },
+      {
+        "sentence": "The payload has to be split into NULL-terminated strings and an atom is created for each string.",
+        "score": 0.3263
+      },
+      {
+        "sentence": "The unique idea behind AtomBombing is the write-primitive, which allows writing to the remote process using atom tables and APC.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "Then, it copies the payload and its import table into the target process using the same write technique into the ntdll.dll RW region.",
+        "score": 0.3798
+      },
+      {
+        "sentence": "For the execution, Dridex modifies the copied payload memory into executable memory using NtProtectVirtualMemory.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "Then it hooks GlobalGetAtomA by calling NtProtectVirtualMemory and by using the same write primitive.",
+        "score": 0.3024
+      },
+      {
+        "sentence": "How to Prevent AtomBombing and its Variants These techniques can be prevented by inspecting whether the arguments provided to NtQueueApcThread/NtSetContextThread calls point to a suspicious API – the APC routine argument in the case of NtQueueApcThread, or the new instruction pointer in the context argument in the case of NtSetContextThread.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "Conclusion Threat actors who are in it for the money use a wide range of malware techniques for injection and financial fraud, and they are always looking for new ways to develop evasive techniques.",
+        "score": 0.4458
+      },
+      {
+        "sentence": "We have explored some of the more interesting banking Trojan techniques and how they’re used to steal victims’ sensitive data.",
+        "score": 0.363
+      },
+      {
+        "sentence": "And finally, we describe how these techniques can be used to detect malicious behavior, so it can be prevented.",
+        "score": 0.368
+      },
+      {
+        "sentence": "Palo Alto Networks customers using Cortex XDR receive protections from such attacks in different layers, including the following: - Local Analysis Machine Learning module - Behavioral Threat Protection - Behavioral indicators of compromise (BIOC) and Analytics BIOCs rules These layers identify the tactics and techniques that banking Trojans use at different stages of their execution.",
+        "score": 0.4981
+      }
+    ]
+  }
+}

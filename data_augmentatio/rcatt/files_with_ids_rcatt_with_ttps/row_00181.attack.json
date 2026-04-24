@@ -1,0 +1,516 @@
+{
+  "original_txt": "It\\xe2\\x80\\x99s All About Trust \\xe2\\x80\\x93 Forging Kerberos Trust Tickets to Spoof Access across Active Directory Trusts \\xe2\\x80\\x93 Active Directory Security Toggle search form Toggle navigation Active Directory Security Active Directory & Enterprise Security, Methods to Secure Active Directory, Attack Methods & Effective Defenses, PowerShell, Tech Notes, & Geek Trivia\\xe2\\x80\\xa6 Home About AD Resources Attack Defense & Detection Contact Mimikatz Presentations Schema Versions Security Resources SPNs Top Posts Microsoft Advanced Threat Analytics (ATA) Overview Black Hat USA 2015 Red vs Blue Active Directory Attack & Defense Talk Detail Jul 15 2015 It\\xe2\\x80\\x99s All About Trust \\xe2\\x80\\x93 Forging Kerberos Trust Tickets to Spoof Access across Active Directory Trusts By Sean Metcalf in Microsoft Security, Technical Reading In early 2015, I theorized that it\\xe2\\x80\\x99s possible to forge inter-realm (inter-trust) Kerberos tickets in a similar manner to how intra-domain TGTs (Golden Tickets) and TGSs (Silver Tickets) are forged. Around the same time, Benjamin Delpy updated Mimikatz to dump trust keys from a Domain Controller. Soon after, Mimikatz gained capability to forge inter-realm trust tickets. Benjamin Delpy added \\xe2\\x80\\x9cKekeo\\xe2\\x80\\x9d to Github which includes \\xe2\\x80\\x9cAskTGS\\xe2\\x80\\x9d which provides the capability to request TGS service tickets for targeted services in the destination domain and save them to file. With the tools enabling further research, I was able to explore what is possible with forged cross-trust Kerberos tickets. Note that forging a Kerberos Trust Ticket is similar to forging a Golden Ticket or a Silver Ticket. The key to the power of a Kerberos Trust Ticket within a multi-domain Active Directory forest is Enterprise Admins membership which easily crosses domain boundaries providing effective Domain Admin rights in every domain in the AD forest. I presented on \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d at Shakacon in Hawaii last week. Simply put, Trust Tickets are forged inter-realm Kerberos tickets. When there are two Active Directory domains connected via trust, there is a password which is shared between them used to keep the trust active. This trust password is also used as the shared secret in Kerberos. I also presented at Black Hat USA 2015 how I enabled Golden Tickets to work across domains in the same forest (aka Enhanced Golden Tickets). Update 9/2/2015: I updated the screenshots to accurately show how the intra-forest trust is exploited using the current version of Mimikatz. Kerberos Across Trusts Kerberos communication within a domain is pretty straightforward \\xe2\\x80\\x93 the domain Kerberos service account is used to sign and encrypt every authentication ticket (TGT). This enables the TGT to be used throughout the domain and presented to any DC in the domain. This works since the Kerberos service account (KRBTGT) is effectively the trust anchor used for the domain and is why losing control of the KRBTGT account password hash equates to losing control of the domain. When a user authenticates to Active Directory, the authenticating Domain Controller creates a TGT (authentication ticket) for the user that contains the groups the user is a member of (including groups from other domains in the forest, such as universal groups), signs, and encrypts the ticket using the KRBTGT password hash. When presented later to the DC for a service ticket (TGS), the TGT ticket and its contents are validated. The DC effectively copies the contents of the TGT into a TGS (service ticket) that the user presents to the target service. One component of the TGS is encrypted with the target service\\xe2\\x80\\x99s password hash and the other with the user\\xe2\\x80\\x99s password hash. If the target service can open the TGS, it is accepted. This means that the user\\xe2\\x80\\x99s TGT can be reused to get service tickets during the TGT\\xe2\\x80\\x99s lifetime (10 hours by default). The TGT is also portable, so if an attacker can steal a user\\xe2\\x80\\x99s TGT, it can be reused on any other computer on the network, at the same time, to access any resource to which the user has access. When an attacker gains access to the KRBTGT password hash on the domain, it is possible for them to generate their own TGTs (called \\xe2\\x80\\x9cGolden Tickets\\xe2\\x80\\x9d) that are accepted by all the Domain Controllers in the domain since they are signed and encrypted with the domain Kerberos service account data. Simply put, a Golden Ticket is a valid TGT. In order for the user to access resources in another domain in the same forest, the Kerberos process involves another layer since the Kerberos service (KDC) in one domain can\\xe2\\x80\\x99t issue a service ticket (TGS) in another. Since the TGS can only be built using the target service\\xe2\\x80\\x99s password data and Domain Controllers (DCs) only contain password data for security principals (users, computers, etc) in their own domain, the DC does not have the target services password data and can\\xe2\\x80\\x99t create the TGS. In order to resolve this issue, there is a trust password between two domains in the same AD forest used as a bridge enabling Kerberos authentication across domains. Once there is a trust between two domains, (domain BLUE and domain GREEN both are in the same AD forest for this example), the ticket-granting service of each domain (\\xe2\\x80\\x9crealm\\xe2\\x80\\x9d in Kerberos speak) is registered as a security principal with the other domain\\xe2\\x80\\x99s Kerberos service (KDC). This enables the ticket-granting service in each domain to treat the one in the other domain as just another service providing cross-domain service access for resources in the other domain.\\xe2\\x80\\x8b The Kerberos flow is the same as described earlier for all resources accessed within the domain. When the user requests a service ticket for a resource in another domain, the DC in the user\\xe2\\x80\\x99s domain (BLUE) sends the user a TGS referral message as part of the normal service ticket response message (TGS_REP) from the DC to the user. This message includes a TGT for the other domain where the desired resource is located (GREEN) and indicates it is a referral to another TGS. The TGT for the other domain is not signed by the GREEN domain\\xe2\\x80\\x99s KRBTGT account since the BLUE domain DCs don\\xe2\\x80\\x99t know the password for that account. Instead, the TGT for the other domain is signed and encrypted using the inter-realm key which is derived from the trust password. Since this inter-realm ticket is a TGT, it contains the user\\xe2\\x80\\x99s credentials and group membership though its signed with the inter-realm key, not the DC\\xe2\\x80\\x99s KRBTGT service account. The user needs to have access to the resource in the other domain in order for access to be granted. Inter-realm trust communication becomes more complicated in an Active Directory forest with multiple domains, including parent (root) and child domains. Imagine an AD forest with three domains, ROOT, CHILD1, & CHILD2. ROOT is the root domain with the other two configured as child domains, so ROOT has automatic two-way transitive trusts with both CHILD1 & CHILD2. In order for a CHILD1 user to access a resource in CHILD2, the following occurs: CHILD1 user authenticates and gets the user\\xe2\\x80\\x99s TGT for the CHILD1 domain. The user requests a service ticket for a share in CHILD2. The CHILD1 DC copies the CHILD1 TGT into a new inter-realm TGT (using the ROOT-CHILD1 inter-realm key) and sends it to the user along with a referral to the ROOT domain. The user sends the (ROOT-CHILD1) IR-TGT to a ROOT DC along with the TGS_REQ for the resource. The ROOT DC copies the IR-TGT into a new inter-realm TGT (using the ROOT-CHILD2 inter-realm key) and sends it to the user along with a referral to the CHILD2 domain. The user sends the (ROOT-CHILD2) IR-TGT to a CHILD2 DC along with the TGS_REQ for the resource. The CHILD2 DC copies the IR-TGT into a TGS used to access the resource. Note that the original referral message the user gets includes a session key for communicating with the ROOT DC. The ROOT DC then provides a new session key for the user to use to communicate with the CHILD2 DC. Forging Kerberos \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d In a scenario where an attacker compromised a single domain in an AD forest and dumped all the credentials, the attacker would naturally use Golden Tickets since they enable full access to the domain and the AD forest (Golden Tickets include Enterprise Admin group membership by default). The well-known remediation of Golden Ticket creation and use is to change the compromised KRBTGT account password twice. After this action is complete, the attacker can\\xe2\\x80\\x99t create any more Golden Tickets. However, there is another avenue for an attacker that has dumped all credentials from a Domain Controller to re-exploit the multi-domain AD forest. Since every domain in an AD forest has an implicit trust (and associated trust password) with at least one other domain, the attacker can forge a different type of Kerberos ticket to spoof Enterprise Admin rights in the target domain. Enterprise Admins are members of the Administrators group in every domain in an AD forest, this level of access enables the attacker to compromise all domains. This is kind of like a Golden Ticket across trusts. Forging the Inter-Realm TGT (IR-TGT) for access isn\\xe2\\x80\\x99t necessary if you have the KRBTGT account password, but if that has changed twice, the forged IR-TGT (Trust Ticket) can be used to impersonate an EA and regain full domain/forest admin rights. Since there\\xe2\\x80\\x99s an automatic, two-way transitive trust for every domain in the forest, getting the trust key for one trust, enables access to the others (though I\\xe2\\x80\\x99m not sure if the tools support this right now). This is due to the trust flow. It\\xe2\\x80\\x99s not a Silver Ticket since it\\xe2\\x80\\x99s not a forged TGS and it\\xe2\\x80\\x99s not exactly a Golden Ticket since it\\xe2\\x80\\x99s not using the KRBTGT account to forge a TGT. Forge the inter-realm TGT for a user in Domain A for the TGS_REQ to the Domain B DC to get a valid TGS to the Domain B resource. While forging trust keys should work really well in a multi-domain AD forest, there are a variety of trust options between domains/forests that could cause problems with attempting to extend compromise of one to another. With that said, if a user in Domain A has elevated rights to resources in Domain B, the forged IR-TGT should provide an attacker the same access as a Golden Ticket (since it would be used as the basis for the IR-TGT). One brilliant way to exploit this is to add admin groups for Domain B in the user\\xe2\\x80\\x99s forged IR-TGT in SID History (assuming the trust has it enabled), though this is theoretical at this point. Note: Two-way trusts are actually 2 one-way trusts, each of which has a different password which only change every 30 days (default). The TrustING domain PDC performs the password change for the trust. HarmJ0y has additional detail on this issue including great trust recon tools in PowerView. Forging External Trust Tickets There are essentially two different types of trust in Active Directory: one external to the AD forest and one internal. In this first section, we cover forging external trusts. Step 1: Dumping trust passwords (trust keys) The trust password is in a domain credential dump, just look for the trust name with a dollar ($) sign at the end. Most of the accounts with a trailing \\xe2\\x80\\x9c$\\xe2\\x80\\x9d are computer accounts, but some are trust accounts. Step 2: Create a forged trust ticket (inter-realm TGT) using Mimikatz Note that the trust password, aka trust key, was extracted along with all user data when dumping AD credentials. Each trust has an associated user account which contains that NTLM password hash. This data can be used to forge \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d. We use the trust password for the external trust to create the Trust Ticket file. The trust password is the same as what I used to create it. To create a trust with another forest, an admin on one side enters the trust password and the other admin uses the same trust password which may be sent via email to ensure it is entered correctly. This means that when a trust is first created, any one with knowledge of the trust password can create Trust Tickets. Creating a Trust Ticket is similar to creating a Golden Ticket., in fact it\\xe2\\x80\\x99s the same Mimikatz command, just with different options. The service key is the trust NTLM password hash and the target is the target domain FQDN. Save this ticket to a file for step 2 Step 3: Use the Trust Ticket file created in Step 2 to get a TGS for the targeted service in the destination domain. Save the TGS to a file. Step 4: Inject the TGS file created in Step 3 and then access the targeted service with the spoofed rights. \\xc2 Forging Internal AD Forest Trust Tickets Step 1: Dumping trust passwords (trust keys) Current Mimikatz versions can extract the trust keys (passwords). Step 2: Create a forged trust ticket (inter-realm TGT) using Mimikatz Forge the trust ticket which states the ticket holder is an Enterprise Admin in the AD Forest (leveraging SIDHistory, \\xe2\\x80\\x9csids\\xe2\\x80\\x9d, across trusts in Mimikatz, my \\xe2\\x80\\x9ccontribution\\xe2\\x80\\x9d to Mimikatz). This enables full administrative access from a child domain to the parent domain. Note that this account doesn\\xe2\\x80\\x99t have to exist anywhere as it is effectively a Golden Ticket across the trust. Step 3: Use the Trust Ticket file created in Step 2 to get a TGS for the targeted service in the destination domain. Save the TGS to a file. The resulting TGS provides EA access to the parent (root) domain\\xe2\\x80\\x99s Domain Controller. Step 4: Inject the TGS file created in Step 3 and then access the targeted service with the spoofed rights. Once the ticket is passed the user is an Enterprise Admin for the AD forest and has DA rights to the DC in the target domain. This is a great way to escalate rights across other domains in the forest. Note that unless an attacker gets the KRBTGT account in the domain that hosts the EA group, the Golden Ticket only grants DA rights to the current domain (the one the Golden Ticket was created in). Once the attacker dumps the credentials for the current domain, the trust password is used to create a Trust Key that states the holder of the ticket is EA. Then the target domain can be exploited. This can be repeated to move through every domain in the forest quite easily since every child domain inherently trusts the parent aka root domain. So, using a Trust Ticket to become EA in the AD forest involves compromising a single domain. Conclusion In a multi-domain AD forest, each domain has a trust with at least one other domain. Each trust has an associated password which can be used to forge trust tickets. Compromise one domain to potentially compromise another. Reducing the AD computer account policy mitigates this attack since Trust passwords are changed on this schedule (TrustING domain). Regarding Trust Tickets within an Active Directory Forest: Using a Kerberos trust ticket from Child domain impersonating a Child domain user provides the level of access that Child domain user has at the Parent domain. If the Child domain user is a member of Enterprise Admins or a group that has admin rights on the parent, the forged Trust Ticket provides admin access to the parent. Using the /sids parameter in Mimikatz to add the Enterprise Admins group in the Parent domain to the Child domain user account in the Trust Ticket provides EA rights to the Parent domain without the Child domain user account actually having these rights. Note that this is similar behavior to \\xe2\\x80\\x9cenhanced\\xe2\\x80\\x9d Golden Tickets since they use SID History to spoof access across domains. Even if the KRBTGT account password is rotated on a regular basis, the attacker may still have the trust key (password) and can use that to regain full Enterprise Admin rights. Mitigating factor: Changing the domain machine password policy to be a low number in the TrustING domain ensures the trust password changes more quickly (along with the domain computer account passwords). Best Mitigation: Don\\xe2\\x80\\x99t let attackers run code on DCs \\xe2\\x80\\x93 Protect Domain Admins! \\xc2 References: Kerberos, Active Directory\\xe2\\x80\\x99s Secret Decoder Ring http://adsecurity.org/?p=227 Kerberos, Kerberos across trusts, and trust passwords https://technet.microsoft.com/en-us/library/cc772815%28v=ws.10%29.aspx Mimikatz and Active Directory Kerberos Attacks http://adsecurity.org/?p=556 Kerberos & KRBTGT: Active Directory\\xe2\\x80\\x99s Domain Kerberos Account http://adsecurity.org/?p=483 Black Hat USA 2014 \\xe2\\x80\\x93 Windows: Abusing Microsoft Kerberos Sorry You Guys Don\\xe2\\x80\\x99t Get It https://www.youtube.com/watch?v=-IMrNGPZTl0&index=4&list=UUbbgnifxfH-nqx6z9XQ963Q Mimikatz and Golden Tickets\\xe2\\x80\\xa6 What\\xe2\\x80\\x99s the BFD? BlackHat USA 2014 Redux part 1 http://passing-the-hash.blogspot.com/2014/08/mimikatz-and-golden-tickets-whats-bfd.html Mimikatz Golden Ticket blog entry by Benjamin Delpy (Mimikatz author) http://blog.gentilkiwi.com/securite/mimikatz/golden-ticket-kerberos Protection from Kerberos Golden Ticket: Mitigating pass the ticket on Active Directory (CERT-EU Security White Paper 2014-07) http://cert.europa.eu/static/WhitePapers/CERT-EU-SWP_14_07_PassTheGolden_Ticket_v1_1.pdf \\xc2 (Visited 15,844 times, 14 visits today) AskTGS, ForgeKerberosTicket, Inter-RealmKey, Kekeo, Kerberos, mimikatz, TGS, TGT, TrustKey, TrustPassword, TrustTicket Sean Metcalf I improve security for enterprises around the world working for TrimarcSecurity.com Read the About page (top left) for information about me. :) https://adsecurity.org/?page_id=8 5 comments Skip to comment form Gregory on July 20, 2015 at 12:53 pm # Hi, In an inter-forest scenario you can use Selective Authentication as a mitigation factor. Without the extended right \\xe2\\x80\\x9cAllowed to Authenticate\\xe2\\x80\\x9d delegated on the ressource you want to access you can\\xe2\\x80\\x99t request TGS with the referral ticket you craft. Moreover, well-known SIDs (500, 512, 518, 519,\\xe2\\x80\\xa6) should be filtered from the PAC by the SID filtering according to the rules of their class (DomainSpecific, ForestSpecific, AlwaysFiltered) when you request a TGS with the referral ticket. I\\xe2\\x80\\x99ll have to make some tests to verify that. \\xf0\\x9f\\x98\\x89 Regards, Greg Sean Metcalf on July 20, 2015 at 8:09 pm Author # True, but in an inter-forest trust scenario, any delegated rights on resources in the trusting domain(/forest) to users/groups in a trusted domain(/forest) can be exploited using this method. Note that SID filtering doesn\\xe2\\x80\\x99t play into the scenario I lay out. The forged trust ticket is spoofing existing user(s) and/or group(s) to gain access to (potentially over-)permissioned resources in another domain. The most common scenario for an inter-forest (aka external or cross-forest) trust is to provide access to resources (or migration). Often these permissions are more than they should be and from I\\xe2\\x80\\x99ve seen often provide DA rights in one forest to Domain Admins in another. I\\xe2\\x80\\x99ll have more information on SID History at my Black Hat & DEF CON talks in a couple of weeks\\xe2\\x80\\xa6 \\xf0\\x9f\\x98\\x89 Gregory on July 21, 2015 at 5:20 am # Hi, I\\xe2\\x80\\x99m only interested in inter-forest scenario. I agree but to determine who has the extended right on computer objects by viewing ACL and/or group membership you have to request a TGS for LDAP service. And you can\\xe2\\x80\\x99t if you haven\\xe2\\x80\\x99t the extended right \\xe2\\x80\\x9cAllowed to authenticate\\xe2\\x80\\x9d on domain controllers. Without that information it will be more difficult (but not impossible) for an attacker to guess who has access on ressources. You can try to guess with groups name in the trusted but if users are direct members of domain local group in the trusting domain you have to inject random SID in the referral ticket. The TGS request will surely generate TGS request failure which can be monitored by security team and can be a clue that someone try to access your ressources. For SID filtering, I just pointed that by default mimikatz inject well-known SID which are \\xe2\\x80\\x9cnormally\\xe2\\x80\\x9d filtered whether SID filtering is enabled or not. Regards, Greg Sean Metcalf on July 21, 2015 at 7:11 pm Author # You\\xe2\\x80\\x99re right. Selective Auth changes the way that access occurs over a trust. I just wish more customers would use it (though it does complicate granting resource access). I will probably write another post on trust security covering trust security options in more detail. Thanks for the feedback! anon on July 27, 2015 at 4:32 pm # Please do post on trust security options. I have recently seen a disaster-calling situation where IT team of a big multinational corporation wanted (for the sake of \\xe2\\x80\\x9csimplicity\\xe2\\x80\\x9d) to aggregate a thousands of users from several countries into a _single_ Windows domain (aka single forest with only a root domain!). The argument for separating users in multiple forests (aka security boundaries) at least geographically and activating the Selective Authentication wasn\\xe2\\x80\\x99t good enough for them \\xe2\\x80\\x93 \\xe2\\x80\\x9cit\\xe2\\x80\\x99s expensive, wants many machines and takes too much time to administer\\xe2\\x80\\x9d. This article challenges even the inter-forest security, not to mention the intra- or single-domain scenario. Thank you for a good article. Comments have been disabled. Recent Posts Slides Posted for Black Hat USA 2019 Talk: Attacking & Defending the Microsoft Cloud AD Reading: Windows Server 2019 Active Directory Features There\\xe2\\x80\\x99s Something About Service Accounts Mitigating Exchange Permission Paths to Domain Admins in Active Directory From DNSAdmins to Domain Admin, When DNSAdmins is More than Just DNS Administration Trimarc Active Directory Security Services Have concerns about your Active Directory environment? Trimarc helps enterprises improve their security posture. Find out how... TrimarcSecurity.com Popular Posts Attack Methods for Gaining Domain Admin Rights in\\xe2\\x80\\xa6 PowerShell Encoding & Decoding (Base64) Securing Windows Workstations: Developing a Secure Baseline Securing Domain Controllers to Improve Active\\xe2\\x80\\xa6 Finding Passwords in SYSVOL & Exploiting Group\\xe2\\x80\\xa6 The Most Common Active Directory Security Issues and\\xe2\\x80\\xa6 Kerberos & KRBTGT: Active Directory\\xe2\\x80\\x99s\\xe2\\x80\\xa6 Building an Effective Active Directory Lab\\xe2\\x80\\xa6 Microsoft Local Administrator Password Solution (LAPS) Detecting Offensive PowerShell Attack Tools Categories ActiveDirectorySecurity Apple Security Cloud Security Continuing Education Entertainment Exploit Hacking Hardware Security Hypervisor Security Linux/Unix Security Malware Microsoft Security Mitigation Network/System Security PowerShell RealWorld Security Security Conference Presentation/Video Security Recommendation Technical Article Technical Reading Technical Reference TheCloud Vulnerability Tags ActiveDirectory Active Directory ActiveDirectoryAttack Active Directory Security ActiveDirectorySecurity ADReading ADSecurity AD Security DCSync DEFCON DomainController EMET5 GoldenTicket HyperV Invoke-Mimikatz KB3011780 KDC Kerberos KerberosHacking KRBTGT LAPS LSASS MCM MicrosoftEMET MicrosoftWindows mimikatz MS14068 PassTheHash PowerShell PowerShellCode PowerShellHacking PowerShellv5 PowerSploit Presentation Security SIDHistory SilverTicket SneakyADPersistence SPN TGS TGT Windows10 WindowsServer2008R2 WindowsServer2012 WindowsServer2012R2 Copyright Content Disclaimer: This blog and its contents are provided \"AS IS\" with no warranties, and they confer no rights. Script samples are provided for informational purposes only and no guarantee is provided as to functionality or suitability. The views shared on this blog reflect those of the authors and do not represent the views of any companies mentioned. Content Ownership: All content posted here is intellectual work and under the current law, the poster owns the copyright of the article. Terms of Use Copyright \\xc2\\xa9 2011 - 2017. Content Disclaimer: This blog and its contents are provided \"AS IS\" with no warranties, and they confer no rights. Script samples are provided for informational purposes only and no guarantee is provided as to functionality or suitability. The views shared on this blog reflect those of the authors and do not represent the views of any companies mentioned. Made with by Graphene Themes.",
+  "sanitized_txt": "It\\xe2\\x80\\x99s All About Trust \\xe2\\x80\\x93 Forging Kerberos Trust Tickets to Spoof Access across Active Directory Trusts \\xe2\\x80\\x93 Active Directory Security Toggle search form Toggle navigation Active Directory Security Active Directory & Enterprise Security, Methods to Secure Active Directory, Attack Methods & Effective Defenses, PowerShell, Tech Notes, & Geek Trivia\\xe2\\x80\\xa6 Home About AD Resources Attack Defense & Detection Contact Mimikatz Presentations Schema Versions Security Resources SPNs Top Posts Microsoft Advanced Threat Analytics (ATA) Overview Black Hat USA 2015 Red vs Blue Active Directory Attack & Defense Talk Detail Jul 15 2015 It\\xe2\\x80\\x99s All About Trust \\xe2\\x80\\x93 Forging Kerberos Trust Tickets to Spoof Access across Active Directory Trusts By Sean Metcalf in Microsoft Security, Technical Reading In early 2015, I theorized that it\\xe2\\x80\\x99s possible to forge inter-realm (inter-trust) Kerberos tickets in a similar manner to how intra-domain TGTs (Golden Tickets) and TGSs (Silver Tickets) are forged. Around the same time, Benjamin Delpy updated Mimikatz to dump trust keys from a Domain Controller. Soon after, Mimikatz gained capability to forge inter-realm trust tickets. Benjamin Delpy added \\xe2\\x80\\x9cKekeo\\xe2\\x80\\x9d to Github which includes \\xe2\\x80\\x9cAskTGS\\xe2\\x80\\x9d which provides the capability to request TGS service tickets for targeted services in the destination domain and save them to file. With the tools enabling further research, I was able to explore what is possible with forged cross-trust Kerberos tickets. Note that forging a Kerberos Trust Ticket is similar to forging a Golden Ticket or a Silver Ticket. The key to the power of a Kerberos Trust Ticket within a multi-domain Active Directory forest is Enterprise Admins membership which easily crosses domain boundaries providing effective Domain Admin rights in every domain in the AD forest. I presented on \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d at Shakacon in Hawaii last week. Simply put, Trust Tickets are forged inter-realm Kerberos tickets. When there are two Active Directory domains connected via trust, there is a password which is shared between them used to keep the trust active. This trust password is also used as the shared secret in Kerberos. I also presented at Black Hat USA 2015 how I enabled Golden Tickets to work across domains in the same forest (aka Enhanced Golden Tickets). Update 9/2/2015: I updated the screenshots to accurately show how the intra-forest trust is exploited using the current version of Mimikatz. Kerberos Across Trusts Kerberos communication within a domain is pretty straightforward \\xe2\\x80\\x93 the domain Kerberos service account is used to sign and encrypt every authentication ticket (TGT). This enables the TGT to be used throughout the domain and presented to any DC in the domain. This works since the Kerberos service account (KRBTGT) is effectively the trust anchor used for the domain and is why losing control of the KRBTGT account password hash equates to losing control of the domain. When a user authenticates to Active Directory, the authenticating Domain Controller creates a TGT (authentication ticket) for the user that contains the groups the user is a member of (including groups from other domains in the forest, such as universal groups), signs, and encrypts the ticket using the KRBTGT password hash. When presented later to the DC for a service ticket (TGS), the TGT ticket and its contents are validated. The DC effectively copies the contents of the TGT into a TGS (service ticket) that the user presents to the target service. One component of the TGS is encrypted with the target service\\xe2\\x80\\x99s password hash and the other with the user\\xe2\\x80\\x99s password hash. If the target service can open the TGS, it is accepted. This means that the user\\xe2\\x80\\x99s TGT can be reused to get service tickets during the TGT\\xe2\\x80\\x99s lifetime (10 hours by default). The TGT is also portable, so if an attacker can steal a user\\xe2\\x80\\x99s TGT, it can be reused on any other computer on the network, at the same time, to access any resource to which the user has access. When an attacker gains access to the KRBTGT password hash on the domain, it is possible for them to generate their own TGTs (called \\xe2\\x80\\x9cGolden Tickets\\xe2\\x80\\x9d) that are accepted by all the Domain Controllers in the domain since they are signed and encrypted with the domain Kerberos service account data. Simply put, a Golden Ticket is a valid TGT. In order for the user to access resources in another domain in the same forest, the Kerberos process involves another layer since the Kerberos service (KDC) in one domain can\\xe2\\x80\\x99t issue a service ticket (TGS) in another. Since the TGS can only be built using the target service\\xe2\\x80\\x99s password data and Domain Controllers (DCs) only contain password data for security principals (users, computers, etc) in their own domain, the DC does not have the target services password data and can\\xe2\\x80\\x99t create the TGS. In order to resolve this issue, there is a trust password between two domains in the same AD forest used as a bridge enabling Kerberos authentication across domains. Once there is a trust between two domains, (domain BLUE and domain GREEN both are in the same AD forest for this example), the ticket-granting service of each domain (\\xe2\\x80\\x9crealm\\xe2\\x80\\x9d in Kerberos speak) is registered as a security principal with the other domain\\xe2\\x80\\x99s Kerberos service (KDC). This enables the ticket-granting service in each domain to treat the one in the other domain as just another service providing cross-domain service access for resources in the other domain.\\xe2\\x80\\x8b The Kerberos flow is the same as described earlier for all resources accessed within the domain. When the user requests a service ticket for a resource in another domain, the DC in the user\\xe2\\x80\\x99s domain (BLUE) sends the user a TGS referral message as part of the normal service ticket response message (TGS_REP) from the DC to the user. This message includes a TGT for the other domain where the desired resource is located (GREEN) and indicates it is a referral to another TGS. The TGT for the other domain is not signed by the GREEN domain\\xe2\\x80\\x99s KRBTGT account since the BLUE domain DCs don\\xe2\\x80\\x99t know the password for that account. Instead, the TGT for the other domain is signed and encrypted using the inter-realm key which is derived from the trust password. Since this inter-realm ticket is a TGT, it contains the user\\xe2\\x80\\x99s credentials and group membership though its signed with the inter-realm key, not the DC\\xe2\\x80\\x99s KRBTGT service account. The user needs to have access to the resource in the other domain in order for access to be granted. Inter-realm trust communication becomes more complicated in an Active Directory forest with multiple domains, including parent (root) and child domains. Imagine an AD forest with three domains, ROOT, CHILD1, & CHILD2. ROOT is the root domain with the other two configured as child domains, so ROOT has automatic two-way transitive trusts with both CHILD1 & CHILD2. In order for a CHILD1 user to access a resource in CHILD2, the following occurs: CHILD1 user authenticates and gets the user\\xe2\\x80\\x99s TGT for the CHILD1 domain. The user requests a service ticket for a share in CHILD2. The CHILD1 DC copies the CHILD1 TGT into a new inter-realm TGT (using the ROOT-CHILD1 inter-realm key) and sends it to the user along with a referral to the ROOT domain. The user sends the (ROOT-CHILD1) IR-TGT to a ROOT DC along with the TGS_REQ for the resource. The ROOT DC copies the IR-TGT into a new inter-realm TGT (using the ROOT-CHILD2 inter-realm key) and sends it to the user along with a referral to the CHILD2 domain. The user sends the (ROOT-CHILD2) IR-TGT to a CHILD2 DC along with the TGS_REQ for the resource. The CHILD2 DC copies the IR-TGT into a TGS used to access the resource. Note that the original referral message the user gets includes a session key for communicating with the ROOT DC. The ROOT DC then provides a new session key for the user to use to communicate with the CHILD2 DC. Forging Kerberos \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d In a scenario where an attacker compromised a single domain in an AD forest and dumped all the credentials, the attacker would naturally use Golden Tickets since they enable full access to the domain and the AD forest (Golden Tickets include Enterprise Admin group membership by default). The well-known remediation of Golden Ticket creation and use is to change the compromised KRBTGT account password twice. After this action is complete, the attacker can\\xe2\\x80\\x99t create any more Golden Tickets. However, there is another avenue for an attacker that has dumped all credentials from a Domain Controller to re-exploit the multi-domain AD forest. Since every domain in an AD forest has an implicit trust (and associated trust password) with at least one other domain, the attacker can forge a different type of Kerberos ticket to spoof Enterprise Admin rights in the target domain. Enterprise Admins are members of the Administrators group in every domain in an AD forest, this level of access enables the attacker to compromise all domains. This is kind of like a Golden Ticket across trusts. Forging the Inter-Realm TGT (IR-TGT) for access isn\\xe2\\x80\\x99t necessary if you have the KRBTGT account password, but if that has changed twice, the forged IR-TGT (Trust Ticket) can be used to impersonate an EA and regain full domain/forest admin rights. Since there\\xe2\\x80\\x99s an automatic, two-way transitive trust for every domain in the forest, getting the trust key for one trust, enables access to the others (though I\\xe2\\x80\\x99m not sure if the tools support this right now). This is due to the trust flow. It\\xe2\\x80\\x99s not a Silver Ticket since it\\xe2\\x80\\x99s not a forged TGS and it\\xe2\\x80\\x99s not exactly a Golden Ticket since it\\xe2\\x80\\x99s not using the KRBTGT account to forge a TGT. Forge the inter-realm TGT for a user in Domain A for the TGS_REQ to the Domain B DC to get a valid TGS to the Domain B resource. While forging trust keys should work really well in a multi-domain AD forest, there are a variety of trust options between domains/forests that could cause problems with attempting to extend compromise of one to another. With that said, if a user in Domain A has elevated rights to resources in Domain B, the forged IR-TGT should provide an attacker the same access as a Golden Ticket (since it would be used as the basis for the IR-TGT). One brilliant way to exploit this is to add admin groups for Domain B in the user\\xe2\\x80\\x99s forged IR-TGT in SID History (assuming the trust has it enabled), though this is theoretical at this point. Note: Two-way trusts are actually 2 one-way trusts, each of which has a different password which only change every 30 days (default). The TrustING domain PDC performs the password change for the trust. HarmJ0y has additional detail on this issue including great trust recon tools in PowerView. Forging External Trust Tickets There are essentially two different types of trust in Active Directory: one external to the AD forest and one internal. In this first section, we cover forging external trusts. Step 1: Dumping trust passwords (trust keys) The trust password is in a domain credential dump, just look for the trust name with a dollar ($) sign at the end. Most of the accounts with a trailing \\xe2\\x80\\x9c$\\xe2\\x80\\x9d are computer accounts, but some are trust accounts. Step 2: Create a forged trust ticket (inter-realm TGT) using Mimikatz Note that the trust password, aka trust key, was extracted along with all user data when dumping AD credentials. Each trust has an associated user account which contains that NTLM password hash. This data can be used to forge \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d. We use the trust password for the external trust to create the Trust Ticket file. The trust password is the same as what I used to create it. To create a trust with another forest, an admin on one side enters the trust password and the other admin uses the same trust password which may be sent via email to ensure it is entered correctly. This means that when a trust is first created, any one with knowledge of the trust password can create Trust Tickets. Creating a Trust Ticket is similar to creating a Golden Ticket., in fact it\\xe2\\x80\\x99s the same Mimikatz command, just with different options. The service key is the trust NTLM password hash and the target is the target domain FQDN. Save this ticket to a file for step 2 Step 3: Use the Trust Ticket file created in Step 2 to get a TGS for the targeted service in the destination domain. Save the TGS to a file. Step 4: Inject the TGS file created in Step 3 and then access the targeted service with the spoofed rights. \\xc2 Forging Internal AD Forest Trust Tickets Step 1: Dumping trust passwords (trust keys) Current Mimikatz versions can extract the trust keys (passwords). Step 2: Create a forged trust ticket (inter-realm TGT) using Mimikatz Forge the trust ticket which states the ticket holder is an Enterprise Admin in the AD Forest (leveraging SIDHistory, \\xe2\\x80\\x9csids\\xe2\\x80\\x9d, across trusts in Mimikatz, my \\xe2\\x80\\x9ccontribution\\xe2\\x80\\x9d to Mimikatz). This enables full administrative access from a child domain to the parent domain. Note that this account doesn\\xe2\\x80\\x99t have to exist anywhere as it is effectively a Golden Ticket across the trust. Step 3: Use the Trust Ticket file created in Step 2 to get a TGS for the targeted service in the destination domain. Save the TGS to a file. The resulting TGS provides EA access to the parent (root) domain\\xe2\\x80\\x99s Domain Controller. Step 4: Inject the TGS file created in Step 3 and then access the targeted service with the spoofed rights. Once the ticket is passed the user is an Enterprise Admin for the AD forest and has DA rights to the DC in the target domain. This is a great way to escalate rights across other domains in the forest. Note that unless an attacker gets the KRBTGT account in the domain that hosts the EA group, the Golden Ticket only grants DA rights to the current domain (the one the Golden Ticket was created in). Once the attacker dumps the credentials for the current domain, the trust password is used to create a Trust Key that states the holder of the ticket is EA. Then the target domain can be exploited. This can be repeated to move through every domain in the forest quite easily since every child domain inherently trusts the parent aka root domain. So, using a Trust Ticket to become EA in the AD forest involves compromising a single domain. Conclusion In a multi-domain AD forest, each domain has a trust with at least one other domain. Each trust has an associated password which can be used to forge trust tickets. Compromise one domain to potentially compromise another. Reducing the AD computer account policy mitigates this attack since Trust passwords are changed on this schedule (TrustING domain). Regarding Trust Tickets within an Active Directory Forest: Using a Kerberos trust ticket from Child domain impersonating a Child domain user provides the level of access that Child domain user has at the Parent domain. If the Child domain user is a member of Enterprise Admins or a group that has admin rights on the parent, the forged Trust Ticket provides admin access to the parent. Using the /sids parameter in Mimikatz to add the Enterprise Admins group in the Parent domain to the Child domain user account in the Trust Ticket provides EA rights to the Parent domain without the Child domain user account actually having these rights. Note that this is similar behavior to \\xe2\\x80\\x9cenhanced\\xe2\\x80\\x9d Golden Tickets since they use SID History to spoof access across domains. Even if the KRBTGT account password is rotated on a regular basis, the attacker may still have the trust key (password) and can use that to regain full Enterprise Admin rights. Mitigating factor: Changing the domain machine password policy to be a low number in the TrustING domain ensures the trust password changes more quickly (along with the domain computer account passwords). Best Mitigation: Don\\xe2\\x80\\x99t let attackers run code on DCs \\xe2\\x80\\x93 Protect Domain Admins! \\xc2 References: Kerberos, Active Directory\\xe2\\x80\\x99s Secret Decoder Ring http://adsecurity.org/?p=227 Kerberos, Kerberos across trusts, and trust passwords https://technet.microsoft.com/en-us/library/cc772815%28v=ws.10%29.aspx Mimikatz and Active Directory Kerberos Attacks http://adsecurity.org/?p=556 Kerberos & KRBTGT: Active Directory\\xe2\\x80\\x99s Domain Kerberos Account http://adsecurity.org/?p=483 Black Hat USA 2014 \\xe2\\x80\\x93 Windows: Abusing Microsoft Kerberos Sorry You Guys Don\\xe2\\x80\\x99t Get It https://www.youtube.com/watch?v=-IMrNGPZTl0&index=4&list=UUbbgnifxfH-nqx6z9XQ963Q Mimikatz and Golden Tickets\\xe2\\x80\\xa6 What\\xe2\\x80\\x99s the BFD? BlackHat USA 2014 Redux part 1 http://passing-the-hash.blogspot.com/2014/08/mimikatz-and-golden-tickets-whats-bfd.html Mimikatz Golden Ticket blog entry by Benjamin Delpy (Mimikatz author) http://blog.gentilkiwi.com/securite/mimikatz/golden-ticket-kerberos Protection from Kerberos Golden Ticket: Mitigating pass the ticket on Active Directory (CERT-EU Security White Paper 2014-07) http://cert.europa.eu/static/WhitePapers/CERT-EU-SWP_14_07_PassTheGolden_Ticket_v1_1.pdf \\xc2 (Visited 15,844 times, 14 visits today) AskTGS, ForgeKerberosTicket, Inter-RealmKey, Kekeo, Kerberos, mimikatz, TGS, TGT, TrustKey, TrustPassword, TrustTicket Sean Metcalf I improve security for enterprises around the world working for TrimarcSecurity.com Read the About page (top left) for information about me. :) https://adsecurity.org/?page_id=8 5 comments Skip to comment form Gregory on July 20, 2015 at 12:53 pm # Hi, In an inter-forest scenario you can use Selective Authentication as a mitigation factor. Without the extended right \\xe2\\x80\\x9cAllowed to Authenticate\\xe2\\x80\\x9d delegated on the ressource you want to access you can\\xe2\\x80\\x99t request TGS with the referral ticket you craft. Moreover, well-known SIDs (500, 512, 518, 519,\\xe2\\x80\\xa6) should be filtered from the PAC by the SID filtering according to the rules of their class (DomainSpecific, ForestSpecific, AlwaysFiltered) when you request a TGS with the referral ticket. I\\xe2\\x80\\x99ll have to make some tests to verify that. \\xf0\\x9f\\x98\\x89 Regards, Greg Sean Metcalf on July 20, 2015 at 8:09 pm Author # True, but in an inter-forest trust scenario, any delegated rights on resources in the trusting domain(/forest) to users/groups in a trusted domain(/forest) can be exploited using this method. Note that SID filtering doesn\\xe2\\x80\\x99t play into the scenario I lay out. The forged trust ticket is spoofing existing user(s) and/or group(s) to gain access to (potentially over-)permissioned resources in another domain. The most common scenario for an inter-forest (aka external or cross-forest) trust is to provide access to resources (or migration). Often these permissions are more than they should be and from I\\xe2\\x80\\x99ve seen often provide DA rights in one forest to Domain Admins in another. I\\xe2\\x80\\x99ll have more information on SID History at my Black Hat & DEF CON talks in a couple of weeks\\xe2\\x80\\xa6 \\xf0\\x9f\\x98\\x89 Gregory on July 21, 2015 at 5:20 am # Hi, I\\xe2\\x80\\x99m only interested in inter-forest scenario. I agree but to determine who has the extended right on computer objects by viewing ACL and/or group membership you have to request a TGS for LDAP service. And you can\\xe2\\x80\\x99t if you haven\\xe2\\x80\\x99t the extended right \\xe2\\x80\\x9cAllowed to authenticate\\xe2\\x80\\x9d on domain controllers. Without that information it will be more difficult (but not impossible) for an attacker to guess who has access on ressources. You can try to guess with groups name in the trusted but if users are direct members of domain local group in the trusting domain you have to inject random SID in the referral ticket. The TGS request will surely generate TGS request failure which can be monitored by security team and can be a clue that someone try to access your ressources. For SID filtering, I just pointed that by default mimikatz inject well-known SID which are \\xe2\\x80\\x9cnormally\\xe2\\x80\\x9d filtered whether SID filtering is enabled or not. Regards, Greg Sean Metcalf on July 21, 2015 at 7:11 pm Author # You\\xe2\\x80\\x99re right. Selective Auth changes the way that access occurs over a trust. I just wish more customers would use it (though it does complicate granting resource access). I will probably write another post on trust security covering trust security options in more detail. Thanks for the feedback! anon on July 27, 2015 at 4:32 pm # Please do post on trust security options. I have recently seen a disaster-calling situation where IT team of a big multinational corporation wanted (for the sake of \\xe2\\x80\\x9csimplicity\\xe2\\x80\\x9d) to aggregate a thousands of users from several countries into a _single_ Windows domain (aka single forest with only a root domain!). The argument for separating users in multiple forests (aka security boundaries) at least geographically and activating the Selective Authentication wasn\\xe2\\x80\\x99t good enough for them \\xe2\\x80\\x93 \\xe2\\x80\\x9cit\\xe2\\x80\\x99s expensive, wants many machines and takes too much time to administer\\xe2\\x80\\x9d. This article challenges even the inter-forest security, not to mention the intra- or single-domain scenario. Thank you for a good article. Comments have been disabled. Recent Posts Slides Posted for Black Hat USA 2019 Talk: Attacking & Defending the Microsoft Cloud AD Reading: Windows Server 2019 Active Directory Features There\\xe2\\x80\\x99s Something About Service Accounts Mitigating Exchange Permission Paths to Domain Admins in Active Directory From DNSAdmins to Domain Admin, When DNSAdmins is More than Just DNS Administration Trimarc Active Directory Security Services Have concerns about your Active Directory environment? Trimarc helps enterprises improve their security posture. Find out how... TrimarcSecurity.com Popular Posts Attack Methods for Gaining Domain Admin Rights in\\xe2\\x80\\xa6 PowerShell Encoding & Decoding (Base64) Securing Windows Workstations: Developing a Secure Baseline Securing Domain Controllers to Improve Active\\xe2\\x80\\xa6 Finding Passwords in SYSVOL & Exploiting Group\\xe2\\x80\\xa6 The Most Common Active Directory Security Issues and\\xe2\\x80\\xa6 Kerberos & KRBTGT: Active Directory\\xe2\\x80\\x99s\\xe2\\x80\\xa6 Building an Effective Active Directory Lab\\xe2\\x80\\xa6 Microsoft Local Administrator Password Solution (LAPS) Detecting Offensive PowerShell Attack Tools Categories ActiveDirectorySecurity Apple Security Cloud Security Continuing Education Entertainment Exploit Hacking Hardware Security Hypervisor Security Linux/Unix Security Malware Microsoft Security Mitigation Network/System Security PowerShell RealWorld Security Security Conference Presentation/Video Security Recommendation Technical Article Technical Reading Technical Reference TheCloud Vulnerability Tags ActiveDirectory Active Directory ActiveDirectoryAttack Active Directory Security ActiveDirectorySecurity ADReading ADSecurity AD Security DCSync DEFCON DomainController EMET5 GoldenTicket HyperV Invoke-Mimikatz KB3011780 KDC Kerberos KerberosHacking KRBTGT LAPS LSASS MCM MicrosoftEMET MicrosoftWindows mimikatz MS14068 PassTheHash PowerShell PowerShellCode PowerShellHacking PowerShellv5 PowerSploit Presentation Security SIDHistory SilverTicket SneakyADPersistence SPN TGS TGT Windows10 WindowsServer2008R2 WindowsServer2012 WindowsServer2012R2 Copyright Content Disclaimer: This blog and its contents are provided \"AS IS\" with no warranties, and they confer no rights. Script samples are provided for informational purposes only and no guarantee is provided as to functionality or suitability. The views shared on this blog reflect those of the authors and do not represent the views of any companies mentioned. Content Ownership: All content posted here is intellectual work and under the current law, the poster owns the copyright of the article. Terms of Use Copyright \\xc2\\xa9 2011 - 2017. Content Disclaimer: This blog and its contents are provided \"AS IS\" with no warranties, and they confer no rights. Script samples are provided for informational purposes only and no guarantee is provided as to functionality or suitability. The views shared on this blog reflect those of the authors and do not represent the views of any companies mentioned. Made with by Graphene Themes.",
+  "ID_list": [
+    "T1482",
+    "TA0007"
+  ],
+  "Name_list": [
+    "At",
+    "Credentials",
+    "Domains",
+    "Pass the Ticket",
+    "Source",
+    "Tool"
+  ],
+  "TTP_sentences": {
+    "T1482": [
+      {
+        "sentence": "Around the same time, Benjamin Delpy updated Mimikatz to dump trust keys from a Domain Controller.",
+        "score": 0.5219
+      },
+      {
+        "sentence": "Soon after, Mimikatz gained capability to forge inter-realm trust tickets.",
+        "score": 0.4985
+      },
+      {
+        "sentence": "Benjamin Delpy added \\xe2\\x80\\x9cKekeo\\xe2\\x80\\x9d to Github which includes \\xe2\\x80\\x9cAskTGS\\xe2\\x80\\x9d which provides the capability to request TGS service tickets for targeted services in the destination domain and save them to file.",
+        "score": 0.4409
+      },
+      {
+        "sentence": "With the tools enabling further research, I was able to explore what is possible with forged cross-trust Kerberos tickets.",
+        "score": 0.4246
+      },
+      {
+        "sentence": "Note that forging a Kerberos Trust Ticket is similar to forging a Golden Ticket or a Silver Ticket.",
+        "score": 0.4651
+      },
+      {
+        "sentence": "The key to the power of a Kerberos Trust Ticket within a multi-domain Active Directory forest is Enterprise Admins membership which easily crosses domain boundaries providing effective Domain Admin rights in every domain in the AD forest.",
+        "score": 0.6098
+      },
+      {
+        "sentence": "I presented on \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d at Shakacon in Hawaii last week.",
+        "score": 0.3215
+      },
+      {
+        "sentence": "Simply put, Trust Tickets are forged inter-realm Kerberos tickets.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "When there are two Active Directory domains connected via trust, there is a password which is shared between them used to keep the trust active.",
+        "score": 0.578
+      },
+      {
+        "sentence": "This trust password is also used as the shared secret in Kerberos.",
+        "score": 0.43
+      },
+      {
+        "sentence": "I also presented at Black Hat USA 2015 how I enabled Golden Tickets to work across domains in the same forest (aka Enhanced Golden Tickets).",
+        "score": 0.5285
+      },
+      {
+        "sentence": "Update 9/2/2015: I updated the screenshots to accurately show how the intra-forest trust is exploited using the current version of Mimikatz.",
+        "score": 0.4222
+      },
+      {
+        "sentence": "Kerberos Across Trusts Kerberos communication within a domain is pretty straightforward \\xe2\\x80\\x93 the domain Kerberos service account is used to sign and encrypt every authentication ticket (TGT).",
+        "score": 0.482
+      },
+      {
+        "sentence": "This enables the TGT to be used throughout the domain and presented to any DC in the domain.",
+        "score": 0.4172
+      },
+      {
+        "sentence": "This works since the Kerberos service account (KRBTGT) is effectively the trust anchor used for the domain and is why losing control of the KRBTGT account password hash equates to losing control of the domain.",
+        "score": 0.5121
+      },
+      {
+        "sentence": "When a user authenticates to Active Directory, the authenticating Domain Controller creates a TGT (authentication ticket) for the user that contains the groups the user is a member of (including groups from other domains in the forest, such as universal groups), signs, and encrypts the ticket using the KRBTGT password hash.",
+        "score": 0.5714
+      },
+      {
+        "sentence": "When presented later to the DC for a service ticket (TGS), the TGT ticket and its contents are validated.",
+        "score": 0.3808
+      },
+      {
+        "sentence": "The DC effectively copies the contents of the TGT into a TGS (service ticket) that the user presents to the target service.",
+        "score": 0.3894
+      },
+      {
+        "sentence": "One component of the TGS is encrypted with the target service\\xe2\\x80\\x99s password hash and the other with the user\\xe2\\x80\\x99s password hash.",
+        "score": 0.3884
+      },
+      {
+        "sentence": "If the target service can open the TGS, it is accepted.",
+        "score": 0.371
+      },
+      {
+        "sentence": "This means that the user\\xe2\\x80\\x99s TGT can be reused to get service tickets during the TGT\\xe2\\x80\\x99s lifetime (10 hours by default).",
+        "score": 0.375
+      },
+      {
+        "sentence": "The TGT is also portable, so if an attacker can steal a user\\xe2\\x80\\x99s TGT, it can be reused on any other computer on the network, at the same time, to access any resource to which the user has access.",
+        "score": 0.4703
+      },
+      {
+        "sentence": "When an attacker gains access to the KRBTGT password hash on the domain, it is possible for them to generate their own TGTs (called \\xe2\\x80\\x9cGolden Tickets\\xe2\\x80\\x9d) that are accepted by all the Domain Controllers in the domain since they are signed and encrypted with the domain Kerberos service account data.",
+        "score": 0.5253
+      },
+      {
+        "sentence": "Simply put, a Golden Ticket is a valid TGT.",
+        "score": 0.4155
+      },
+      {
+        "sentence": "In order for the user to access resources in another domain in the same forest, the Kerberos process involves another layer since the Kerberos service (KDC) in one domain can\\xe2\\x80\\x99t issue a service ticket (TGS) in another.",
+        "score": 0.5132
+      },
+      {
+        "sentence": "Since the TGS can only be built using the target service\\xe2\\x80\\x99s password data and Domain Controllers (DCs) only contain password data for security principals (users, computers, etc) in their own domain, the DC does not have the target services password data and can\\xe2\\x80\\x99t create the TGS.",
+        "score": 0.5803
+      },
+      {
+        "sentence": "In order to resolve this issue, there is a trust password between two domains in the same AD forest used as a bridge enabling Kerberos authentication across domains.",
+        "score": 0.4841
+      },
+      {
+        "sentence": "Once there is a trust between two domains, (domain BLUE and domain GREEN both are in the same AD forest for this example), the ticket-granting service of each domain (\\xe2\\x80\\x9crealm\\xe2\\x80\\x9d in Kerberos speak) is registered as a security principal with the other domain\\xe2\\x80\\x99s Kerberos service (KDC).",
+        "score": 0.5802
+      },
+      {
+        "sentence": "This enables the ticket-granting service in each domain to treat the one in the other domain as just another service providing cross-domain service access for resources in the other domain.\\xe2\\x80\\x8b The Kerberos flow is the same as described earlier for all resources accessed within the domain.",
+        "score": 0.5216
+      },
+      {
+        "sentence": "When the user requests a service ticket for a resource in another domain, the DC in the user\\xe2\\x80\\x99s domain (BLUE) sends the user a TGS referral message as part of the normal service ticket response message (TGS_REP) from the DC to the user.",
+        "score": 0.4586
+      },
+      {
+        "sentence": "This message includes a TGT for the other domain where the desired resource is located (GREEN) and indicates it is a referral to another TGS.",
+        "score": 0.4241
+      },
+      {
+        "sentence": "The TGT for the other domain is not signed by the GREEN domain\\xe2\\x80\\x99s KRBTGT account since the BLUE domain DCs don\\xe2\\x80\\x99t know the password for that account.",
+        "score": 0.4983
+      },
+      {
+        "sentence": "Instead, the TGT for the other domain is signed and encrypted using the inter-realm key which is derived from the trust password.",
+        "score": 0.5126
+      },
+      {
+        "sentence": "Since this inter-realm ticket is a TGT, it contains the user\\xe2\\x80\\x99s credentials and group membership though its signed with the inter-realm key, not the DC\\xe2\\x80\\x99s KRBTGT service account.",
+        "score": 0.4684
+      },
+      {
+        "sentence": "The user needs to have access to the resource in the other domain in order for access to be granted.",
+        "score": 0.4964
+      },
+      {
+        "sentence": "Inter-realm trust communication becomes more complicated in an Active Directory forest with multiple domains, including parent (root) and child domains.",
+        "score": 0.635
+      },
+      {
+        "sentence": "Imagine an AD forest with three domains, ROOT, CHILD1, & CHILD2.",
+        "score": 0.5023
+      },
+      {
+        "sentence": "ROOT is the root domain with the other two configured as child domains, so ROOT has automatic two-way transitive trusts with both CHILD1 & CHILD2.",
+        "score": 0.5847
+      },
+      {
+        "sentence": "In order for a CHILD1 user to access a resource in CHILD2, the following occurs: CHILD1 user authenticates and gets the user\\xe2\\x80\\x99s TGT for the CHILD1 domain.",
+        "score": 0.5191
+      },
+      {
+        "sentence": "The user requests a service ticket for a share in CHILD2.",
+        "score": 0.3213
+      },
+      {
+        "sentence": "The CHILD1 DC copies the CHILD1 TGT into a new inter-realm TGT (using the ROOT-CHILD1 inter-realm key) and sends it to the user along with a referral to the ROOT domain.",
+        "score": 0.4518
+      },
+      {
+        "sentence": "The user sends the (ROOT-CHILD1) IR-TGT to a ROOT DC along with the TGS_REQ for the resource.",
+        "score": 0.4118
+      },
+      {
+        "sentence": "The ROOT DC copies the IR-TGT into a new inter-realm TGT (using the ROOT-CHILD2 inter-realm key) and sends it to the user along with a referral to the CHILD2 domain.",
+        "score": 0.4512
+      },
+      {
+        "sentence": "The user sends the (ROOT-CHILD2) IR-TGT to a CHILD2 DC along with the TGS_REQ for the resource.",
+        "score": 0.4036
+      },
+      {
+        "sentence": "The CHILD2 DC copies the IR-TGT into a TGS used to access the resource.",
+        "score": 0.4798
+      },
+      {
+        "sentence": "Forging Kerberos \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d In a scenario where an attacker compromised a single domain in an AD forest and dumped all the credentials, the attacker would naturally use Golden Tickets since they enable full access to the domain and the AD forest (Golden Tickets include Enterprise Admin group membership by default).",
+        "score": 0.5953
+      },
+      {
+        "sentence": "The well-known remediation of Golden Ticket creation and use is to change the compromised KRBTGT account password twice.",
+        "score": 0.3819
+      },
+      {
+        "sentence": "After this action is complete, the attacker can\\xe2\\x80\\x99t create any more Golden Tickets.",
+        "score": 0.4701
+      },
+      {
+        "sentence": "However, there is another avenue for an attacker that has dumped all credentials from a Domain Controller to re-exploit the multi-domain AD forest.",
+        "score": 0.4721
+      },
+      {
+        "sentence": "Since every domain in an AD forest has an implicit trust (and associated trust password) with at least one other domain, the attacker can forge a different type of Kerberos ticket to spoof Enterprise Admin rights in the target domain.",
+        "score": 0.5951
+      },
+      {
+        "sentence": "Enterprise Admins are members of the Administrators group in every domain in an AD forest, this level of access enables the attacker to compromise all domains.",
+        "score": 0.5196
+      },
+      {
+        "sentence": "This is kind of like a Golden Ticket across trusts.",
+        "score": 0.5597
+      },
+      {
+        "sentence": "Forging the Inter-Realm TGT (IR-TGT) for access isn\\xe2\\x80\\x99t necessary if you have the KRBTGT account password, but if that has changed twice, the forged IR-TGT (Trust Ticket) can be used to impersonate an EA and regain full domain/forest admin rights.",
+        "score": 0.5601
+      },
+      {
+        "sentence": "Since there\\xe2\\x80\\x99s an automatic, two-way transitive trust for every domain in the forest, getting the trust key for one trust, enables access to the others (though I\\xe2\\x80\\x99m not sure if the tools support this right now).",
+        "score": 0.7118
+      },
+      {
+        "sentence": "This is due to the trust flow.",
+        "score": 0.415
+      },
+      {
+        "sentence": "It\\xe2\\x80\\x99s not a Silver Ticket since it\\xe2\\x80\\x99s not a forged TGS and it\\xe2\\x80\\x99s not exactly a Golden Ticket since it\\xe2\\x80\\x99s not using the KRBTGT account to forge a TGT.",
+        "score": 0.4628
+      },
+      {
+        "sentence": "Forge the inter-realm TGT for a user in Domain A for the TGS_REQ to the Domain B DC to get a valid TGS to the Domain B resource.",
+        "score": 0.5285
+      },
+      {
+        "sentence": "While forging trust keys should work really well in a multi-domain AD forest, there are a variety of trust options between domains/forests that could cause problems with attempting to extend compromise of one to another.",
+        "score": 0.6463
+      },
+      {
+        "sentence": "With that said, if a user in Domain A has elevated rights to resources in Domain B, the forged IR-TGT should provide an attacker the same access as a Golden Ticket (since it would be used as the basis for the IR-TGT).",
+        "score": 0.5998
+      },
+      {
+        "sentence": "One brilliant way to exploit this is to add admin groups for Domain B in the user\\xe2\\x80\\x99s forged IR-TGT in SID History (assuming the trust has it enabled), though this is theoretical at this point.",
+        "score": 0.5271
+      },
+      {
+        "sentence": "Note: Two-way trusts are actually 2 one-way trusts, each of which has a different password which only change every 30 days (default).",
+        "score": 0.492
+      },
+      {
+        "sentence": "The TrustING domain PDC performs the password change for the trust.",
+        "score": 0.3973
+      },
+      {
+        "sentence": "HarmJ0y has additional detail on this issue including great trust recon tools in PowerView.",
+        "score": 0.4609
+      },
+      {
+        "sentence": "Forging External Trust Tickets There are essentially two different types of trust in Active Directory: one external to the AD forest and one internal.",
+        "score": 0.6541
+      },
+      {
+        "sentence": "In this first section, we cover forging external trusts.",
+        "score": 0.575
+      },
+      {
+        "sentence": "Step 1: Dumping trust passwords (trust keys) The trust password is in a domain credential dump, just look for the trust name with a dollar ($) sign at the end.",
+        "score": 0.5372
+      },
+      {
+        "sentence": "Most of the accounts with a trailing \\xe2\\x80\\x9c$\\xe2\\x80\\x9d are computer accounts, but some are trust accounts.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "Step 2: Create a forged trust ticket (inter-realm TGT) using Mimikatz Note that the trust password, aka trust key, was extracted along with all user data when dumping AD credentials.",
+        "score": 0.5218
+      },
+      {
+        "sentence": "Each trust has an associated user account which contains that NTLM password hash.",
+        "score": 0.3924
+      },
+      {
+        "sentence": "This data can be used to forge \\xe2\\x80\\x9cTrust Tickets\\xe2\\x80\\x9d.",
+        "score": 0.5197
+      },
+      {
+        "sentence": "We use the trust password for the external trust to create the Trust Ticket file.",
+        "score": 0.5467
+      },
+      {
+        "sentence": "The trust password is the same as what I used to create it.",
+        "score": 0.3993
+      },
+      {
+        "sentence": "To create a trust with another forest, an admin on one side enters the trust password and the other admin uses the same trust password which may be sent via email to ensure it is entered correctly.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "This means that when a trust is first created, any one with knowledge of the trust password can create Trust Tickets.",
+        "score": 0.5544
+      },
+      {
+        "sentence": "Creating a Trust Ticket is similar to creating a Golden Ticket., in fact it\\xe2\\x80\\x99s the same Mimikatz command, just with different options.",
+        "score": 0.4574
+      },
+      {
+        "sentence": "The service key is the trust NTLM password hash and the target is the target domain FQDN.",
+        "score": 0.4434
+      },
+      {
+        "sentence": "Save this ticket to a file for step 2 Step 3: Use the Trust Ticket file created in Step 2 to get a TGS for the targeted service in the destination domain.",
+        "score": 0.5524
+      },
+      {
+        "sentence": "Step 4: Inject the TGS file created in Step 3 and then access the targeted service with the spoofed rights. \\xc2 Forging Internal AD Forest Trust Tickets Step 1: Dumping trust passwords (trust keys) Current Mimikatz versions can extract the trust keys (passwords).",
+        "score": 0.5534
+      },
+      {
+        "sentence": "Step 2: Create a forged trust ticket (inter-realm TGT) using Mimikatz Forge the trust ticket which states the ticket holder is an Enterprise Admin in the AD Forest (leveraging SIDHistory, \\xe2\\x80\\x9csids\\xe2\\x80\\x9d, across trusts in Mimikatz, my \\xe2\\x80\\x9ccontribution\\xe2\\x80\\x9d to Mimikatz).",
+        "score": 0.5514
+      },
+      {
+        "sentence": "This enables full administrative access from a child domain to the parent domain.",
+        "score": 0.5253
+      },
+      {
+        "sentence": "Note that this account doesn\\xe2\\x80\\x99t have to exist anywhere as it is effectively a Golden Ticket across the trust.",
+        "score": 0.4966
+      },
+      {
+        "sentence": "Step 3: Use the Trust Ticket file created in Step 2 to get a TGS for the targeted service in the destination domain.",
+        "score": 0.5725
+      },
+      {
+        "sentence": "The resulting TGS provides EA access to the parent (root) domain\\xe2\\x80\\x99s Domain Controller.",
+        "score": 0.5925
+      },
+      {
+        "sentence": "Step 4: Inject the TGS file created in Step 3 and then access the targeted service with the spoofed rights.",
+        "score": 0.4486
+      },
+      {
+        "sentence": "Once the ticket is passed the user is an Enterprise Admin for the AD forest and has DA rights to the DC in the target domain.",
+        "score": 0.5041
+      },
+      {
+        "sentence": "This is a great way to escalate rights across other domains in the forest.",
+        "score": 0.5631
+      },
+      {
+        "sentence": "Note that unless an attacker gets the KRBTGT account in the domain that hosts the EA group, the Golden Ticket only grants DA rights to the current domain (the one the Golden Ticket was created in).",
+        "score": 0.6018
+      },
+      {
+        "sentence": "Once the attacker dumps the credentials for the current domain, the trust password is used to create a Trust Key that states the holder of the ticket is EA.",
+        "score": 0.5866
+      },
+      {
+        "sentence": "Then the target domain can be exploited.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "This can be repeated to move through every domain in the forest quite easily since every child domain inherently trusts the parent aka root domain.",
+        "score": 0.6795
+      },
+      {
+        "sentence": "So, using a Trust Ticket to become EA in the AD forest involves compromising a single domain.",
+        "score": 0.6097
+      },
+      {
+        "sentence": "Conclusion In a multi-domain AD forest, each domain has a trust with at least one other domain.",
+        "score": 0.6449
+      },
+      {
+        "sentence": "Each trust has an associated password which can be used to forge trust tickets.",
+        "score": 0.4557
+      },
+      {
+        "sentence": "Compromise one domain to potentially compromise another.",
+        "score": 0.476
+      },
+      {
+        "sentence": "Reducing the AD computer account policy mitigates this attack since Trust passwords are changed on this schedule (TrustING domain).",
+        "score": 0.439
+      },
+      {
+        "sentence": "Regarding Trust Tickets within an Active Directory Forest: Using a Kerberos trust ticket from Child domain impersonating a Child domain user provides the level of access that Child domain user has at the Parent domain.",
+        "score": 0.6062
+      },
+      {
+        "sentence": "If the Child domain user is a member of Enterprise Admins or a group that has admin rights on the parent, the forged Trust Ticket provides admin access to the parent.",
+        "score": 0.584
+      },
+      {
+        "sentence": "Using the /sids parameter in Mimikatz to add the Enterprise Admins group in the Parent domain to the Child domain user account in the Trust Ticket provides EA rights to the Parent domain without the Child domain user account actually having these rights.",
+        "score": 0.5063
+      },
+      {
+        "sentence": "Note that this is similar behavior to \\xe2\\x80\\x9cenhanced\\xe2\\x80\\x9d Golden Tickets since they use SID History to spoof access across domains.",
+        "score": 0.5857
+      },
+      {
+        "sentence": "Even if the KRBTGT account password is rotated on a regular basis, the attacker may still have the trust key (password) and can use that to regain full Enterprise Admin rights.",
+        "score": 0.51
+      },
+      {
+        "sentence": "Mitigating factor: Changing the domain machine password policy to be a low number in the TrustING domain ensures the trust password changes more quickly (along with the domain computer account passwords).",
+        "score": 0.4167
+      },
+      {
+        "sentence": "Without the extended right \\xe2\\x80\\x9cAllowed to Authenticate\\xe2\\x80\\x9d delegated on the ressource you want to access you can\\xe2\\x80\\x99t request TGS with the referral ticket you craft.",
+        "score": 0.4783
+      },
+      {
+        "sentence": "Moreover, well-known SIDs (500, 512, 518, 519,\\xe2\\x80\\xa6) should be filtered from the PAC by the SID filtering according to the rules of their class (DomainSpecific, ForestSpecific, AlwaysFiltered) when you request a TGS with the referral ticket.",
+        "score": 0.4773
+      },
+      {
+        "sentence": "I\\xe2\\x80\\x99ll have to make some tests to verify that. \\xf0\\x9f\\x98\\x89 Regards, Greg Sean Metcalf on July 20, 2015 at 8:09 pm Author # True, but in an inter-forest trust scenario, any delegated rights on resources in the trusting domain(/forest) to users/groups in a trusted domain(/forest) can be exploited using this method.",
+        "score": 0.6682
+      },
+      {
+        "sentence": "Note that SID filtering doesn\\xe2\\x80\\x99t play into the scenario I lay out.",
+        "score": 0.3711
+      },
+      {
+        "sentence": "The forged trust ticket is spoofing existing user(s) and/or group(s) to gain access to (potentially over-)permissioned resources in another domain.",
+        "score": 0.5671
+      },
+      {
+        "sentence": "The most common scenario for an inter-forest (aka external or cross-forest) trust is to provide access to resources (or migration).",
+        "score": 0.4851
+      },
+      {
+        "sentence": "Often these permissions are more than they should be and from I\\xe2\\x80\\x99ve seen often provide DA rights in one forest to Domain Admins in another.",
+        "score": 0.5455
+      },
+      {
+        "sentence": "I\\xe2\\x80\\x99ll have more information on SID History at my Black Hat & DEF CON talks in a couple of weeks\\xe2\\x80\\xa6 \\xf0\\x9f\\x98\\x89 Gregory on July 21, 2015 at 5:20 am # Hi, I\\xe2\\x80\\x99m only interested in inter-forest scenario.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "I agree but to determine who has the extended right on computer objects by viewing ACL and/or group membership you have to request a TGS for LDAP service.",
+        "score": 0.5247
+      },
+      {
+        "sentence": "And you can\\xe2\\x80\\x99t if you haven\\xe2\\x80\\x99t the extended right \\xe2\\x80\\x9cAllowed to authenticate\\xe2\\x80\\x9d on domain controllers.",
+        "score": 0.6166
+      },
+      {
+        "sentence": "Without that information it will be more difficult (but not impossible) for an attacker to guess who has access on ressources.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "You can try to guess with groups name in the trusted but if users are direct members of domain local group in the trusting domain you have to inject random SID in the referral ticket.",
+        "score": 0.5051
+      },
+      {
+        "sentence": "The TGS request will surely generate TGS request failure which can be monitored by security team and can be a clue that someone try to access your ressources.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "For SID filtering, I just pointed that by default mimikatz inject well-known SID which are \\xe2\\x80\\x9cnormally\\xe2\\x80\\x9d filtered whether SID filtering is enabled or not.",
+        "score": 0.3672
+      },
+      {
+        "sentence": "Selective Auth changes the way that access occurs over a trust.",
+        "score": 0.5507
+      },
+      {
+        "sentence": "I just wish more customers would use it (though it does complicate granting resource access).",
+        "score": 0.3607
+      },
+      {
+        "sentence": "I will probably write another post on trust security covering trust security options in more detail.",
+        "score": 0.4097
+      },
+      {
+        "sentence": "I have recently seen a disaster-calling situation where IT team of a big multinational corporation wanted (for the sake of \\xe2\\x80\\x9csimplicity\\xe2\\x80\\x9d) to aggregate a thousands of users from several countries into a _single_ Windows domain (aka single forest with only a root domain!).",
+        "score": 0.5223
+      },
+      {
+        "sentence": "The argument for separating users in multiple forests (aka security boundaries) at least geographically and activating the Selective Authentication wasn\\xe2\\x80\\x99t good enough for them \\xe2\\x80\\x93 \\xe2\\x80\\x9cit\\xe2\\x80\\x99s expensive, wants many machines and takes too much time to administer\\xe2\\x80\\x9d.",
+        "score": 0.4776
+      },
+      {
+        "sentence": "This article challenges even the inter-forest security, not to mention the intra- or single-domain scenario.",
+        "score": 0.4802
+      },
+      {
+        "sentence": "Recent Posts Slides Posted for Black Hat USA 2019 Talk: Attacking & Defending the Microsoft Cloud AD Reading: Windows Server 2019 Active Directory Features There\\xe2\\x80\\x99s Something About Service Accounts Mitigating Exchange Permission Paths to Domain Admins in Active Directory From DNSAdmins to Domain Admin, When DNSAdmins is More than Just DNS Administration Trimarc Active Directory Security Services Have concerns about your Active Directory environment?",
+        "score": 0.5653
+      },
+      {
+        "sentence": "Find out how...",
+        "score": 0.3777
+      },
+      {
+        "sentence": "Terms of Use Copyright \\xc2\\xa9 2011 - 2017.",
+        "score": 0.324
+      }
+    ]
+  }
+}

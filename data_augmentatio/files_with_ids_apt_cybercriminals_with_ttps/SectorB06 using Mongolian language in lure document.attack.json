@@ -1,0 +1,1768 @@
+{
+  "original_txt": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document\nthreatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document\nOverview\nSectorB06 is a state sponsored threat actor group active especially within Asia. They\nhave been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which\nMicrosoft removed in January 2018 [2], which in this case seems to be a highly\nobfuscated version of CVE-2017-11882. The malware we analyzed in this case are sent\nseemingly only after they already have a basic foothold in their target organizations.\nWe came across multiple pieces of their malware used in 2019 which appears to be\ncustom compiled on a per target victim per organization basis, with this particular decoy\ndocument being uploaded from a Singapore IP address.\nDecoy RTF Document\nIn this example, SectorB06 made use of a Mongolian decoy document to target their\nvictim.\nDecoy document written in Mongolian which references the Ministry of Justice and\nInternal Affairs of Mongolia\nIf exploitable, the exploit code drops the first-stage malware DLL at\n“%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.\n \nFirst Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the\naddress of kernel32 from the InMemoryOrderModuleList inside the Process Environment\nBlock (PEB) using FS:[0x30]. It then gets the address of kernel32.LoadLibraryA and\nkernel32.GetProcAddress from a function which parses kernel32’s memory block. This is\ndespite the malware already importing LoadLibraryA() and GetProcAddress(), and is\nused presumably to prevent automated systems from detecting massive amounts of\ncalls to those functions.\nFrom there, it gets the address of the other libraries it makes use of – Shlwapi.dll,\nShell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll. Once that is done, it calls the\nfunction which parses the various DLLs again close to 100 times in order to resolve all\nthe APIs it uses. In the middle of those calls, it checks CheckRemoteDebuggerPresent\nand does not resolve the APIs from the other DLLs if a debugger is found, which will\ncause the malware to exit later before doing anything malicious.\nMalware decrypting the imports it uses via its custom hashing algorithm\nIt then starts a thread which polls the result of CheckRemoteDebuggerPresent\nconstantly and exits once a debugger is found.\nProcess Name Hashing\nThe malware checks for the lower-cased process name it is running under at various\nsteps of execution using a string hashing algorithm. In the first step, it checks against the\nstring hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”,\n“0x4D16CE36”, and “0x64820461”. It only continues execution if the process name hash\nis one of the first five hashes and the process name hash is not the last hash. We wrote\na custom bruteforcing utility and managed to crack the first five hashes, finding the\nprocess names which the attacker expected as “winword.exe”, “excel.exe”,\n“powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”. While four of these process names\nare associated with Microsoft Office and the Equation Editor vulnerabilities,\n“acrord32.exe” (Adobe Reader) is also in the expected process name list because the\nmalware will in some situations rename the legitimate signed Symantec executable file\n(described later) to “AcroRd32.exe”.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 3/9\nMalware making sure the process name is related to the exploit source or itself\nBesides this initial check, it also checks the hashes of process names at three other\npoints of execution. Only the hash 0X84F39C89 is checked against the entire process\nlist and is not a lower-case version of the process name.\nHash Meaning Description\n0X0E867CB6 rundll32.exe If process is rundll32.exe, do not continue\n0XA54ACF71 explorer .exe If process is not explorer/services.exe, do not continue\n0XCD163D44 services.exe If process is not explorer/services.exe, do not continue\n0X84F39C89 <unknown> If this process exists, do not inject into dllhost.exe\nFrom this we can see there are actually two points from which the malware expects to\nrun from – using the Microsoft Office exploit which injects the second stage malware into\ndllhost.exe or another path which injects into explorer.exe/services.exe.\nPersistence\nThis first stage malware mainly decompresses and drops two files being used for\npersistence.\nFile Name Description\nRasTls.dll Renamed from cclerr .wll\nIntelGraphicsCon‐\ntroller .exe /\nAcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from\nSymantec Network Access Control agent (version 12.1.671.4971)\n Hash:\n724909ba378a872018a3ae0b68afe4949bc404de31bcb‐\nd65a6239c12b3a7a3ea\nPublic examples of a different version of this same signed file being abused in the wild\nwas with version 11.0.4010.7, where the filenames used were rastlsc.exe and\niassvcs.exe. Though these files were signed, their certificates have long expired.\nThe files used for persistence are stored in either the “%AppData%\\Intel\\Intel(R)\nProcessor Graphic\\” or “%PROGRAMFILES%\\Intel\\Intel(R) Processor Graphics\\”\ndirectories.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 4/9The persistence keys used are in\n<HIVE>\\Software\\microsoft\\windows\\currentversion\\run where <HIVE> is either HKLM or\nHKCU depending on whether there is administrative rights. The name of the registry key\nused is “IntelGraphicsController” with the value of\n“<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245-\n2190-7215-A3C5-43215926716A}”.\nCommands Ran\nThe malware runs CreateProcess from a custom command execution function four\ntimes, with each run executing takeown/icacls/icacls. The first icacls function attempts to\ngive ownership to the administrators group and the second icacls function attempts to\ngive ownership to the users group. The four runs are for the RasTls.dll file in the\n%APPDATA% and %PROGRAMFILE% subdirectories and the\nIntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE%\nsubdirectories.\nBesides those commands, it also drops two batch files.\n<random.bat> – deleting from initial location\n1\n2\n3\nPing 127.0.0.1 -n 10\ndel “C:\\Users\\admin\\AppData\\Roaming\\Microsoft\\Word\\STARTUP\\cclerr.wll” /q /f\ndel %0 /q /f\n \n<random.bat> – attempting to delete winword.exe\n1\n2\n3\nPing 127.0.0.1 -n 10\ndel “C:\\Program Files\\Microsoft Office\\Office14\\WINWORD.EXE” /q /f\ndel %0 /q /f\n \nTimestomping\nThe malware uses kernel32’s GetFileTime() and SetFileTime() to get the Creation Time,\nLast Access Time, and Last Write Time of %windir%\\system32\\kernel32.dll and saves\nthose same times to the RasTls.dll and IntelGraphicsController.exe files. However, these\ntimestamps are only approximate [3] so the fake times will not be an exact match to\nkernel32.dll’s file time.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 5/9\nThe main two files dropped by the malware for persistence have the approximate\ntimestamps of kernel32.dll\nVictim Identification\nThe malware identifies its victims using <HIVE>\\Software\\Intel\\Java (with <HIVE> being\nHKLM/HKCU again) with the name “user”. Malware “1-a” referenced below is the current\nfirst stage malware we are describing in this post.\nMalware “1-a” and “5-a” contain the same victim identifier values, as do “2-a” and “3-a”.\nThis is interesting because of the second stage malware which we describe briefly later.\nMalware   Victim Identification V alue\n1-a 0XdgrHGaayfyBHQ/vCwMP2HE+cNEbzTk\n 6cZ9bYJOH0R2/z9riKtfcWki36ENBhJ/\n2-a W3qNGgEnxwHShISsHqe4WQlLvmX2q0ms\n tlCuJVt0/qjwLh7CWXM34rJI66fT yf1u\n3-a 4et2q+jmcCeV oPVtVlUeC+Zqq62VN3Q7e7noo8oplXCIv\n aA22rc7KIYWtv69Nv1rgPeytor20Dv5..oEFQze78uA==\n5-a 0XdgrHGaayfyBHQ/vCwMP2HE+cNEbzTk\n 6cZ9bYJOH0SxvpFW ecTmuneM/5p93lQw\nProcess Injection\nFinally, the malware performs process injection into “%windir%\\system32\\dllhost.exe\n/Processid:{712459B2-3311-54C3-910D-0327080553246}” without the second stage\never touching the disk. The injected process, dllhost.exe, is typically a container process\nfor running COM DLLs. The list of CLSIDs in a system can be seen in\nKEY_CLASSES_ROOT\\CLSID. We are unsure what the hardcoded CLSID value of\n“712459B2-3311-54C3-910D-0327080553246” is supposed to represent, but a likely\nguess is a CLSID used by Symantec since the malware is impersonating their\nexecutable file.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 6/9Second Stage Malware\nWhile we did not analyze the second stage malware in large detail, we did decode the\nC2 information among other data such as credentials. The samples we analyzed appear\nto connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on\nport 443. It also references an internal IP address, which indicate that these spear\nphishing documents are sent to targeted victims and only after the attacker already has\nbasic access to the victim’s internal network.\nOne of the purposes of this second stage malware also appears to be for creating a\nremote command shell.\nMalware Internal IPs Referenced\n1-b 192[.]168[.]43[.]234\n2-b 192[.]168[.]1 11[.]111\n3-b 192[.]168[.]1 11[.]111\n4-b 192[.]168[.]43[.]234\n5-b 192[.]168[.]43[.]234\n6-b 192[.]168[.]43[.]234\nWith the malware trying to target/use the same internal IP but with different user\nidentification values, we see how the attacker is custom compiling each malware\nexecutable for each victim/attempt in a specific organization.\nSummary\nSectorB06 is a threat group with very specific interests and in the case of these malware,\nappears to either already have a basic foothold in the victim network or has already\ngained and then lost access to the network. They are actively developing their toolkit and\nare adept at bypassing security solutions at least statically especially for their exploit\ndocument and second stage malware.\nIndicators of Compromise\nDecoy Hash (SHA-256)\n803c25767414c31259e15f058d62b6102dfe09d3cfacece57f527d7fb2a50632\nFirst Stage Hashes (SHA-256)\n304115cef6cc7b81f4409178cd0bcea2b22fd68ca18dfd5432c623cbbb507154\n 6086b407ed69434fce117bc173f70a2ec147fdf119cf38f6031c1889e19ff8bf\n 240f2c0cd808991b2c77a978203c661612e250df2b0bad9fd452b6c21d60b324\n d0ccb9a277b986f7127199f122023c79a7e0253378a4a78806fbf55a876335325/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 7/9Second Stage Hashes (SHA-256)\n87c4eb8201f9cf92aa5562d112fdd322a01899bcc38ba39e4f6ef92cbf144900\n fcb0d071a9384750adf88963eb580690effbe8b29942afa6a8e2566e9a4e94dd\n e8446ba200c9d703fab7ddc068b45772585ae782a8bcf4c5f86782d7220405f7\n 32fbd62a1fde794cdf95a67f22f47b495474cd18419ac4c37fbb5460cdfd1831\n 85bdd517886e645a3d0e4e4bc16ede5bbb126eaf86c0d14c05a951219f48555a\nIP Addresses\n217[.]69[.]8[.]255\n 1[.]187[.]1[.]187\nMITRE A TT&CK T echniques\nThe following is a list of MITRE ATT&CK Techniques we have observed based on our\nanalysis of these malware.\nInitial Access\nT1193 Spearphishing Attachment\nExecution\nT1059 Command-Line Interface\n T1203 Exploitation for Client Execution\n T1064 Scripting5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 8/9T1204 User Execution \n T1218 Signed Binary Proxy Execution\nPersistence\nT1038 DLL Search Order Hijacking\n T1060 Registry Run Keys / Startup Folder\n \nDefense Evasion\nT1116 Code Signing\n T1038 DLL Search Order Hijacking\n T1107 File Deletion\n T1055 Process Injection\n T1218 Signed Binary Proxy Execution \n T1045 Software Packing\n T1099 Timestomp\nDiscovery\nT1057 Process Discovery\n T1012 Query Registry\n T1063 Security Software Discovery\n T1124 System Time Discovery\nCollection\nT1119 Automated Collection\nExfiltration\nT1022 Data Encrypted\nCommand and Control\nT1043 Commonly Used Port\n T1071 Standard Application Layer Protocol\nReferences\n[1] Microsoft Office : List of security vulnerabilities\n https://www.cvedetails.com/vulnerability-list/vendor_id-26/product_id-320/cvssscoremin-\n9/cvssscoremax-/Microsoft-Office.html\n [2] CVE-2018-0802 | Microsoft Office Memory Corruption Vulnerability\n https://portal.msrc.microsoft.com/en-us/security-guidance/advisory/CVE-2018-0802\n [3] GetFileTime function\n https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-getfiletime5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon\nhttps://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 9/9 \n \n\n----------------------------------------\nConversion note:\nStatus: ok",
+  "sanitized_txt": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia. They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882. The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.\nWe came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.\nDecoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.\nDecoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.\nFirst Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30]. It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block. This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.\nFrom there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll. Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses. In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.\nMalware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.\nProcess Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm. In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”. It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash. We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”. While four of these process names are associated with Microsoft Office and the Equation Editor vulnerabilities, “acrord32.exe” (Adobe Reader) is also in the expected process name list because the malware will in some situations rename the legitimate signed Symantec executable file (described later) to “AcroRd32.exe”.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 3/9 Malware making sure the process name is related to the exploit source or itself Besides this initial check, it also checks the hashes of process names at three other points of execution. Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.\nHash Meaning Description 0X0E867CB6 rundll32.exe If process is rundll32.exe, do not continue 0XA54ACF71 explorer .exe If process is not explorer/services.exe, do not continue 0XCD163D44 services.exe If process is not explorer/services.exe, do not continue 0X84F39C89 <unknown> If this process exists, do not inject into dllhost.exe From this we can see there are actually two points from which the malware expects to run from – using the Microsoft Office exploit which injects the second stage malware into dllhost.exe or another path which injects into explorer.exe/services.exe.\nPersistence This first stage malware mainly decompresses and drops two files being used for persistence.\nFile Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash:\n724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe. Though these files were signed, their certificates have long expired.\nThe files used for persistence are stored in either the “%AppData%\\Intel\\Intel(R) Processor Graphic\\” or “%PROGRAMFILES%\\Intel\\Intel(R) Processor Graphics\\” directories.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 4/9The persistence keys used are in <HIVE>\\Software\\microsoft\\windows\\currentversion\\run where <HIVE> is either HKLM or HKCU depending on whether there is administrative rights. The name of the registry key used is “IntelGraphicsController” with the value of “<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245- 2190-7215-A3C5-43215926716A}”.\nCommands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls. The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group. The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.\nBesides those commands, it also drops two batch files.\n<random.bat> – deleting from initial location 1 2 3 Ping 127.0.0.1 -n 10 del “C:\\Users\\admin\\AppData\\Roaming\\Microsoft\\Word\\STARTUP\\cclerr.wll” /q /f del %0 /q /f\n<random.bat> – attempting to delete winword.exe 1 2 3 Ping 127.0.0.1 -n 10 del “C:\\Program Files\\Microsoft Office\\Office14\\WINWORD.EXE” /q /f del %0 /q /f\nTimestomping The malware uses kernel32’s GetFileTime() and SetFileTime() to get the Creation Time, Last Access Time, and Last Write Time of %windir%\\system32\\kernel32.dll and saves those same times to the RasTls.dll and IntelGraphicsController.exe files. However, these timestamps are only approximate [3] so the fake times will not be an exact match to kernel32.dll’s file time.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 5/9 The main two files dropped by the malware for persistence have the approximate timestamps of kernel32.dll Victim Identification The malware identifies its victims using <HIVE>\\Software\\Intel\\Java (with <HIVE> being HKLM/HKCU again) with the name “user”. Malware “1-a” referenced below is the current first stage malware we are describing in this post.\nMalware “1-a” and “5-a” contain the same victim identifier values, as do “2-a” and “3-a”.\nThis is interesting because of the second stage malware which we describe briefly later.\nMalware   Victim Identification V alue 1-a 0XdgrHGaayfyBHQ/vCwMP2HE+cNEbzTk 6cZ9bYJOH0R2/z9riKtfcWki36ENBhJ/ 2-a W3qNGgEnxwHShISsHqe4WQlLvmX2q0ms tlCuJVt0/qjwLh7CWXM34rJI66fT yf1u 3-a 4et2q+jmcCeV oPVtVlUeC+Zqq62VN3Q7e7noo8oplXCIv aA22rc7KIYWtv69Nv1rgPeytor20Dv5..oEFQze78uA== 5-a 0XdgrHGaayfyBHQ/vCwMP2HE+cNEbzTk 6cZ9bYJOH0SxvpFW ecTmuneM/5p93lQw Process Injection Finally, the malware performs process injection into “%windir%\\system32\\dllhost.exe /Processid:{712459B2-3311-54C3-910D-0327080553246}” without the second stage ever touching the disk. The injected process, dllhost.exe, is typically a container process for running COM DLLs. The list of CLSIDs in a system can be seen in KEY_CLASSES_ROOT\\CLSID. We are unsure what the hardcoded CLSID value of “712459B2-3311-54C3-910D-0327080553246” is supposed to represent, but a likely guess is a CLSID used by Symantec since the malware is impersonating their executable file.5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 6/9Second Stage Malware While we did not analyze the second stage malware in large detail, we did decode the C2 information among other data such as credentials. The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443. It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.\nOne of the purposes of this second stage malware also appears to be for creating a remote command shell.\nMalware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.\nSummary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network. They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.\nIndicators of Compromise Decoy Hash (SHA-256) 803c25767414c31259e15f058d62b6102dfe09d3cfacece57f527d7fb2a50632 First Stage Hashes (SHA-256) 304115cef6cc7b81f4409178cd0bcea2b22fd68ca18dfd5432c623cbbb507154 6086b407ed69434fce117bc173f70a2ec147fdf119cf38f6031c1889e19ff8bf 240f2c0cd808991b2c77a978203c661612e250df2b0bad9fd452b6c21d60b324 d0ccb9a277b986f7127199f122023c79a7e0253378a4a78806fbf55a876335325/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 7/9Second Stage Hashes (SHA-256) 87c4eb8201f9cf92aa5562d112fdd322a01899bcc38ba39e4f6ef92cbf144900 fcb0d071a9384750adf88963eb580690effbe8b29942afa6a8e2566e9a4e94dd e8446ba200c9d703fab7ddc068b45772585ae782a8bcf4c5f86782d7220405f7 32fbd62a1fde794cdf95a67f22f47b495474cd18419ac4c37fbb5460cdfd1831 85bdd517886e645a3d0e4e4bc16ede5bbb126eaf86c0d14c05a951219f48555a IP Addresses 217[.]69[.]8[.]255 1[.]187[.]1[.]187 MITRE A TT&CK T echniques The following is a list of MITRE ATT&CK Techniques we have observed based on our analysis of these malware.\n---------------------------------------- Conversion note:\nStatus: ok",
+  "ID_list": [
+    "T1012",
+    "T1022",
+    "T1038",
+    "T1043",
+    "T1045",
+    "T1055",
+    "T1057",
+    "T1059",
+    "T1060",
+    "T1063",
+    "T1064",
+    "T1071",
+    "T1099",
+    "T1107",
+    "T1116",
+    "T1119",
+    "T1124",
+    "T1193",
+    "T1203",
+    "T1218"
+  ],
+  "Name_list": [
+    "Execution",
+    "Persistence",
+    "Phishing",
+    "Process Injection",
+    "Rundll32",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1022": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.4149
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.553
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.4774
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.3378
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4504
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3561
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3098
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.383
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.4195
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3412
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.3801
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.3436
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.479
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.3108
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.4965
+      },
+      {
+        "sentence": "Malware “1-a” and “5-a” contain the same victim identifier values, as do “2-a” and “3-a”.",
+        "score": 0.4265
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.5024
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.4665
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.4325
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.4344
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3867
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.438
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.3105
+      }
+    ],
+    "T1038": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.3182
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.3158
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.3512
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.6494
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4597
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3926
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.5228
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.4647
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3909
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.3325
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.5376
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.4741
+      },
+      {
+        "sentence": "Though these files were signed, their certificates have long expired.",
+        "score": 0.3042
+      },
+      {
+        "sentence": "The name of the registry key used is “IntelGraphicsController” with the value of “<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245- 2190-7215-A3C5-43215926716A}”.",
+        "score": 0.3146
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.4527
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.3789
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.4903
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.3002
+      }
+    ],
+    "T1045": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.5073
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.5989
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.4088
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.4687
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.4923
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.4632
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.6739
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.5324
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.5746
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.5742
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.6228
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.534
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.5737
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.5033
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3733
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.4765
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.432
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.679
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.4536
+      },
+      {
+        "sentence": "Though these files were signed, their certificates have long expired.",
+        "score": 0.3234
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.3925
+      },
+      {
+        "sentence": "The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group.",
+        "score": 0.3826
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.4927
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.4784
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.4996
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.5006
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.3724
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.316
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3651
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.5781
+      }
+    ],
+    "T1055": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.3142
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.4206
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.356
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.433
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.5419
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.4734
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.4812
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.4256
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.5551
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.5123
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.5318
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.426
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.5054
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.4019
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.4351
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.4751
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.3406
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.4357
+      },
+      {
+        "sentence": "The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.384
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.4167
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.4796
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.836
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.4009
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.3042
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.3506
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3594
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3778
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.4096
+      }
+    ],
+    "T1059": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.4837
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.4144
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.4768
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.5173
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.404
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.4219
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4513
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.312
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.4008
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3702
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.4425
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.3612
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3658
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.3381
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.4502
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.563
+      },
+      {
+        "sentence": "The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group.",
+        "score": 0.4044
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.4929
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.399
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.4839
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.3932
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.4005
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.4033
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.7443
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.4041
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.412
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.3903
+      }
+    ],
+    "T1060": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.3618
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.5064
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "The name of the registry key used is “IntelGraphicsController” with the value of “<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245- 2190-7215-A3C5-43215926716A}”.",
+        "score": 0.4429
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.4076
+      }
+    ],
+    "T1064": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.6021
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.5154
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.5208
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.5782
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.5125
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.5138
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.5027
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.4449
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.4633
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.374
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.3222
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3728
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.3382
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.3631
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.3188
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.4478
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.3544
+      },
+      {
+        "sentence": "Though these files were signed, their certificates have long expired.",
+        "score": 0.3105
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.5112
+      },
+      {
+        "sentence": "The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group.",
+        "score": 0.4173
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.4616
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.4321
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.4815
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.3407
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.5113
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.5106
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3888
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.4381
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.5757
+      }
+    ],
+    "T1099": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.3932
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.3954
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.3276
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.3799
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.3979
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.3463
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4403
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.3534
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3993
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3852
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.3438
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.4275
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.308
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.3073
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.4907
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.5481
+      },
+      {
+        "sentence": "Though these files were signed, their certificates have long expired.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "The name of the registry key used is “IntelGraphicsController” with the value of “<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245- 2190-7215-A3C5-43215926716A}”.",
+        "score": 0.3474
+      },
+      {
+        "sentence": "The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group.",
+        "score": 0.3079
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.4568
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.4134
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.342
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.383
+      }
+    ],
+    "T1116": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.4176
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.4235
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.3622
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.4134
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.3567
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.3922
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.392
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.3754
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3771
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.3632
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.3495
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.3858
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.7206
+      },
+      {
+        "sentence": "Though these files were signed, their certificates have long expired.",
+        "score": 0.6706
+      },
+      {
+        "sentence": "The name of the registry key used is “IntelGraphicsController” with the value of “<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245- 2190-7215-A3C5-43215926716A}”.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.4172
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.4263
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.3675
+      },
+      {
+        "sentence": "The list of CLSIDs in a system can be seen in KEY_CLASSES_ROOT\\CLSID.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.4512
+      }
+    ],
+    "T1119": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.3103
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.4148
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.3923
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.404
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3607
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.3083
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.4132
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3709
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.3828
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.4054
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.3469
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.3545
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "Malware “1-a” and “5-a” contain the same victim identifier values, as do “2-a” and “3-a”.",
+        "score": 0.403
+      },
+      {
+        "sentence": "The list of CLSIDs in a system can be seen in KEY_CLASSES_ROOT\\CLSID.",
+        "score": 0.3732
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.3677
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.4352
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.4034
+      }
+    ],
+    "T1124": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.393
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.3042
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.3088
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4795
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3766
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.3277
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.43
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3378
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3484
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.4497
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.4594
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3399
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.3198
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "Malware “1-a” and “5-a” contain the same victim identifier values, as do “2-a” and “3-a”.",
+        "score": 0.3959
+      },
+      {
+        "sentence": "The list of CLSIDs in a system can be seen in KEY_CLASSES_ROOT\\CLSID.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.302
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3909
+      }
+    ],
+    "T1193": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.5796
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.5092
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.5456
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.5855
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.6166
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.4887
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.3996
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3039
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.3874
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.3434
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.3049
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.3777
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.7053
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.313
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3845
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.599
+      }
+    ],
+    "T1218": [
+      {
+        "sentence": "5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 1/9by ThreatRecon T eam April 30, 2019SectorB06 using Mongolian language in lure document threatrecon.nshc.net /2019/04/30/sectorb06-using-mongolian-language-in-lure-document Overview SectorB06 is a state sponsored threat actor group active especially within Asia.",
+        "score": 0.4164
+      },
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.4643
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.5339
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.4078
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.4951
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.5169
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.5267
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.4397
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.53
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.451
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.4467
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.4481
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3537
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.4792
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.4646
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.5006
+      },
+      {
+        "sentence": "File Name Description RasTls.dll Renamed from cclerr .wll IntelGraphicsCon‐ troller .exe / AcroRd32.exeLegitimate signed Symantec file (real name: dot1xtra.exe) from Symantec Network Access Control agent (version 12.1.671.4971) Hash: 724909ba378a872018a3ae0b68afe4949bc404de31bcb‐ d65a6239c12b3a7a3ea Public examples of a different version of this same signed file being abused in the wild was with version 11.0.4010.7, where the filenames used were rastlsc.exe and iassvcs.exe.",
+        "score": 0.5725
+      },
+      {
+        "sentence": "Though these files were signed, their certificates have long expired.",
+        "score": 0.5086
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.4531
+      },
+      {
+        "sentence": "The first icacls function attempts to give ownership to the administrators group and the second icacls function attempts to give ownership to the users group.",
+        "score": 0.4039
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.5021
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.4296
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.4546
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.5367
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.374
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.3566
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.4127
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3663
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.4881
+      }
+    ],
+    "T1203": [
+      {
+        "sentence": "They have been exploiting vulnerabilities in Microsoft Office’s Equation Editor [1] which Microsoft removed in January 2018 [2], which in this case seems to be a highly obfuscated version of CVE-2017-11882.",
+        "score": 0.575
+      },
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.3766
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.4012
+      },
+      {
+        "sentence": "Decoy RTF Document In this example, SectorB06 made use of a Mongolian decoy document to target their victim.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "Decoy document written in Mongolian which references the Ministry of Justice and Internal Affairs of Mongolia If exploitable, the exploit code drops the first-stage malware DLL at “%APPDATA%\\Microsoft\\Word\\STARTUP\\cclerr.wll” and runs it.",
+        "score": 0.4421
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.3272
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.4246
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3691
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.4407
+      }
+    ],
+    "T1043": [
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.369
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.3647
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.3997
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.3463
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3072
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3466
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.3907
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3388
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.4186
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.3247
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.4159
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.4241
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.3275
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.79
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.4301
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.4714
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.4495
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3264
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.3146
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4199
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3986
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.4611
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.7193
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3872
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.6352
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.4982
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.7257
+      },
+      {
+        "sentence": "The name of the registry key used is “IntelGraphicsController” with the value of “<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245- 2190-7215-A3C5-43215926716A}”.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.3288
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.373
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.3021
+      },
+      {
+        "sentence": "Malware “1-a” and “5-a” contain the same victim identifier values, as do “2-a” and “3-a”.",
+        "score": 0.3183
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.33
+      },
+      {
+        "sentence": "The list of CLSIDs in a system can be seen in KEY_CLASSES_ROOT\\CLSID.",
+        "score": 0.3935
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3183
+      }
+    ],
+    "T1071": [
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.5151
+      },
+      {
+        "sentence": "We came across multiple pieces of their malware used in 2019 which appears to be custom compiled on a per target victim per organization basis, with this particular decoy document being uploaded from a Singapore IP address.",
+        "score": 0.3869
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4149
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.4079
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.3942
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.3871
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.373
+      },
+      {
+        "sentence": "Commands Ran The malware runs CreateProcess from a custom command execution function four times, with each run executing takeown/icacls/icacls.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "Malware “1-a” referenced below is the current first stage malware we are describing in this post.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "This is interesting because of the second stage malware which we describe briefly later.",
+        "score": 0.3858
+      },
+      {
+        "sentence": "The injected process, dllhost.exe, is typically a container process for running COM DLLs.",
+        "score": 0.3241
+      },
+      {
+        "sentence": "The samples we analyzed appear to connect to two external C2 IP addresses 217[.]69[.]8[.]255 and 1[.]187[.]1[.]187 on port 443.",
+        "score": 0.7126
+      },
+      {
+        "sentence": "It also references an internal IP address, which indicate that these spear phishing documents are sent to targeted victims and only after the attacker already has basic access to the victim’s internal network.",
+        "score": 0.493
+      },
+      {
+        "sentence": "One of the purposes of this second stage malware also appears to be for creating a remote command shell.",
+        "score": 0.4816
+      },
+      {
+        "sentence": "Malware Internal IPs Referenced 1-b 192[.]168[.]43[.]234 2-b 192[.]168[.]1 11[.]111 3-b 192[.]168[.]1 11[.]111 4-b 192[.]168[.]43[.]234 5-b 192[.]168[.]43[.]234 6-b 192[.]168[.]43[.]234 With the malware trying to target/use the same internal IP but with different user identification values, we see how the attacker is custom compiling each malware executable for each victim/attempt in a specific organization.",
+        "score": 0.3728
+      },
+      {
+        "sentence": "Summary SectorB06 is a threat group with very specific interests and in the case of these malware, appears to either already have a basic foothold in the victim network or has already gained and then lost access to the network.",
+        "score": 0.3826
+      }
+    ],
+    "T1107": [
+      {
+        "sentence": "The malware we analyzed in this case are sent seemingly only after they already have a basic foothold in their target organizations.",
+        "score": 0.3087
+      },
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.3048
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3161
+      },
+      {
+        "sentence": "Persistence This first stage malware mainly decompresses and drops two files being used for persistence.",
+        "score": 0.3513
+      }
+    ],
+    "T1012": [
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.4349
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.4011
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.4091
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.337
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.3819
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.5019
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.427
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "The name of the registry key used is “IntelGraphicsController” with the value of “<DIRECTORY_TO_INTELGRAPHICSCONTROLLER.EXE> Processid:{0A10C245- 2190-7215-A3C5-43215926716A}”.",
+        "score": 0.5668
+      },
+      {
+        "sentence": "The four runs are for the RasTls.dll file in the %APPDATA% and %PROGRAMFILE% subdirectories and the IntelGraphicsController.exe file in the %APPDATA% and %PROGRAMFILE% subdirectories.",
+        "score": 0.3496
+      },
+      {
+        "sentence": "The list of CLSIDs in a system can be seen in KEY_CLASSES_ROOT\\CLSID.",
+        "score": 0.5894
+      }
+    ],
+    "T1063": [
+      {
+        "sentence": "First Stage Malware (RasTls.dll)5/27/2019 SectorB06 using Mongolian language in lure document – Threat Recon https://threatrecon.nshc.net/2019/04/30/sectorb06-using-mongolian-language-in-lure-document/ 2/9The malware starts off by resolving a list of encoded API addresses by accessing the address of kernel32 from the InMemoryOrderModuleList inside the Process Environment Block (PEB) using FS:[0x30].",
+        "score": 0.358
+      },
+      {
+        "sentence": "It then gets the address of kernel32.LoadLibraryA and kernel32.GetProcAddress from a function which parses kernel32’s memory block.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "This is despite the malware already importing LoadLibraryA() and GetProcAddress(), and is used presumably to prevent automated systems from detecting massive amounts of calls to those functions.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "From there, it gets the address of the other libraries it makes use of – Shlwapi.dll, Shell32.dll, Gdi32.dll, User32.dll, and Advapi32.dll.",
+        "score": 0.412
+      },
+      {
+        "sentence": "Once that is done, it calls the function which parses the various DLLs again close to 100 times in order to resolve all the APIs it uses.",
+        "score": 0.3338
+      },
+      {
+        "sentence": "In the middle of those calls, it checks CheckRemoteDebuggerPresent and does not resolve the APIs from the other DLLs if a debugger is found, which will cause the malware to exit later before doing anything malicious.",
+        "score": 0.4715
+      },
+      {
+        "sentence": "Malware decrypting the imports it uses via its custom hashing algorithm It then starts a thread which polls the result of CheckRemoteDebuggerPresent constantly and exits once a debugger is found.",
+        "score": 0.4503
+      },
+      {
+        "sentence": "Process Name Hashing The malware checks for the lower-cased process name it is running under at various steps of execution using a string hashing algorithm.",
+        "score": 0.5207
+      },
+      {
+        "sentence": "In the first step, it checks against the string hash “0xAB341DFA”, “0x190BC0F1”, “0x639EBCBF”, “0xA6AFB610”, “0x4D16CE36”, and “0x64820461”.",
+        "score": 0.4716
+      },
+      {
+        "sentence": "It only continues execution if the process name hash is one of the first five hashes and the process name hash is not the last hash.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "We wrote a custom bruteforcing utility and managed to crack the first five hashes, finding the process names which the attacker expected as “winword.exe”, “excel.exe”, “powerpnt.exe”, “acrord32.exe”, and “eqnedt32.exe”.",
+        "score": 0.3769
+      },
+      {
+        "sentence": "Only the hash 0X84F39C89 is checked against the entire process list and is not a lower-case version of the process name.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "Malware “1-a” and “5-a” contain the same victim identifier values, as do “2-a” and “3-a”.",
+        "score": 0.3067
+      },
+      {
+        "sentence": "The list of CLSIDs in a system can be seen in KEY_CLASSES_ROOT\\CLSID.",
+        "score": 0.4489
+      },
+      {
+        "sentence": "They are actively developing their toolkit and are adept at bypassing security solutions at least statically especially for their exploit document and second stage malware.",
+        "score": 0.387
+      }
+    ]
+  }
+}

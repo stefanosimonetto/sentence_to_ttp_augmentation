@@ -1,0 +1,341 @@
+{
+  "original_txt": "Detecting Maranhão Stealer with Wazuh\nOctober 14, 2025\nMint Stealer is a Python-based malware that steals data from web browsers, cryptocurrency wallets, VPN clients, mail clients, game applications, and more. Mint Stealer is sold as a malware-as-a-service (MaaS), designed to covertly exfiltrate sensitive information from infected Windows endpoints to a command and control (C2) server.\nMint Stealer uses encryption and obfuscation techniques to evade detection and enhance its effectiveness on infected endpoints. This malware is sold on multiple dedicated websites and with support provided to users through Telegram.\nThis blog post demonstrates how Wazuh detects and responds to Mint Stealer malware on infected Windows endpoints.\nMint Stealer malware exhibits the following behaviors during execution.\nC:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\nfolder. The folder created starts with onefile\nfollowed by the process ID of Setup.exe\nand the system time retrieved using the GetSystemTimeAsFileTime\nAPI.vadimloader.exe\nin the C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME>\nfolder. Setup.exe\nto run the executable file as a child process. The executable file reads all the files in C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME>\nand also loads the required libraries and code into the process memory for its operation.C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME>\nthat starts with Save-\nfollowed by a randomly generated string. It saves all stolen data into this folder. Save-<RANDOMLY_GENERATED_STRING>\ninto a ZIP archive with a name that starts with Save-\nfollowed by a different random string.Infrastructure\nWe use the following infrastructure to demonstrate how to detect and respond to Mint Stealer with Wazuh:\nIn this blog post, we use the following techniques to detect the presence of Mint Stealer on a Windows 10 endpoint.\nWe use Sysmon to monitor several system events and create rules on the Wazuh server to detect the malicious activities performed by Mint Stealer malware.\nPerform the following steps to configure Sysmon on the monitored endpoint and forward logs in the Sysmon event channel to the Wazuh server for analysis.\n1. Download Sysmon from the Microsoft Sysinternals page.\n2. Extract the compressed Sysmon file to your preferred location.\n3. Download the Sysmon configuration file – sysmonconfig.xml using PowerShell. Replace <SYSMON_EXECUTABLE_PATH>\nwith the path to your Sysmon executable.\n> wget -Uri https://wazuh.com/resources/blog/emulation-of-attack-techniques-and-detection-with-wazuh/sysmonconfig.xml -OutFile <SYSMON_EXECUTABLE_PATH>\\sysmonconfig.xml\n4. Switch to the directory with the Sysmon executable. Run the command below to install and start Sysmon using PowerShell with Administrator privileges:\n> .\\Sysmon64.exe -accepteula -i .\\sysmonconfig.xml\n5. Add the following configuration within the <ossec_config>\nblock of the C:\\Program Files (x86)\\ossec-agent\\ossec.conf\nfile to forward Sysmon events to the Wazuh server:\n<!-- Configure Wazuh agent to receive events from Sysmon --> <localfile> <location>Microsoft-Windows-Sysmon/Operational</location> <log_format>eventchannel</log_format> </localfile>\n6. Restart the Wazuh agent for the changes to take effect:\n> Restart-Service -Name wazuh\nPerform the following steps to configure rules to detect malicious activities of the Mint Stealer malware.\n1. Create a new file mint_stealer_malware.xml\nin the /var/ossec/etc/rules/\ndirectory:\n# touch /var/ossec/etc/rules/mint_stealer_malware.xml\n2. Edit the file /var/ossec/etc/rules/mint_stealer_malware.xml\nand include the following detection rules for Mint Stealer malware:\n<group name=\"windows,sysmon,mint_stealer,\"> <!-- Mint Stealer creates a malicious executable file --> <rule id=\"100190\" level=\"8\"> <if_sid>92213</if_sid> <field name=\"win.system.eventID\">11</field> <field name=\"win.eventdata.image\" type=\"pcre2\">(?i)\\\\\\\\.+exe</field> <field name=\"win.eventdata.targetFilename\" type=\"pcre2\">(?i)\\\\\\\\Local\\\\\\\\Temp\\\\\\\\onefile_\\d+_\\d+\\\\\\\\.+exe</field> <description>Possible Mint Stealer malware detected. Malware creates a malicious executable $(win.eventdata.targetFilename).</description> </rule> <!-- Mint Stealer loads DLL or Pyd files --> <rule id=\"100191\" level=\"8\"> <if_sid>61609</if_sid> <field name=\"win.eventdata.image\" type=\"pcre2\">(?i)\\\\\\\\.+exe</field> <field name=\"win.eventdata.imageLoaded\" type=\"pcre2\">(?i)\\\\\\\\Local\\\\\\\\Temp\\\\\\\\onefile_\\d+_\\d+\\\\\\\\.+(dll|pyd)</field> <description>Possible Mint Stealer malware detected. $(win.eventdata.imageLoaded) file loaded by $(win.eventdata.image).</description> <mitre> <id>T1574.002</id> </mitre> </rule> <!-- Mint Stealer gathers victim host information using wmic command --> <rule id=\"100192\" level=\"10\"> <if_sid>92032</if_sid> <match type=\"pcre2\">(?i)\\\\\\\\cmd.exe /c \\\\\"wmic (os|csproduct|cpu|computersystem) get </match> <description>Possible Mint Stealer malware detected. Malware steals system information using wmic command.</description> <mitre> <id>T1592</id> </mitre> </rule> <!-- Mint Stealer attempts to steal clipboard data using PowerShell --> <rule id=\"100193\" level=\"8\" ignore=\"1200\"> <if_sid>92021</if_sid> <field name=\"win.eventdata.parentImage\" type=\"pcre2\">(?i)\\\\\\\\.+exe</field> <match type=\"pcre2\">(?i)powershell get-clipboard</match> <description>Possible Mint Stealer malware detected. Malware attempts to steal clipboard data using PowerShell.</description> <mitre> <id>T1115</id> </mitre> </rule> </group>\nThe following rule IDs are triggered when Wazuh detects the malicious activities of the Mint Stealer malware:\n100190\nis triggered when Mint Stealer creates a malicious executable file.100191\nis triggered when Mint Stealer loads DLL or Pyd files.100192\nis triggered when the malware gathers information like CPU, OS name, system name from the victim endpoint using wmic.100193\nis triggered when the malware attempts to steal clipboard information from the victim endpoint using PowerShell.3. Restart the Wazuh manager for the changes to take effect:\n# sudo systemctl restart wazuh-manager\nThe alerts below are generated on the Wazuh dashboard when the Mint Stealer malware infects the victim endpoint. Perform the following steps to view the alerts on the Wazuh dashboard.\n1. Navigate to Threat intelligence > Threat Hunting.\n2. Click + Add filter. Then, filter by rule.id\nin the Field field.\n3. Filter for is one of\nin the Operator field.\n4. Filter for 100190\n, 100191\n, 100192\nand 100193\nin the Values field.\n5. Click Save.\nYARA is an open source and multi-platform tool that identifies and classifies malware samples based on their textual or binary patterns. In this blog post, we use the Wazuh Active Response module to automatically execute a YARA scan on files added or modified in the Downloads\nfolder of the monitored Windows endpoint.\nTo download and install YARA, we require the following packages installed on the victim endpoint:\nAfter installing the above packages, perform the steps below to download the YARA executable:\n1. Launch PowerShell with administrator privileges and download YARA:\n> Invoke-WebRequest -Uri https://github.com/VirusTotal/yara/releases/download/v4.5.2/yara-v4.5.2-2326-win64.zip -OutFile v4.5.2-2326-win64.zip\n2. Extract the YARA executable:\n> Expand-Archive v4.5.2-2326-win64.zip\n3. Create a folder named C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\\nand copy the YARA binary into it:\n> mkdir 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\' > cp .\\v4.5.2-2326-win64\\yara64.exe 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\'\nPerform the steps below to download YARA rules:\n1. Using the same PowerShell terminal launched earlier, install valhallaAPI\nusing the pip utility:\n> pip install valhallaAPI\n2. Create the file download_yara_rules.py\nand copy the following script into it:\nfrom valhallaAPI.valhalla import ValhallaAPI v = ValhallaAPI(api_key=\"1111111111111111111111111111111111111111111111111111111111111111\") response = v.get_rules_text() with open('yara_rules.yar', 'w') as fh: fh.write(response)\n3. Download YARA rules and copy them to the C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\\nfolder:\n> python download_yara_rules.py > mkdir 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\' > cp yara_rules.yar 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\'\n4. Edit the file C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\yara_rules.yar\nand add the following YARA rule to detect the Mint Stealer malware:\nrule MintStealer { meta: Author = \"Benjamin Nworah\" Description = \"Detect Mint Stealer malware\" Date = \"13-09-2024\" Hash1 = \"1064ab9e734628e74c580c5aba71e4660ee3ed68db71f6aa81e30f148a5080fa\" // SHA-256 Hash Hash2 = \"cc93a4627a459d505c46de6fac342f856fb8f95b6a4fdcbd5e48be59aa4cbb7b\" // SHA-256 Hash strings: $a1 = \"FindResource\" $a2 = \"GetSystemTimeAsFileTime\" $a3 = /NUITKA.{1,15}/ condition: all of ($a*) }\n5. Edit the Wazuh agent file C:\\Program Files (x86)\\ossec-agent\\ossec.conf\nand add the below configuration within the <syscheck>\nblock to monitor the Downloads\nfolders of all users in real-time:\n<directories realtime=\"yes\">C:\\Users\\*\\Downloads</directories>\nNote: In this blog post, the Downloads\nfolders of all users are monitored. However, you can configure other folders you intend to monitor.\n6. Create a batch file yara.bat in the C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\\nfolder. The Wazuh active response module executes this file to initiate YARA scans for malware detection and removal:\n:: This script deletes Mint Stealer malware and other malicious files matched by the YARA Rules @echo off setlocal enableDelayedExpansion reg Query \"HKLM\\Hardware\\Description\\System\\CentralProcessor\\0\" | find /i \"x86\" > NUL && SET OS=32BIT || SET OS=64BIT if %OS%==32BIT ( SET log_file_path=\"%programfiles%\\ossec-agent\\active-response\\active-responses.log\" ) if %OS%==64BIT ( SET log_file_path=\"%programfiles(x86)%\\ossec-agent\\active-response\\active-responses.log\" ) set input= for /f \"delims=\" %%a in ('PowerShell -command \"$logInput = Read-Host; Write-Output $logInput\"') do ( set input=%%a ) set json_file_path=\"C:\\Program Files (x86)\\ossec-agent\\active-response\\stdin.txt\" set syscheck_file_path= echo %input% > %json_file_path% FOR /F \"tokens=* USEBACKQ\" %%F IN (`Powershell -Nop -C \"(Get-Content 'C:\\Program Files (x86)\\ossec-agent\\active-response\\stdin.txt'|ConvertFrom-Json).parameters.alert.syscheck.path\"`) DO ( SET syscheck_file_path=%%F ) set yara_exe_path=\"C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\yara64.exe\" set yara_rules_path=\"C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\yara_rules.yar\" echo %syscheck_file_path% >> %log_file_path% for /f \"delims=\" %%a in ('powershell -command \"& \\\"%yara_exe_path%\\\" \\\"%yara_rules_path%\\\" \\\"%syscheck_file_path%\\\"\"') do ( echo wazuh-yara: INFO - Scan result: %%a >> %log_file_path% :: Deleting the scanned file. del /f \"%syscheck_file_path%\" echo wazuh-yara: INFO - Successfully deleted: %%a >> %log_file_path% ) exit /b\n7. Restart the Wazuh agent using PowerShell for the changes to take effect:\n> Restart-Service -Name wazuh\nPerform the following steps to configure custom decoders, rules, and the Active Response module on the Wazuh server.\n1. Edit the file /var/ossec/etc/decoders/local_decoder.xml\non the Wazuh server and include the following decoders:\n<!-- The decoders parse logs from the YARA scans --> <decoder name=\"yara_decoder\"> <prematch>wazuh-yara:</prematch> </decoder> <decoder name=\"yara_decoder1\"> <parent>yara_decoder</parent> <regex>wazuh-yara: (\\S+) - Scan result: (\\S+) (\\S+)</regex> <order>log_type, yara_rule, yara_scanned_file</order> </decoder> <decoder name=\"yara_decoder1\"> <parent>yara_decoder</parent> <regex>wazuh-yara: (\\S+) - Successfully deleted: (\\S+) (\\S+)</regex> <order>log_type, yara_rule, yara_scanned_file</order> </decoder>\n2. Edit the file /var/ossec/etc/rules/local_rules.xml\non the Wazuh server and include the following rules:\n<!-- File added to the Downloads folder --> <group name= \"syscheck,\"> <rule id=\"100028\" level=\"7\"> <if_sid>550</if_sid> <field name=\"file\" type=\"pcre2\">(?i)C:\\\\Users.+Downloads</field> <description>File modified in the Downloads folder.</description> </rule> <!-- File modified in the Downloads folder --> <rule id=\"100029\" level=\"7\"> <if_sid>554</if_sid> <field name=\"file\" type=\"pcre2\">(?i)C:\\\\Users.+Downloads</field> <description>File added to the Downloads folder.</description> </rule> </group> <!-- Rule for the decoder (yara_decoder) --> <group name=\"yara,\"> <rule id=\"100194\" level=\"0\"> <decoded_as>yara_decoder</decoded_as> <description>Yara grouping rule</description> </rule> <!-- YARA scan detects a positive match --> <rule id=\"100195\" level=\"12\"> <if_sid>100194</if_sid> <match type=\"pcre2\">wazuh-yara: INFO - Scan result: </match> <description>File \"$(yara_scanned_file)\" is a positive match. Yara rule: $(yara_rule)</description> </rule> <rule id=\"100196\" level=\"12\"> <if_sid>100194</if_sid> <match type=\"pcre2\">wazuh-yara: INFO - Successfully deleted: </match> <description>Successfully removed \"$(yara_scanned_file)\". YARA rule: $(yara_rule)</description> </rule> </group>\n3. Add the following configuration to the Wazuh server file /var/ossec/etc/ossec.conf\nwithin the <ossec_config>\nblock:\n<!-- The YARA batch script is executed when a file is added or modified in the Downloads folder monitored by Wazuh --> <command> <name>yara</name> <executable>yara.bat</executable> <timeout_allowed>no</timeout_allowed> </command> <active-response> <command>yara</command> <location>local</location> <rules_id>100028,100029</rules_id> </active-response>\n4. Restart the Wazuh manager for the changes to take effect:\n# systemctl restart wazuh-manager\nThe Wazuh dashboard shows alerts when the Mint Stealer malware is downloaded to the Downloads\nfolder of the victim endpoint. Perform the following steps to view the alerts on the Wazuh dashboard.\n1. Navigate to Threat intelligence > Threat Hunting.\n2. Click + Add filter. Then filter by rule.id\nin the Field field.\n3. Filter for is one of\nin the Operator field.\n4. Filter for 100029\n, 100195\n, and 100196\nin the Values field.\n5. Click Save.\nConclusion\nIn this blog post, we used Sysmon integration with Wazuh to detect the malicious activities performed by Mint Stealer malware. We also used YARA integration with Wazuh to detect and remove this malware once it is downloaded to an endpoint.\nWazuh is a free and open source enterprise-ready security platform for uncovering security threats, incident response, and compliance. Wazuh integrates with third-party technologies. We also have a growing community where users are supported. To learn more about Wazuh, please check out our documentation and blog posts.\nReferences",
+  "sanitized_txt": "Detecting Maranhão Stealer with Wazuh October 14, 2025 Mint Stealer is a Python-based malware that steals data from web browsers, cryptocurrency wallets, VPN clients, mail clients, game applications, and more. Mint Stealer is sold as a malware-as-a-service (MaaS), designed to covertly exfiltrate sensitive information from infected Windows endpoints to a command and control (C2) server.\nMint Stealer uses encryption and obfuscation techniques to evade detection and enhance its effectiveness on infected endpoints. This malware is sold on multiple dedicated websites and with support provided to users through Telegram.\nThis blog post demonstrates how Wazuh detects and responds to Mint Stealer malware on infected Windows endpoints.\nMint Stealer malware exhibits the following behaviors during execution.\nC:\\Users\\<USER_NAME>\\AppData\\Local\\Temp folder. The folder created starts with onefile followed by the process ID of Setup.exe and the system time retrieved using the GetSystemTimeAsFileTime API.vadimloader.exe in the C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> folder. Setup.exe to run the executable file as a child process. The executable file reads all the files in C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> and also loads the required libraries and code into the process memory for its operation.C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> that starts with Save- followed by a randomly generated string. It saves all stolen data into this folder. Save-<RANDOMLY_GENERATED_STRING> into a ZIP archive with a name that starts with Save- followed by a different random string.Infrastructure We use the following infrastructure to demonstrate how to detect and respond to Mint Stealer with Wazuh:\nIn this blog post, we use the following techniques to detect the presence of Mint Stealer on a Windows 10 endpoint.\nWe use Sysmon to monitor several system events and create rules on the Wazuh server to detect the malicious activities performed by Mint Stealer malware.\nPerform the following steps to configure Sysmon on the monitored endpoint and forward logs in the Sysmon event channel to the Wazuh server for analysis.\n1. Download Sysmon from the Microsoft Sysinternals page.\n2. Extract the compressed Sysmon file to your preferred location.\n3. Download the Sysmon configuration file – sysmonconfig.xml using PowerShell. Replace <SYSMON_EXECUTABLE_PATH> with the path to your Sysmon executable.\n> wget -Uri https://wazuh.com/resources/blog/emulation-of-attack-techniques-and-detection-with-wazuh/sysmonconfig.xml -OutFile <SYSMON_EXECUTABLE_PATH>\\sysmonconfig.xml 4. Switch to the directory with the Sysmon executable. Run the command below to install and start Sysmon using PowerShell with Administrator privileges:\n> .\\Sysmon64.exe -accepteula -i .\\sysmonconfig.xml 5. Add the following configuration within the <ossec_config> block of the C:\\Program Files (x86)\\ossec-agent\\ossec.conf file to forward Sysmon events to the Wazuh server:\n<!-- Configure Wazuh agent to receive events from Sysmon --> <localfile> <location>Microsoft-Windows-Sysmon/Operational</location> <log_format>eventchannel</log_format> </localfile> 6. Restart the Wazuh agent for the changes to take effect:\n> Restart-Service -Name wazuh Perform the following steps to configure rules to detect malicious activities of the Mint Stealer malware.\n1. Create a new file mint_stealer_malware.xml in the /var/ossec/etc/rules/ directory:\n# touch /var/ossec/etc/rules/mint_stealer_malware.xml 2. Edit the file /var/ossec/etc/rules/mint_stealer_malware.xml and include the following detection rules for Mint Stealer malware:\n100190 is triggered when Mint Stealer creates a malicious executable file.100191 is triggered when Mint Stealer loads DLL or Pyd files.100192 is triggered when the malware gathers information like CPU, OS name, system name from the victim endpoint using wmic.100193 is triggered when the malware attempts to steal clipboard information from the victim endpoint using PowerShell.3. Restart the Wazuh manager for the changes to take effect:\n# sudo systemctl restart wazuh-manager The alerts below are generated on the Wazuh dashboard when the Mint Stealer malware infects the victim endpoint. Perform the following steps to view the alerts on the Wazuh dashboard.\n1. Navigate to Threat intelligence > Threat Hunting.\n2. Click + Add filter. Then, filter by rule.id in the Field field.\n3. Filter for is one of in the Operator field.\n4. Filter for 100190 , 100191 , 100192 and 100193 in the Values field.\n5. Click Save.\nYARA is an open source and multi-platform tool that identifies and classifies malware samples based on their textual or binary patterns. In this blog post, we use the Wazuh Active Response module to automatically execute a YARA scan on files added or modified in the Downloads folder of the monitored Windows endpoint.\nTo download and install YARA, we require the following packages installed on the victim endpoint:\nAfter installing the above packages, perform the steps below to download the YARA executable:\n1. Launch PowerShell with administrator privileges and download YARA:\n> Invoke-WebRequest -Uri https://github.com/VirusTotal/yara/releases/download/v4.5.2/yara-v4.5.2-2326-win64.zip -OutFile v4.5.2-2326-win64.zip 2. Extract the YARA executable:\n> Expand-Archive v4.5.2-2326-win64.zip 3. Create a folder named C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\ and copy the YARA binary into it:\n> mkdir 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\' > cp .\\v4.5.2-2326-win64\\yara64.exe 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\' Perform the steps below to download YARA rules:\n1. Using the same PowerShell terminal launched earlier, install valhallaAPI using the pip utility:\n> pip install valhallaAPI 2. Create the file download_yara_rules.py and copy the following script into it:\nfrom valhallaAPI.valhalla import ValhallaAPI v = ValhallaAPI(api_key=\"1111111111111111111111111111111111111111111111111111111111111111\") response = v.get_rules_text() with open('yara_rules.yar', 'w') as fh: fh.write(response) 3. Download YARA rules and copy them to the C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\ folder:\n> python download_yara_rules.py > mkdir 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\' > cp yara_rules.yar 'C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\' 4. Edit the file C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\yara_rules.yar and add the following YARA rule to detect the Mint Stealer malware:\nrule MintStealer { meta: Author = \"Benjamin Nworah\" Description = \"Detect Mint Stealer malware\" Date = \"13-09-2024\" Hash1 = \"1064ab9e734628e74c580c5aba71e4660ee3ed68db71f6aa81e30f148a5080fa\" // SHA-256 Hash Hash2 = \"cc93a4627a459d505c46de6fac342f856fb8f95b6a4fdcbd5e48be59aa4cbb7b\" // SHA-256 Hash strings: $a1 = \"FindResource\" $a2 = \"GetSystemTimeAsFileTime\" $a3 = /NUITKA.{1,15}/ condition: all of ($a*) } 5. Edit the Wazuh agent file C:\\Program Files (x86)\\ossec-agent\\ossec.conf and add the below configuration within the <syscheck> block to monitor the Downloads folders of all users in real-time:\n<directories realtime=\"yes\">C:\\Users\\*\\Downloads</directories> Note: In this blog post, the Downloads folders of all users are monitored. However, you can configure other folders you intend to monitor.\n6. Create a batch file yara.bat in the C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\ folder. The Wazuh active response module executes this file to initiate YARA scans for malware detection and removal:\n:: This script deletes Mint Stealer malware and other malicious files matched by the YARA Rules @echo off setlocal enableDelayedExpansion reg Query \"HKLM\\Hardware\\Description\\System\\CentralProcessor\\0\" | find /i \"x86\" > NUL && SET OS=32BIT || SET OS=64BIT if %OS%==32BIT ( SET log_file_path=\"%programfiles%\\ossec-agent\\active-response\\active-responses.log\" ) if %OS%==64BIT ( SET log_file_path=\"%programfiles(x86)%\\ossec-agent\\active-response\\active-responses.log\" ) set input= for /f \"delims=\" %%a in ('PowerShell -command \"$logInput = Read-Host; Write-Output $logInput\"') do ( set input=%%a ) set json_file_path=\"C:\\Program Files (x86)\\ossec-agent\\active-response\\stdin.txt\" set syscheck_file_path= echo %input% > %json_file_path% FOR /F \"tokens=* USEBACKQ\" %%F IN (`Powershell -Nop -C \"(Get-Content 'C:\\Program Files (x86)\\ossec-agent\\active-response\\stdin.txt'|ConvertFrom-Json).parameters.alert.syscheck.path\"`) DO ( SET syscheck_file_path=%%F ) set yara_exe_path=\"C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\yara64.exe\" set yara_rules_path=\"C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\yara\\rules\\yara_rules.yar\" echo %syscheck_file_path% >> %log_file_path% for /f \"delims=\" %%a in ('powershell -command \"& \\\"%yara_exe_path%\\\" \\\"%yara_rules_path%\\\" \\\"%syscheck_file_path%\\\"\"') do ( echo wazuh-yara: INFO - Scan result: %%a >> %log_file_path% :: Deleting the scanned file. del /f \"%syscheck_file_path%\" echo wazuh-yara: INFO - Successfully deleted: %%a >> %log_file_path% ) exit /b 7. Restart the Wazuh agent using PowerShell for the changes to take effect:\n> Restart-Service -Name wazuh Perform the following steps to configure custom decoders, rules, and the Active Response module on the Wazuh server.\n1. Edit the file /var/ossec/etc/decoders/local_decoder.xml on the Wazuh server and include the following decoders:\n<!-- The decoders parse logs from the YARA scans --> <decoder name=\"yara_decoder\"> <prematch>wazuh-yara:</prematch> </decoder> <decoder name=\"yara_decoder1\"> <parent>yara_decoder</parent> <regex>wazuh-yara: (\\S+) - Scan result: (\\S+) (\\S+)</regex> <order>log_type, yara_rule, yara_scanned_file</order> </decoder> <decoder name=\"yara_decoder1\"> <parent>yara_decoder</parent> <regex>wazuh-yara: (\\S+) - Successfully deleted: (\\S+) (\\S+)</regex> <order>log_type, yara_rule, yara_scanned_file</order> </decoder> 2. Edit the file /var/ossec/etc/rules/local_rules.xml on the Wazuh server and include the following rules:\n<!-- File added to the Downloads folder --> <group name= \"syscheck,\"> <rule id=\"100028\" level=\"7\"> <if_sid>550</if_sid> <field name=\"file\" type=\"pcre2\">(?i)C:\\\\Users.+Downloads</field> <description>File modified in the Downloads folder.</description> </rule> <!-- File modified in the Downloads folder --> <rule id=\"100029\" level=\"7\"> <if_sid>554</if_sid> <field name=\"file\" type=\"pcre2\">(?i)C:\\\\Users.+Downloads</field> <description>File added to the Downloads folder.</description> </rule> </group> <!-- Rule for the decoder (yara_decoder) --> <group name=\"yara,\"> <rule id=\"100194\" level=\"0\"> <decoded_as>yara_decoder</decoded_as> <description>Yara grouping rule</description> </rule> <!-- YARA scan detects a positive match --> <rule id=\"100195\" level=\"12\"> <if_sid>100194</if_sid> <match type=\"pcre2\">wazuh-yara: INFO - Scan result: </match> <description>File \"$(yara_scanned_file)\" is a positive match. Yara rule: $(yara_rule)</description> </rule> <rule id=\"100196\" level=\"12\"> <if_sid>100194</if_sid> <match type=\"pcre2\">wazuh-yara: INFO - Successfully deleted: </match> <description>Successfully removed \"$(yara_scanned_file)\". YARA rule: $(yara_rule)</description> </rule> </group> 3. Add the following configuration to the Wazuh server file /var/ossec/etc/ossec.conf within the <ossec_config> block:\n<!-- The YARA batch script is executed when a file is added or modified in the Downloads folder monitored by Wazuh --> <command> <name>yara</name> <executable>yara.bat</executable> <timeout_allowed>no</timeout_allowed> </command> <active-response> <command>yara</command> <location>local</location> <rules_id>100028,100029</rules_id> </active-response> 4. Restart the Wazuh manager for the changes to take effect:\n# systemctl restart wazuh-manager The Wazuh dashboard shows alerts when the Mint Stealer malware is downloaded to the Downloads folder of the victim endpoint. Perform the following steps to view the alerts on the Wazuh dashboard.\n1. Navigate to Threat intelligence > Threat Hunting.\n2. Click + Add filter. Then filter by rule.id in the Field field.\n3. Filter for is one of in the Operator field.\n4. Filter for 100029 , 100195 , and 100196 in the Values field.\n5. Click Save.\nConclusion In this blog post, we used Sysmon integration with Wazuh to detect the malicious activities performed by Mint Stealer malware. We also used YARA integration with Wazuh to detect and remove this malware once it is downloaded to an endpoint.\nWazuh is a free and open source enterprise-ready security platform for uncovering security threats, incident response, and compliance. Wazuh integrates with third-party technologies. We also have a growing community where users are supported. To learn more about Wazuh, please check out our documentation and blog posts.\nReferences",
+  "ID_list": [
+    "T1115",
+    "T1574.002",
+    "T1592"
+  ],
+  "Name_list": [
+    "Clipboard Data",
+    "Command and Control",
+    "Execution",
+    "PowerShell",
+    "Source",
+    "Sudo"
+  ],
+  "TTP_sentences": {
+    "T1115": [
+      {
+        "sentence": "Detecting Maranhão Stealer with Wazuh October 14, 2025 Mint Stealer is a Python-based malware that steals data from web browsers, cryptocurrency wallets, VPN clients, mail clients, game applications, and more.",
+        "score": 0.4732
+      },
+      {
+        "sentence": "Mint Stealer is sold as a malware-as-a-service (MaaS), designed to covertly exfiltrate sensitive information from infected Windows endpoints to a command and control (C2) server.",
+        "score": 0.4841
+      },
+      {
+        "sentence": "Mint Stealer uses encryption and obfuscation techniques to evade detection and enhance its effectiveness on infected endpoints.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "Mint Stealer malware exhibits the following behaviors during execution.",
+        "score": 0.3035
+      },
+      {
+        "sentence": "The folder created starts with onefile followed by the process ID of Setup.exe and the system time retrieved using the GetSystemTimeAsFileTime API.vadimloader.exe in the C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> folder.",
+        "score": 0.4474
+      },
+      {
+        "sentence": "The executable file reads all the files in C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> and also loads the required libraries and code into the process memory for its operation.C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> that starts with Save- followed by a randomly generated string.",
+        "score": 0.4671
+      },
+      {
+        "sentence": "It saves all stolen data into this folder.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "We use Sysmon to monitor several system events and create rules on the Wazuh server to detect the malicious activities performed by Mint Stealer malware.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Perform the following steps to configure Sysmon on the monitored endpoint and forward logs in the Sysmon event channel to the Wazuh server for analysis.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "Download Sysmon from the Microsoft Sysinternals page.",
+        "score": 0.429
+      },
+      {
+        "sentence": "Extract the compressed Sysmon file to your preferred location.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "Download the Sysmon configuration file – sysmonconfig.xml using PowerShell.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "Run the command below to install and start Sysmon using PowerShell with Administrator privileges: > .\\Sysmon64.exe -accepteula -i .\\sysmonconfig.xml 5.",
+        "score": 0.3196
+      },
+      {
+        "sentence": "Add the following configuration within the <ossec_config> block of the C:\\Program Files (x86)\\ossec-agent\\ossec.conf file to forward Sysmon events to the Wazuh server: <!-- Configure Wazuh agent to receive events from Sysmon --> <localfile> <location>Microsoft-Windows-Sysmon/Operational</location> <log_format>eventchannel</log_format> </localfile> 6.",
+        "score": 0.3811
+      },
+      {
+        "sentence": "Malware steals system information using wmic command.</description> <mitre> <id></id> </mitre> </rule> <!-- Mint Stealer attempts to steal clipboard data using PowerShell --> <rule id=\"100193\" level=\"8\" ignore=\"1200\"> <if_sid>92021</if_sid> <field name=\"win.eventdata.parentImage\" type=\"pcre2\">(?i)\\\\\\\\.+exe</field> <match type=\"pcre2\">(?i)powershell get-clipboard</match> <description>Possible Mint Stealer malware detected.",
+        "score": 0.6335
+      },
+      {
+        "sentence": "Perform the following steps to view the alerts on the Wazuh dashboard.",
+        "score": 0.4101
+      },
+      {
+        "sentence": "Click + Add filter.",
+        "score": 0.373
+      },
+      {
+        "sentence": "Click Save.",
+        "score": 0.4523
+      },
+      {
+        "sentence": "In this blog post, we use the Wazuh Active Response module to automatically execute a YARA scan on files added or modified in the Downloads folder of the monitored Windows endpoint.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "Launch PowerShell with administrator privileges and download YARA: > Invoke-WebRequest -Uri https://github.com/VirusTotal/yara/releases/download/v4.5.2/yara-v4.5.2-2326-win64.zip -OutFile v4.5.2-2326-win64.zip 2.",
+        "score": 0.3649
+      },
+      {
+        "sentence": "Extract the YARA executable: > Expand-Archive v4.5.2-2326-win64.zip 3.",
+        "score": 0.3586
+      },
+      {
+        "sentence": "Create the file download_yara_rules.py and copy the following script into it: from valhallaAPI.valhalla import ValhallaAPI v = ValhallaAPI(api_key=\"1111111111111111111111111111111111111111111111111111111111111111\") response = v.get_rules_text() with open('yara_rules.yar', 'w') as fh: fh.write(response) 3.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "Edit the Wazuh agent file C:\\Program Files (x86)\\ossec-agent\\ossec.conf and add the below configuration within the <syscheck> block to monitor the Downloads folders of all users in real-time: <directories realtime=\"yes\">C:\\Users\\*\\Downloads</directories> Note: In this blog post, the Downloads folders of all users are monitored.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "However, you can configure other folders you intend to monitor.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "Create a batch file yara.bat in the C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\ folder.",
+        "score": 0.3331
+      },
+      {
+        "sentence": "Perform the following steps to view the alerts on the Wazuh dashboard.",
+        "score": 0.4101
+      },
+      {
+        "sentence": "Click + Add filter.",
+        "score": 0.373
+      },
+      {
+        "sentence": "Click Save.",
+        "score": 0.4523
+      },
+      {
+        "sentence": "To learn more about Wazuh, please check out our documentation and blog posts.",
+        "score": 0.3396
+      }
+    ],
+    "T1574.002": [
+      {
+        "sentence": "Detecting Maranhão Stealer with Wazuh October 14, 2025 Mint Stealer is a Python-based malware that steals data from web browsers, cryptocurrency wallets, VPN clients, mail clients, game applications, and more.",
+        "score": 0.3002
+      },
+      {
+        "sentence": "Mint Stealer uses encryption and obfuscation techniques to evade detection and enhance its effectiveness on infected endpoints.",
+        "score": 0.3643
+      },
+      {
+        "sentence": "This malware is sold on multiple dedicated websites and with support provided to users through Telegram.",
+        "score": 0.3573
+      },
+      {
+        "sentence": "Mint Stealer malware exhibits the following behaviors during execution.",
+        "score": 0.412
+      },
+      {
+        "sentence": "Setup.exe to run the executable file as a child process.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "The executable file reads all the files in C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> and also loads the required libraries and code into the process memory for its operation.C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> that starts with Save- followed by a randomly generated string.",
+        "score": 0.4629
+      },
+      {
+        "sentence": "Save-<RANDOMLY_GENERATED_STRING> into a ZIP archive with a name that starts with Save- followed by a different random string.Infrastructure We use the following infrastructure to demonstrate how to detect and respond to Mint Stealer with Wazuh: In this blog post, we use the following techniques to detect the presence of Mint Stealer on a Windows 10 endpoint.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "Switch to the directory with the Sysmon executable.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "Restart the Wazuh manager for the changes to take effect: # sudo systemctl restart wazuh-manager The alerts below are generated on the Wazuh dashboard when the Mint Stealer malware infects the victim endpoint.",
+        "score": 0.3293
+      },
+      {
+        "sentence": "Using the same PowerShell terminal launched earlier, install valhallaAPI using the pip utility: > pip install valhallaAPI 2.",
+        "score": 0.4094
+      },
+      {
+        "sentence": "Edit the Wazuh agent file C:\\Program Files (x86)\\ossec-agent\\ossec.conf and add the below configuration within the <syscheck> block to monitor the Downloads folders of all users in real-time: <directories realtime=\"yes\">C:\\Users\\*\\Downloads</directories> Note: In this blog post, the Downloads folders of all users are monitored.",
+        "score": 0.3042
+      },
+      {
+        "sentence": "Restart the Wazuh manager for the changes to take effect: # systemctl restart wazuh-manager The Wazuh dashboard shows alerts when the Mint Stealer malware is downloaded to the Downloads folder of the victim endpoint.",
+        "score": 0.3847
+      },
+      {
+        "sentence": "Conclusion In this blog post, we used Sysmon integration with Wazuh to detect the malicious activities performed by Mint Stealer malware.",
+        "score": 0.391
+      },
+      {
+        "sentence": "To learn more about Wazuh, please check out our documentation and blog posts.",
+        "score": 0.3011
+      }
+    ],
+    "T1592": [
+      {
+        "sentence": "Detecting Maranhão Stealer with Wazuh October 14, 2025 Mint Stealer is a Python-based malware that steals data from web browsers, cryptocurrency wallets, VPN clients, mail clients, game applications, and more.",
+        "score": 0.5118
+      },
+      {
+        "sentence": "Mint Stealer is sold as a malware-as-a-service (MaaS), designed to covertly exfiltrate sensitive information from infected Windows endpoints to a command and control (C2) server.",
+        "score": 0.4494
+      },
+      {
+        "sentence": "Mint Stealer uses encryption and obfuscation techniques to evade detection and enhance its effectiveness on infected endpoints.",
+        "score": 0.3631
+      },
+      {
+        "sentence": "This malware is sold on multiple dedicated websites and with support provided to users through Telegram.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "This blog post demonstrates how Wazuh detects and responds to Mint Stealer malware on infected Windows endpoints.",
+        "score": 0.4516
+      },
+      {
+        "sentence": "The folder created starts with onefile followed by the process ID of Setup.exe and the system time retrieved using the GetSystemTimeAsFileTime API.vadimloader.exe in the C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> folder.",
+        "score": 0.4845
+      },
+      {
+        "sentence": "The executable file reads all the files in C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> and also loads the required libraries and code into the process memory for its operation.C:\\Users\\<USER_NAME>\\AppData\\Local\\Temp\\onefile_<PID>_<SYSTEM_TIME> that starts with Save- followed by a randomly generated string.",
+        "score": 0.4057
+      },
+      {
+        "sentence": "Save-<RANDOMLY_GENERATED_STRING> into a ZIP archive with a name that starts with Save- followed by a different random string.Infrastructure We use the following infrastructure to demonstrate how to detect and respond to Mint Stealer with Wazuh: In this blog post, we use the following techniques to detect the presence of Mint Stealer on a Windows 10 endpoint.",
+        "score": 0.4667
+      },
+      {
+        "sentence": "We use Sysmon to monitor several system events and create rules on the Wazuh server to detect the malicious activities performed by Mint Stealer malware.",
+        "score": 0.4454
+      },
+      {
+        "sentence": "Perform the following steps to configure Sysmon on the monitored endpoint and forward logs in the Sysmon event channel to the Wazuh server for analysis.",
+        "score": 0.3158
+      },
+      {
+        "sentence": "Download Sysmon from the Microsoft Sysinternals page.",
+        "score": 0.3264
+      },
+      {
+        "sentence": "Download the Sysmon configuration file – sysmonconfig.xml using PowerShell.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "Replace <SYSMON_EXECUTABLE_PATH> with the path to your Sysmon executable. > wget -Uri https://wazuh.com/resources/blog/emulation-of-attack-techniques-and-detection-with-wazuh/sysmonconfig.xml -OutFile <SYSMON_EXECUTABLE_PATH>\\sysmonconfig.xml 4.",
+        "score": 0.327
+      },
+      {
+        "sentence": "Run the command below to install and start Sysmon using PowerShell with Administrator privileges: > .\\Sysmon64.exe -accepteula -i .\\sysmonconfig.xml 5.",
+        "score": 0.3211
+      },
+      {
+        "sentence": "Add the following configuration within the <ossec_config> block of the C:\\Program Files (x86)\\ossec-agent\\ossec.conf file to forward Sysmon events to the Wazuh server: <!-- Configure Wazuh agent to receive events from Sysmon --> <localfile> <location>Microsoft-Windows-Sysmon/Operational</location> <log_format>eventchannel</log_format> </localfile> 6.",
+        "score": 0.3376
+      },
+      {
+        "sentence": "Malware steals system information using wmic command.</description> <mitre> <id></id> </mitre> </rule> <!-- Mint Stealer attempts to steal clipboard data using PowerShell --> <rule id=\"100193\" level=\"8\" ignore=\"1200\"> <if_sid>92021</if_sid> <field name=\"win.eventdata.parentImage\" type=\"pcre2\">(?i)\\\\\\\\.+exe</field> <match type=\"pcre2\">(?i)powershell get-clipboard</match> <description>Possible Mint Stealer malware detected.",
+        "score": 0.5377
+      },
+      {
+        "sentence": "Restart the Wazuh manager for the changes to take effect: # sudo systemctl restart wazuh-manager The alerts below are generated on the Wazuh dashboard when the Mint Stealer malware infects the victim endpoint.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "Perform the following steps to view the alerts on the Wazuh dashboard.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "Navigate to Threat intelligence > Threat Hunting.",
+        "score": 0.3598
+      },
+      {
+        "sentence": "Then, filter by rule.id in the Field field.",
+        "score": 0.3312
+      },
+      {
+        "sentence": "Filter for is one of in the Operator field.",
+        "score": 0.3368
+      },
+      {
+        "sentence": "Filter for 100190 , 100191 , 100192 and 100193 in the Values field.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "YARA is an open source and multi-platform tool that identifies and classifies malware samples based on their textual or binary patterns.",
+        "score": 0.4592
+      },
+      {
+        "sentence": "In this blog post, we use the Wazuh Active Response module to automatically execute a YARA scan on files added or modified in the Downloads folder of the monitored Windows endpoint.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "Launch PowerShell with administrator privileges and download YARA: > Invoke-WebRequest -Uri https://github.com/VirusTotal/yara/releases/download/v4.5.2/yara-v4.5.2-2326-win64.zip -OutFile v4.5.2-2326-win64.zip 2.",
+        "score": 0.3812
+      },
+      {
+        "sentence": "Extract the YARA executable: > Expand-Archive v4.5.2-2326-win64.zip 3.",
+        "score": 0.3269
+      },
+      {
+        "sentence": "Create the file download_yara_rules.py and copy the following script into it: from valhallaAPI.valhalla import ValhallaAPI v = ValhallaAPI(api_key=\"1111111111111111111111111111111111111111111111111111111111111111\") response = v.get_rules_text() with open('yara_rules.yar', 'w') as fh: fh.write(response) 3.",
+        "score": 0.3425
+      },
+      {
+        "sentence": "Edit the Wazuh agent file C:\\Program Files (x86)\\ossec-agent\\ossec.conf and add the below configuration within the <syscheck> block to monitor the Downloads folders of all users in real-time: <directories realtime=\"yes\">C:\\Users\\*\\Downloads</directories> Note: In this blog post, the Downloads folders of all users are monitored.",
+        "score": 0.3392
+      },
+      {
+        "sentence": "Perform the following steps to view the alerts on the Wazuh dashboard.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "Navigate to Threat intelligence > Threat Hunting.",
+        "score": 0.3598
+      },
+      {
+        "sentence": "Then filter by rule.id in the Field field.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "Filter for is one of in the Operator field.",
+        "score": 0.3368
+      },
+      {
+        "sentence": "Filter for 100029 , 100195 , and 100196 in the Values field.",
+        "score": 0.3054
+      },
+      {
+        "sentence": "Conclusion In this blog post, we used Sysmon integration with Wazuh to detect the malicious activities performed by Mint Stealer malware.",
+        "score": 0.4587
+      },
+      {
+        "sentence": "Wazuh is a free and open source enterprise-ready security platform for uncovering security threats, incident response, and compliance.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "To learn more about Wazuh, please check out our documentation and blog posts.",
+        "score": 0.4627
+      }
+    ]
+  }
+}

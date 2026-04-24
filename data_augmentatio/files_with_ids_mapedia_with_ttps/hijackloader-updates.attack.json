@@ -1,0 +1,1812 @@
+{
+  "original_txt": "Zscaler Blog\nGet the latest Zscaler blog updates in your inbox\nHijackLoader Updates\n*Updated on February 7, 2025: The blog has been updated with richer module descriptions.\nIntroduction\nHijackLoader (a.k.a. IDAT Loader) is a malware loader initially spotted in 2023 that is capable of using a variety of modules for code injection and execution. It uses a modular architecture, a feature that most loaders do not have – which we discussed in a previous HijackLoader blog. ThreatLabz researchers recently analyzed a new HijackLoader sample that has updated evasion techniques. These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time. HijackLoader now includes modules to add an exclusion for Windows Defender Antivirus, bypass User Account Control (UAC), evade inline API hooking that is often used by security software for detection, and employ process hollowing.\nIn addition, HijackLoader’s delivery method involves the use of a PNG image, which is decrypted and parsed to load the next stage of the attack. ThreatLabz observed HijackLoader being used to drop multiple malware families, including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.\nIn this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples. Additionally, we delve into the malware families deployed by HijackLoader from March 2024 to April 2024.\nKey Takeaways\n- HijackLoader is a modular malware loader that is used to deliver second stage payloads including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.\n- HijackLoader decrypts and parses a PNG image to load the next stage.\n- HijackLoader now contains the following new modules:\nmodCreateProcess\n,modCreateProcess64\n,WDDATA\n,modUAC\n,modUAC64\n,modWriteFile\n, andmodWriteFile64\n. - HijackLoader has additional features like dynamic API resolution, blocklist process checking, and user mode hook evasion using Heaven's Gate.\n- ThreatLabz researchers created a Python script to decrypt and decompress the second stage and extract all HijackLoader modules.\nTechnical Analysis\nThe following sections focus on the new changes to HijackLoader.\nFirst stage\nThe purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64\nmodule for 64-bit processes and ti\nmodule for 32-bit processes), and execute the second stage.\nThe first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header. The loader uses the SDBM hashing algorithm below to resolve APIs.\ndef SDBMHash(apiName):\nfinalHash = 0\nfor i in apiName:\nfinalHash = (finalHash*0x1003F) & 0xFFFFFFFF\nfinalHash = (finalHash + ord(i)) & 0xFFFFFFFF\nreturn finalHash\nUsing the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection. This is achieved with the following URL:\nhttps://apache.org/logos/res/incubator/default.png\nThe loader repeats this process until there is an internet connection. After that, HijackLoader decrypts embedded shellcode by performing a simple addition operation with a key. It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.\nBlocklist processes\nThe shellcode uses the SDBM hash algorithm again to resolve additional APIs. After that, the shellcode uses the RtlGetNativeSystemInfo\nAPI to check for blocklisted processes running on the system. In previous versions of HijackLoader, the loader checked for five processes related to antivirus applications. Now, the code only checks for two processes.\nThe names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes. If these values match, execution is delayed using the NtDelayExecution\nAPI. Information for the two blocklisted processes can be found in the table below.\n| Hash Value | Process Name | Description |\n|---|---|---|\n5C7024B2 | avgsvc.exe | The avgsvc.exe file is a software component of AVG Internet Security. |\nB03D4537 | Unknown | N/A |\nTable 1: Processes blocklisted by HijackLoader.\nNote that the AVG process was also previously blocklisted by earlier versions of HijackLoader.\nSecond stage loading process\nThere are two methods that HijackLoader uses to load the second stage, both of which are embedded in the malware’s configuration. HijackLoader retrieves a DWORD\nfrom the configuration at offset 0x110 and XOR’s the value with a DWORD\nfrom the configuration at offset 0x28. Let's refer to the result of this XOR as the value “a”.\nThe malware loads a copy of itself into memory using GlobalAlloc\nand ReadFile\n. Then it reads a DWORD\nfrom the configuration at offset 0xC and adds this value to the address where the malware file was loaded into memory, and then reads a DWORD\nfrom this address. Let's call this value “b”.\n- If “a” and “b” do not match, a PNG file is downloaded and used to load the second stage.\n- If “a” and “b” match, an embedded PNG is used to load the second stage.\nThe image below shows an example of an embedded PNG when rendered using an image viewer.\nFigure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.\nPNG payload\nThe screenshot below displays the decompiled HijackLoader code that checks whether the PNG is embedded within the file or if it needs to be downloaded separately.\nFigure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.\nIf the PNG is embedded, the malware starts searching for the PNG image with the following bytes: 49 44 41 54 C6 A5 79 EA\n. This contains the IDAT header 49 44 41 54\nand magic header C6 A5 79 EA\n.\nThe logic replicated below in Python shows how the malware finds the IDAT header followed by the magic header.\ncheckFlag = 0\nwith open(malware_file, \"rb\") as input_file:\ninput_file.seek(0)\nfile = input_file.read()\noffset = 0\ntry:\nresultOffsetNextByte = file.index(b'\\x49\\x44\\x41\\x54\\xC6\\xA5\\x79\\xEA', offset + 1)\nprint(\"Found Corect PNG Image\")\ncheckFlag = 1\nexcept ValueError:\nprint('Could not Find PNG with Correct Header')\nThe screenshot below shows the IDAT header followed by the magic header C6 A5 79 EA\n.\nFigure 3: The format of the IDAT header.\nIf the PNG needs to be downloaded, the URL is decrypted from the configuration using a simple XOR cipher. Following that, the WinHTTP library is utilized to download the PNG from the decrypted URL.\nThere are multiple encrypted blobs in the PNG file. Each encrypted blob is stored in the format Blob size:IDAT header\n. Each of the encrypted blobs can be found by searching for the IDAT header. The size of each encrypted blob is parsed and data of this size following the header is appended to a new memory address. When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3\n(which is a DWORD\nthat follows the MAGIC Header\n). Then, the decrypted blob is decompressed using the LZNT1 algorithm.\nThis decompressed data contains the modules and configurations used to load the second stage. The offset at 0xF4 of the decompressed data contains a DLL name (in this specific case pla.dll\n) that is loaded into memory. The modules are then parsed to locate the ti module (by name) using the SDBM hashing algorithm. Then, the ti\nmodule is copied to the DLL’s BaseOfCode\nfield and is executed.\nThe screenshot below shows the decompiled output for the injection of the second stage.\nFigure 4: The decompiled output for the injection of the second stage.\nSecond stage\nThe main purpose of the second stage is to inject the main instrumentation module. To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules. The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.\nModules\nThe malware developers have continued to create new modules. The table below shows the HijackLoader modules added since our last blog.\n| Hash Value | Module Name | Description |\n|---|---|---|\n8858AC11 | modCreateProcess | Before transferring control to the\n|\n9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . |\n3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module. If the first DWORD of the UACDATA module is two, modUAC elevates its privilege using the runas operation. Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. |\n7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . |\n4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content. The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. |\n1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . |\n1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. |\nTable 2: The new modules added to HijackLoader.\nti module\nThe ti\nmodule is the first module called by the first stage. It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm. It then checks if a mutex, whose name is resolved using CRC-32 hashing, is present on the system. If the mutex is present, the process terminates; otherwise, it continues execution.\nNext, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA%\nin our case), expands it, and checks if the current process is running under this directory. If not, it copies itself to this location, executes the copied file, and terminates itself.\nNext, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.\nBypass user mode hooks for injection\nTo bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique. The screenshot below shows HijackLoader employing the Heaven’s Gate technique to execute an x64 direct syscall.\nFigure 5: HijackLoader using Heaven’s Gate to execute a x64 direct syscall.\nSubsequently, the execution is returned to the 32-bit code. Following this, the next stage is injected. The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe\nin our specific case). The cmd.exe\nis created as a child process, and the main instrumentation module is injected using process hollowing. The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.\nMalware Delivery\nIn March 2024, ThreatLabz researchers analyzed around 50 samples of HijackLoader with an embedded PNG to identify which families are currently distributed by HijackLoader.\nHijackLoader was used to distribute the following malware:\n- Amadey: Trojan that collects data about the victim’s system and is capable of loading other malware.\n- Amadey emerged as the most prevalent family delivered by HijackLoader, comprising 52.9% of observed instances—a notable margin above other malware families.\n- Lumma Stealer (aka LummaC2 Stealer): Information stealer that steals data from items like cryptocurrency wallets, steam accounts, KeePass, FileZilla, and browser extensions.\n- Racoon Stealer v2: Information stealer that steals data such as saved passwords, cookies, auto-fill data, and cryptocurrency wallets.\n- Remcos: Remote Access Trojan (RAT) used to gain backdoor access to a victim’s system.\n- Meta Stealer: Information stealer that targets browsers, cryptocurrency wallets, wallet extensions and steam accounts, and shares many similarities with Redline Stealer.\n- Rhadamanthys: Information stealer that targets wallets, emails, note-keeping apps, and messengers.\nThe figure below illustrates the distribution of malware families delivered by HijackLoader.\nFigure 6: A pie chart showing the different malware families distributed by HijackLoader.\nConclusion\nHijackLoader has emerged as a significant threat, delivering multiple malware families such as Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT. Among these, Amadey has been the most commonly delivered family by HijackLoader. The loading of the second stage involves the use of an embedded PNG image or PNG image downloaded from the web, which is decrypted and parsed to load the ti\nmodule. Additionally, new modules have been integrated into HijackLoader, enhancing its capabilities and making it even more robust.\nTo assist the research community in analyzing HijackLoader, we have created a Python script that is available in our GitHub repository. The script enables the decryption and decompression of the second stage, providing access to HijackLoader’s modules.\nThreatLabz is actively monitoring this campaign and ensuring that Zscaler customers are protected from cybersecurity threats.\nZscaler Coverage\nZscaler’s multilayered cloud security platform detects indicators related to HijackLoader at various levels. The screenshot below depicts the Zscaler Cloud Sandbox, showing detection details for HijackLoader.\nFigure 7: Zscaler Cloud Sandbox report\nIn addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators related to HijackLoader at various levels with the following threat names:\nIndicators Of Compromise (IOCs)\nHost indicators\n| Type | Indicator(s) | Description |\n|---|---|---|\n| SHA256 |\n| HijackLoader malware which uses an embedded PNG to load the next stage. |\nNetwork indicators\n| Type | Indicator | Description |\n|---|---|---|\n| URL | hxxp://discussiowardder[.]website/api | LummaStealer C2 |\nMITRE ATT&CK Techniques\n| ID | Technique Name |\n|---|---|\n| TA0002 | Execution |\n| T1547.001 |\n|\n| T1548.001 | Abuse Elevation Control Mechanism |\n| T1027.007 | Dynamic API Resolution |\n| T1140 | Deobfuscate/Decode Files or Information |\n| T1055 | Process Injection |\n| T1620 | Reflective Code Loading |\n| T1562.001 | Impair Defenses: Disable or Modify Tools |\n| T1057 | Process Discovery |\nAppendix\nVisit our GitHub repository to access the Python script to aid in your malware analysis.\nWas this post useful?\nDisclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability. Zscaler assumes no responsibility for any errors or omissions or for any actions taken based on the information provided. Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices. All content is subject to change without notice. By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.\nGet the latest Zscaler blog updates in your inbox\nBy submitting the form, you are agreeing to our privacy policy.",
+  "sanitized_txt": "Zscaler Blog Get the latest Zscaler blog updates in your inbox HijackLoader Updates *Updated on February 7, 2025: The blog has been updated with richer module descriptions.\nIntroduction HijackLoader (a.k.a. IDAT Loader) is a malware loader initially spotted in 2023 that is capable of using a variety of modules for code injection and execution. It uses a modular architecture, a feature that most loaders do not have – which we discussed in a previous HijackLoader blog. ThreatLabz researchers recently analyzed a new HijackLoader sample that has updated evasion techniques. These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time. HijackLoader now includes modules to add an exclusion for Windows Defender Antivirus, bypass User Account Control (UAC), evade inline API hooking that is often used by security software for detection, and employ process hollowing.\nIn addition, HijackLoader’s delivery method involves the use of a PNG image, which is decrypted and parsed to load the next stage of the attack. ThreatLabz observed HijackLoader being used to drop multiple malware families, including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.\nIn this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples. Additionally, we delve into the malware families deployed by HijackLoader from March 2024 to April 2024.\nKey Takeaways - HijackLoader is a modular malware loader that is used to deliver second stage payloads including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.\n- HijackLoader decrypts and parses a PNG image to load the next stage.\n- HijackLoader now contains the following new modules:\nmodCreateProcess ,modCreateProcess64 ,WDDATA ,modUAC ,modUAC64 ,modWriteFile , andmodWriteFile64 . - HijackLoader has additional features like dynamic API resolution, blocklist process checking, and user mode hook evasion using Heaven's Gate.\n- ThreatLabz researchers created a Python script to decrypt and decompress the second stage and extract all HijackLoader modules.\nTechnical Analysis The following sections focus on the new changes to HijackLoader.\nFirst stage The purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64 module for 64-bit processes and ti module for 32-bit processes), and execute the second stage.\nThe first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header. The loader uses the SDBM hashing algorithm below to resolve APIs.\ndef SDBMHash(apiName):\nfinalHash = 0 for i in apiName:\nfinalHash = (finalHash*0x1003F) & 0xFFFFFFFF finalHash = (finalHash + ord(i)) & 0xFFFFFFFF return finalHash Using the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection. This is achieved with the following URL:\nhttps://apache.org/logos/res/incubator/default.png The loader repeats this process until there is an internet connection. After that, HijackLoader decrypts embedded shellcode by performing a simple addition operation with a key. It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.\nBlocklist processes The shellcode uses the SDBM hash algorithm again to resolve additional APIs. After that, the shellcode uses the RtlGetNativeSystemInfo API to check for blocklisted processes running on the system. In previous versions of HijackLoader, the loader checked for five processes related to antivirus applications. Now, the code only checks for two processes.\nThe names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes. If these values match, execution is delayed using the NtDelayExecution API. Information for the two blocklisted processes can be found in the table below.\n| Hash Value | Process Name | Description | |---|---|---| 5C7024B2 | avgsvc.exe | The avgsvc.exe file is a software component of AVG Internet Security. | B03D4537 | Unknown | N/A | Table 1: Processes blocklisted by HijackLoader.\nNote that the AVG process was also previously blocklisted by earlier versions of HijackLoader.\nSecond stage loading process There are two methods that HijackLoader uses to load the second stage, both of which are embedded in the malware’s configuration. HijackLoader retrieves a DWORD from the configuration at offset 0x110 and XOR’s the value with a DWORD from the configuration at offset 0x28. Let's refer to the result of this XOR as the value “a”.\nThe malware loads a copy of itself into memory using GlobalAlloc and ReadFile . Then it reads a DWORD from the configuration at offset 0xC and adds this value to the address where the malware file was loaded into memory, and then reads a DWORD from this address. Let's call this value “b”.\n- If “a” and “b” do not match, a PNG file is downloaded and used to load the second stage.\n- If “a” and “b” match, an embedded PNG is used to load the second stage.\nThe image below shows an example of an embedded PNG when rendered using an image viewer.\nFigure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.\nPNG payload The screenshot below displays the decompiled HijackLoader code that checks whether the PNG is embedded within the file or if it needs to be downloaded separately.\nFigure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.\nIf the PNG is embedded, the malware starts searching for the PNG image with the following bytes: 49 44 41 54 C6 A5 79 EA . This contains the IDAT header 49 44 41 54 and magic header C6 A5 79 EA .\nThe logic replicated below in Python shows how the malware finds the IDAT header followed by the magic header.\ncheckFlag = 0 with open(malware_file, \"rb\") as input_file:\ninput_file.seek(0) file = input_file.read() offset = 0 try:\nresultOffsetNextByte = file.index(b'\\x49\\x44\\x41\\x54\\xC6\\xA5\\x79\\xEA', offset + 1) print(\"Found Corect PNG Image\") checkFlag = 1 except ValueError:\nprint('Could not Find PNG with Correct Header') The screenshot below shows the IDAT header followed by the magic header C6 A5 79 EA .\nFigure 3: The format of the IDAT header.\nIf the PNG needs to be downloaded, the URL is decrypted from the configuration using a simple XOR cipher. Following that, the WinHTTP library is utilized to download the PNG from the decrypted URL.\nThere are multiple encrypted blobs in the PNG file. Each encrypted blob is stored in the format Blob size:IDAT header . Each of the encrypted blobs can be found by searching for the IDAT header. The size of each encrypted blob is parsed and data of this size following the header is appended to a new memory address. When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3 (which is a DWORD that follows the MAGIC Header ). Then, the decrypted blob is decompressed using the LZNT1 algorithm.\nThis decompressed data contains the modules and configurations used to load the second stage. The offset at 0xF4 of the decompressed data contains a DLL name (in this specific case pla.dll ) that is loaded into memory. The modules are then parsed to locate the ti module (by name) using the SDBM hashing algorithm. Then, the ti module is copied to the DLL’s BaseOfCode field and is executed.\nThe screenshot below shows the decompiled output for the injection of the second stage.\nFigure 4: The decompiled output for the injection of the second stage.\nSecond stage The main purpose of the second stage is to inject the main instrumentation module. To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules. The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.\nModules The malware developers have continued to create new modules. The table below shows the HijackLoader modules added since our last blog.\n| Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module. If the first DWORD of the UACDATA module is two, modUAC elevates its privilege using the runas operation. Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content. The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader.\nti module The ti module is the first module called by the first stage. It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm. It then checks if a mutex, whose name is resolved using CRC-32 hashing, is present on the system. If the mutex is present, the process terminates; otherwise, it continues execution.\nNext, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA% in our case), expands it, and checks if the current process is running under this directory. If not, it copies itself to this location, executes the copied file, and terminates itself.\nNext, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.\nBypass user mode hooks for injection To bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique. The screenshot below shows HijackLoader employing the Heaven’s Gate technique to execute an x64 direct syscall.\nFigure 5: HijackLoader using Heaven’s Gate to execute a x64 direct syscall.\nSubsequently, the execution is returned to the 32-bit code. Following this, the next stage is injected. The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe in our specific case). The cmd.exe is created as a child process, and the main instrumentation module is injected using process hollowing. The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.\nMalware Delivery In March 2024, ThreatLabz researchers analyzed around 50 samples of HijackLoader with an embedded PNG to identify which families are currently distributed by HijackLoader.\nHijackLoader was used to distribute the following malware:\n- Amadey: Trojan that collects data about the victim’s system and is capable of loading other malware.\n- Amadey emerged as the most prevalent family delivered by HijackLoader, comprising 52.9% of observed instances—a notable margin above other malware families.\n- Lumma Stealer (aka LummaC2 Stealer): Information stealer that steals data from items like cryptocurrency wallets, steam accounts, KeePass, FileZilla, and browser extensions.\n- Racoon Stealer v2: Information stealer that steals data such as saved passwords, cookies, auto-fill data, and cryptocurrency wallets.\n- Remcos: Remote Access Trojan (RAT) used to gain backdoor access to a victim’s system.\n- Meta Stealer: Information stealer that targets browsers, cryptocurrency wallets, wallet extensions and steam accounts, and shares many similarities with Redline Stealer.\n- Rhadamanthys: Information stealer that targets wallets, emails, note-keeping apps, and messengers.\nThe figure below illustrates the distribution of malware families delivered by HijackLoader.\nFigure 6: A pie chart showing the different malware families distributed by HijackLoader.\nConclusion HijackLoader has emerged as a significant threat, delivering multiple malware families such as Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT. Among these, Amadey has been the most commonly delivered family by HijackLoader. The loading of the second stage involves the use of an embedded PNG image or PNG image downloaded from the web, which is decrypted and parsed to load the ti module. Additionally, new modules have been integrated into HijackLoader, enhancing its capabilities and making it even more robust.\nTo assist the research community in analyzing HijackLoader, we have created a Python script that is available in our GitHub repository. The script enables the decryption and decompression of the second stage, providing access to HijackLoader’s modules.\nThreatLabz is actively monitoring this campaign and ensuring that Zscaler customers are protected from cybersecurity threats.\nZscaler Coverage Zscaler’s multilayered cloud security platform detects indicators related to HijackLoader at various levels. The screenshot below depicts the Zscaler Cloud Sandbox, showing detection details for HijackLoader.\nFigure 7: Zscaler Cloud Sandbox report In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators related to HijackLoader at various levels with the following threat names:\nWas this post useful?\nDisclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability. Zscaler assumes no responsibility for any errors or omissions or for any actions taken based on the information provided. Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices. All content is subject to change without notice. By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.\nGet the latest Zscaler blog updates in your inbox By submitting the form, you are agreeing to our privacy policy.",
+  "ID_list": [
+    "T1027.007",
+    "T1055",
+    "T1057",
+    "T1140",
+    "T1547.001",
+    "T1548.001",
+    "T1562.001",
+    "T1620",
+    "TA0002"
+  ],
+  "Name_list": [
+    "Browser Extensions",
+    "Execution",
+    "Hooking",
+    "Process Hollowing",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1055": [
+      {
+        "sentence": "Zscaler Blog Get the latest Zscaler blog updates in your inbox HijackLoader Updates *Updated on February 7, 2025: The blog has been updated with richer module descriptions.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "Introduction HijackLoader (a.k.a.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "IDAT Loader) is a malware loader initially spotted in 2023 that is capable of using a variety of modules for code injection and execution.",
+        "score": 0.7787
+      },
+      {
+        "sentence": "It uses a modular architecture, a feature that most loaders do not have – which we discussed in a previous HijackLoader blog.",
+        "score": 0.4896
+      },
+      {
+        "sentence": "ThreatLabz researchers recently analyzed a new HijackLoader sample that has updated evasion techniques.",
+        "score": 0.4149
+      },
+      {
+        "sentence": "These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time.",
+        "score": 0.4141
+      },
+      {
+        "sentence": "HijackLoader now includes modules to add an exclusion for Windows Defender Antivirus, bypass User Account Control (UAC), evade inline API hooking that is often used by security software for detection, and employ process hollowing.",
+        "score": 0.3794
+      },
+      {
+        "sentence": "In addition, HijackLoader’s delivery method involves the use of a PNG image, which is decrypted and parsed to load the next stage of the attack.",
+        "score": 0.5327
+      },
+      {
+        "sentence": "ThreatLabz observed HijackLoader being used to drop multiple malware families, including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "In this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples.",
+        "score": 0.4127
+      },
+      {
+        "sentence": "Additionally, we delve into the malware families deployed by HijackLoader from March 2024 to April 2024.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Technical Analysis The following sections focus on the new changes to HijackLoader.",
+        "score": 0.356
+      },
+      {
+        "sentence": "First stage The purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64 module for 64-bit processes and ti module for 32-bit processes), and execute the second stage.",
+        "score": 0.5633
+      },
+      {
+        "sentence": "The first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header.",
+        "score": 0.5562
+      },
+      {
+        "sentence": "The loader uses the SDBM hashing algorithm below to resolve APIs. def SDBMHash(apiName): finalHash = 0 for i in apiName: finalHash = (finalHash*0x1003F) & 0xFFFFFFFF finalHash = (finalHash + ord(i)) & 0xFFFFFFFF return finalHash Using the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection.",
+        "score": 0.3957
+      },
+      {
+        "sentence": "This is achieved with the following URL: https://apache.org/logos/res/incubator/default.png The loader repeats this process until there is an internet connection.",
+        "score": 0.4567
+      },
+      {
+        "sentence": "After that, HijackLoader decrypts embedded shellcode by performing a simple addition operation with a key.",
+        "score": 0.4915
+      },
+      {
+        "sentence": "It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.",
+        "score": 0.5964
+      },
+      {
+        "sentence": "Blocklist processes The shellcode uses the SDBM hash algorithm again to resolve additional APIs.",
+        "score": 0.4509
+      },
+      {
+        "sentence": "After that, the shellcode uses the RtlGetNativeSystemInfo API to check for blocklisted processes running on the system.",
+        "score": 0.3581
+      },
+      {
+        "sentence": "In previous versions of HijackLoader, the loader checked for five processes related to antivirus applications.",
+        "score": 0.3126
+      },
+      {
+        "sentence": "Now, the code only checks for two processes.",
+        "score": 0.4792
+      },
+      {
+        "sentence": "The names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "If these values match, execution is delayed using the NtDelayExecution API.",
+        "score": 0.4365
+      },
+      {
+        "sentence": "Information for the two blocklisted processes can be found in the table below. | Hash Value | Process Name | Description | |---|---|---| 5C7024B2 | avgsvc.exe | The avgsvc.exe file is a software component of AVG Internet Security. | B03D4537 | Unknown | N/A | Table 1: Processes blocklisted by HijackLoader.",
+        "score": 0.4467
+      },
+      {
+        "sentence": "Note that the AVG process was also previously blocklisted by earlier versions of HijackLoader.",
+        "score": 0.3989
+      },
+      {
+        "sentence": "Second stage loading process There are two methods that HijackLoader uses to load the second stage, both of which are embedded in the malware’s configuration.",
+        "score": 0.5538
+      },
+      {
+        "sentence": "HijackLoader retrieves a DWORD from the configuration at offset 0x110 and XOR’s the value with a DWORD from the configuration at offset 0x28.",
+        "score": 0.3835
+      },
+      {
+        "sentence": "Let's refer to the result of this XOR as the value “a”.",
+        "score": 0.3747
+      },
+      {
+        "sentence": "The malware loads a copy of itself into memory using GlobalAlloc and ReadFile .",
+        "score": 0.6197
+      },
+      {
+        "sentence": "Then it reads a DWORD from the configuration at offset 0xC and adds this value to the address where the malware file was loaded into memory, and then reads a DWORD from this address.",
+        "score": 0.5456
+      },
+      {
+        "sentence": "Let's call this value “b”. - If “a” and “b” do not match, a PNG file is downloaded and used to load the second stage. - If “a” and “b” match, an embedded PNG is used to load the second stage.",
+        "score": 0.4279
+      },
+      {
+        "sentence": "The image below shows an example of an embedded PNG when rendered using an image viewer.",
+        "score": 0.4484
+      },
+      {
+        "sentence": "Figure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.",
+        "score": 0.4604
+      },
+      {
+        "sentence": "PNG payload The screenshot below displays the decompiled HijackLoader code that checks whether the PNG is embedded within the file or if it needs to be downloaded separately.",
+        "score": 0.4442
+      },
+      {
+        "sentence": "Figure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.",
+        "score": 0.4163
+      },
+      {
+        "sentence": "If the PNG is embedded, the malware starts searching for the PNG image with the following bytes: 49 44 41 54 C6 A5 79 EA .",
+        "score": 0.3906
+      },
+      {
+        "sentence": "This contains the IDAT header 49 44 41 54 and magic header C6 A5 79 EA .",
+        "score": 0.3587
+      },
+      {
+        "sentence": "Figure 3: The format of the IDAT header.",
+        "score": 0.4477
+      },
+      {
+        "sentence": "If the PNG needs to be downloaded, the URL is decrypted from the configuration using a simple XOR cipher.",
+        "score": 0.4262
+      },
+      {
+        "sentence": "Following that, the WinHTTP library is utilized to download the PNG from the decrypted URL.",
+        "score": 0.4435
+      },
+      {
+        "sentence": "There are multiple encrypted blobs in the PNG file.",
+        "score": 0.4323
+      },
+      {
+        "sentence": "Each encrypted blob is stored in the format Blob size:IDAT header .",
+        "score": 0.3799
+      },
+      {
+        "sentence": "Each of the encrypted blobs can be found by searching for the IDAT header.",
+        "score": 0.3945
+      },
+      {
+        "sentence": "The size of each encrypted blob is parsed and data of this size following the header is appended to a new memory address.",
+        "score": 0.604
+      },
+      {
+        "sentence": "When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3 (which is a DWORD that follows the MAGIC Header ).",
+        "score": 0.5115
+      },
+      {
+        "sentence": "Then, the decrypted blob is decompressed using the LZNT1 algorithm.",
+        "score": 0.5092
+      },
+      {
+        "sentence": "This decompressed data contains the modules and configurations used to load the second stage.",
+        "score": 0.5046
+      },
+      {
+        "sentence": "The offset at 0xF4 of the decompressed data contains a DLL name (in this specific case pla.dll ) that is loaded into memory.",
+        "score": 0.5905
+      },
+      {
+        "sentence": "The modules are then parsed to locate the ti module (by name) using the SDBM hashing algorithm.",
+        "score": 0.3631
+      },
+      {
+        "sentence": "Then, the ti module is copied to the DLL’s BaseOfCode field and is executed.",
+        "score": 0.6328
+      },
+      {
+        "sentence": "The screenshot below shows the decompiled output for the injection of the second stage.",
+        "score": 0.7115
+      },
+      {
+        "sentence": "Figure 4: The decompiled output for the injection of the second stage.",
+        "score": 0.7283
+      },
+      {
+        "sentence": "Second stage The main purpose of the second stage is to inject the main instrumentation module.",
+        "score": 0.7513
+      },
+      {
+        "sentence": "To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules.",
+        "score": 0.5273
+      },
+      {
+        "sentence": "The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.",
+        "score": 0.4916
+      },
+      {
+        "sentence": "Modules The malware developers have continued to create new modules.",
+        "score": 0.4497
+      },
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.5632
+      },
+      {
+        "sentence": "Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content.",
+        "score": 0.3944
+      },
+      {
+        "sentence": "The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader. ti module The ti module is the first module called by the first stage.",
+        "score": 0.3857
+      },
+      {
+        "sentence": "It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm.",
+        "score": 0.4433
+      },
+      {
+        "sentence": "If the mutex is present, the process terminates; otherwise, it continues execution.",
+        "score": 0.5037
+      },
+      {
+        "sentence": "Next, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA% in our case), expands it, and checks if the current process is running under this directory.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "If not, it copies itself to this location, executes the copied file, and terminates itself.",
+        "score": 0.4368
+      },
+      {
+        "sentence": "Next, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.",
+        "score": 0.5295
+      },
+      {
+        "sentence": "Bypass user mode hooks for injection To bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique.",
+        "score": 0.6252
+      },
+      {
+        "sentence": "The screenshot below shows HijackLoader employing the Heaven’s Gate technique to execute an x64 direct syscall.",
+        "score": 0.4344
+      },
+      {
+        "sentence": "Figure 5: HijackLoader using Heaven’s Gate to execute a x64 direct syscall.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "Subsequently, the execution is returned to the 32-bit code.",
+        "score": 0.5853
+      },
+      {
+        "sentence": "Following this, the next stage is injected.",
+        "score": 0.7309
+      },
+      {
+        "sentence": "The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe in our specific case).",
+        "score": 0.6892
+      },
+      {
+        "sentence": "The cmd.exe is created as a child process, and the main instrumentation module is injected using process hollowing.",
+        "score": 0.7828
+      },
+      {
+        "sentence": "The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.",
+        "score": 0.6705
+      },
+      {
+        "sentence": "Malware Delivery In March 2024, ThreatLabz researchers analyzed around 50 samples of HijackLoader with an embedded PNG to identify which families are currently distributed by HijackLoader.",
+        "score": 0.3497
+      },
+      {
+        "sentence": "The figure below illustrates the distribution of malware families delivered by HijackLoader.",
+        "score": 0.3127
+      },
+      {
+        "sentence": "Conclusion HijackLoader has emerged as a significant threat, delivering multiple malware families such as Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "Among these, Amadey has been the most commonly delivered family by HijackLoader.",
+        "score": 0.3562
+      },
+      {
+        "sentence": "The loading of the second stage involves the use of an embedded PNG image or PNG image downloaded from the web, which is decrypted and parsed to load the ti module.",
+        "score": 0.5349
+      },
+      {
+        "sentence": "Additionally, new modules have been integrated into HijackLoader, enhancing its capabilities and making it even more robust.",
+        "score": 0.4255
+      },
+      {
+        "sentence": "To assist the research community in analyzing HijackLoader, we have created a Python script that is available in our GitHub repository.",
+        "score": 0.3935
+      },
+      {
+        "sentence": "The script enables the decryption and decompression of the second stage, providing access to HijackLoader’s modules.",
+        "score": 0.4951
+      },
+      {
+        "sentence": "Was this post useful?",
+        "score": 0.3103
+      },
+      {
+        "sentence": "Disclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability.",
+        "score": 0.3122
+      },
+      {
+        "sentence": "Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices.",
+        "score": 0.354
+      },
+      {
+        "sentence": "By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.",
+        "score": 0.3149
+      },
+      {
+        "sentence": "Get the latest Zscaler blog updates in your inbox By submitting the form, you are agreeing to our privacy policy.",
+        "score": 0.3513
+      }
+    ],
+    "T1620": [
+      {
+        "sentence": "Zscaler Blog Get the latest Zscaler blog updates in your inbox HijackLoader Updates *Updated on February 7, 2025: The blog has been updated with richer module descriptions.",
+        "score": 0.4025
+      },
+      {
+        "sentence": "Introduction HijackLoader (a.k.a.",
+        "score": 0.4141
+      },
+      {
+        "sentence": "IDAT Loader) is a malware loader initially spotted in 2023 that is capable of using a variety of modules for code injection and execution.",
+        "score": 0.7391
+      },
+      {
+        "sentence": "It uses a modular architecture, a feature that most loaders do not have – which we discussed in a previous HijackLoader blog.",
+        "score": 0.5472
+      },
+      {
+        "sentence": "ThreatLabz researchers recently analyzed a new HijackLoader sample that has updated evasion techniques.",
+        "score": 0.476
+      },
+      {
+        "sentence": "These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "HijackLoader now includes modules to add an exclusion for Windows Defender Antivirus, bypass User Account Control (UAC), evade inline API hooking that is often used by security software for detection, and employ process hollowing.",
+        "score": 0.318
+      },
+      {
+        "sentence": "In addition, HijackLoader’s delivery method involves the use of a PNG image, which is decrypted and parsed to load the next stage of the attack.",
+        "score": 0.6087
+      },
+      {
+        "sentence": "ThreatLabz observed HijackLoader being used to drop multiple malware families, including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.5082
+      },
+      {
+        "sentence": "In this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples.",
+        "score": 0.5138
+      },
+      {
+        "sentence": "Additionally, we delve into the malware families deployed by HijackLoader from March 2024 to April 2024.",
+        "score": 0.4707
+      },
+      {
+        "sentence": "Technical Analysis The following sections focus on the new changes to HijackLoader.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "First stage The purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64 module for 64-bit processes and ti module for 32-bit processes), and execute the second stage.",
+        "score": 0.6061
+      },
+      {
+        "sentence": "The first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header.",
+        "score": 0.5771
+      },
+      {
+        "sentence": "The loader uses the SDBM hashing algorithm below to resolve APIs. def SDBMHash(apiName): finalHash = 0 for i in apiName: finalHash = (finalHash*0x1003F) & 0xFFFFFFFF finalHash = (finalHash + ord(i)) & 0xFFFFFFFF return finalHash Using the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection.",
+        "score": 0.4266
+      },
+      {
+        "sentence": "This is achieved with the following URL: https://apache.org/logos/res/incubator/default.png The loader repeats this process until there is an internet connection.",
+        "score": 0.5094
+      },
+      {
+        "sentence": "After that, HijackLoader decrypts embedded shellcode by performing a simple addition operation with a key.",
+        "score": 0.5233
+      },
+      {
+        "sentence": "It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.",
+        "score": 0.5715
+      },
+      {
+        "sentence": "Blocklist processes The shellcode uses the SDBM hash algorithm again to resolve additional APIs.",
+        "score": 0.5278
+      },
+      {
+        "sentence": "Now, the code only checks for two processes.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "The names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes.",
+        "score": 0.4378
+      },
+      {
+        "sentence": "If these values match, execution is delayed using the NtDelayExecution API.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "Information for the two blocklisted processes can be found in the table below. | Hash Value | Process Name | Description | |---|---|---| 5C7024B2 | avgsvc.exe | The avgsvc.exe file is a software component of AVG Internet Security. | B03D4537 | Unknown | N/A | Table 1: Processes blocklisted by HijackLoader.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "Note that the AVG process was also previously blocklisted by earlier versions of HijackLoader.",
+        "score": 0.3322
+      },
+      {
+        "sentence": "Second stage loading process There are two methods that HijackLoader uses to load the second stage, both of which are embedded in the malware’s configuration.",
+        "score": 0.7236
+      },
+      {
+        "sentence": "HijackLoader retrieves a DWORD from the configuration at offset 0x110 and XOR’s the value with a DWORD from the configuration at offset 0x28.",
+        "score": 0.4643
+      },
+      {
+        "sentence": "Let's refer to the result of this XOR as the value “a”.",
+        "score": 0.3991
+      },
+      {
+        "sentence": "The malware loads a copy of itself into memory using GlobalAlloc and ReadFile .",
+        "score": 0.7198
+      },
+      {
+        "sentence": "Then it reads a DWORD from the configuration at offset 0xC and adds this value to the address where the malware file was loaded into memory, and then reads a DWORD from this address.",
+        "score": 0.6306
+      },
+      {
+        "sentence": "Let's call this value “b”. - If “a” and “b” do not match, a PNG file is downloaded and used to load the second stage. - If “a” and “b” match, an embedded PNG is used to load the second stage.",
+        "score": 0.5787
+      },
+      {
+        "sentence": "The image below shows an example of an embedded PNG when rendered using an image viewer.",
+        "score": 0.4731
+      },
+      {
+        "sentence": "Figure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.",
+        "score": 0.5408
+      },
+      {
+        "sentence": "PNG payload The screenshot below displays the decompiled HijackLoader code that checks whether the PNG is embedded within the file or if it needs to be downloaded separately.",
+        "score": 0.5022
+      },
+      {
+        "sentence": "Figure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.",
+        "score": 0.4901
+      },
+      {
+        "sentence": "If the PNG is embedded, the malware starts searching for the PNG image with the following bytes: 49 44 41 54 C6 A5 79 EA .",
+        "score": 0.3911
+      },
+      {
+        "sentence": "This contains the IDAT header 49 44 41 54 and magic header C6 A5 79 EA .",
+        "score": 0.3085
+      },
+      {
+        "sentence": "Figure 3: The format of the IDAT header.",
+        "score": 0.4057
+      },
+      {
+        "sentence": "If the PNG needs to be downloaded, the URL is decrypted from the configuration using a simple XOR cipher.",
+        "score": 0.5155
+      },
+      {
+        "sentence": "Following that, the WinHTTP library is utilized to download the PNG from the decrypted URL.",
+        "score": 0.5261
+      },
+      {
+        "sentence": "There are multiple encrypted blobs in the PNG file.",
+        "score": 0.518
+      },
+      {
+        "sentence": "Each encrypted blob is stored in the format Blob size:IDAT header .",
+        "score": 0.4862
+      },
+      {
+        "sentence": "Each of the encrypted blobs can be found by searching for the IDAT header.",
+        "score": 0.4229
+      },
+      {
+        "sentence": "The size of each encrypted blob is parsed and data of this size following the header is appended to a new memory address.",
+        "score": 0.6594
+      },
+      {
+        "sentence": "When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3 (which is a DWORD that follows the MAGIC Header ).",
+        "score": 0.5428
+      },
+      {
+        "sentence": "Then, the decrypted blob is decompressed using the LZNT1 algorithm.",
+        "score": 0.5271
+      },
+      {
+        "sentence": "This decompressed data contains the modules and configurations used to load the second stage.",
+        "score": 0.5794
+      },
+      {
+        "sentence": "The offset at 0xF4 of the decompressed data contains a DLL name (in this specific case pla.dll ) that is loaded into memory.",
+        "score": 0.6607
+      },
+      {
+        "sentence": "The modules are then parsed to locate the ti module (by name) using the SDBM hashing algorithm.",
+        "score": 0.4239
+      },
+      {
+        "sentence": "Then, the ti module is copied to the DLL’s BaseOfCode field and is executed.",
+        "score": 0.7109
+      },
+      {
+        "sentence": "The screenshot below shows the decompiled output for the injection of the second stage.",
+        "score": 0.5997
+      },
+      {
+        "sentence": "Figure 4: The decompiled output for the injection of the second stage.",
+        "score": 0.6379
+      },
+      {
+        "sentence": "Second stage The main purpose of the second stage is to inject the main instrumentation module.",
+        "score": 0.6608
+      },
+      {
+        "sentence": "To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules.",
+        "score": 0.6203
+      },
+      {
+        "sentence": "The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.",
+        "score": 0.4627
+      },
+      {
+        "sentence": "Modules The malware developers have continued to create new modules.",
+        "score": 0.5489
+      },
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.6087
+      },
+      {
+        "sentence": "Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content.",
+        "score": 0.426
+      },
+      {
+        "sentence": "The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader. ti module The ti module is the first module called by the first stage.",
+        "score": 0.4199
+      },
+      {
+        "sentence": "It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm.",
+        "score": 0.4939
+      },
+      {
+        "sentence": "If the mutex is present, the process terminates; otherwise, it continues execution.",
+        "score": 0.4085
+      },
+      {
+        "sentence": "Next, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA% in our case), expands it, and checks if the current process is running under this directory.",
+        "score": 0.3939
+      },
+      {
+        "sentence": "If not, it copies itself to this location, executes the copied file, and terminates itself.",
+        "score": 0.4785
+      },
+      {
+        "sentence": "Next, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.",
+        "score": 0.5227
+      },
+      {
+        "sentence": "Bypass user mode hooks for injection To bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique.",
+        "score": 0.5447
+      },
+      {
+        "sentence": "The screenshot below shows HijackLoader employing the Heaven’s Gate technique to execute an x64 direct syscall.",
+        "score": 0.4544
+      },
+      {
+        "sentence": "Figure 5: HijackLoader using Heaven’s Gate to execute a x64 direct syscall.",
+        "score": 0.4413
+      },
+      {
+        "sentence": "Subsequently, the execution is returned to the 32-bit code.",
+        "score": 0.5681
+      },
+      {
+        "sentence": "Following this, the next stage is injected.",
+        "score": 0.5997
+      },
+      {
+        "sentence": "The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe in our specific case).",
+        "score": 0.5854
+      },
+      {
+        "sentence": "The cmd.exe is created as a child process, and the main instrumentation module is injected using process hollowing.",
+        "score": 0.6481
+      },
+      {
+        "sentence": "The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.",
+        "score": 0.6365
+      },
+      {
+        "sentence": "Malware Delivery In March 2024, ThreatLabz researchers analyzed around 50 samples of HijackLoader with an embedded PNG to identify which families are currently distributed by HijackLoader.",
+        "score": 0.4729
+      },
+      {
+        "sentence": "The figure below illustrates the distribution of malware families delivered by HijackLoader.",
+        "score": 0.4237
+      },
+      {
+        "sentence": "Figure 6: A pie chart showing the different malware families distributed by HijackLoader.",
+        "score": 0.3953
+      },
+      {
+        "sentence": "Conclusion HijackLoader has emerged as a significant threat, delivering multiple malware families such as Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.4772
+      },
+      {
+        "sentence": "Among these, Amadey has been the most commonly delivered family by HijackLoader.",
+        "score": 0.4608
+      },
+      {
+        "sentence": "The loading of the second stage involves the use of an embedded PNG image or PNG image downloaded from the web, which is decrypted and parsed to load the ti module.",
+        "score": 0.5968
+      },
+      {
+        "sentence": "Additionally, new modules have been integrated into HijackLoader, enhancing its capabilities and making it even more robust.",
+        "score": 0.5207
+      },
+      {
+        "sentence": "To assist the research community in analyzing HijackLoader, we have created a Python script that is available in our GitHub repository.",
+        "score": 0.472
+      },
+      {
+        "sentence": "The script enables the decryption and decompression of the second stage, providing access to HijackLoader’s modules.",
+        "score": 0.5324
+      },
+      {
+        "sentence": "ThreatLabz is actively monitoring this campaign and ensuring that Zscaler customers are protected from cybersecurity threats.",
+        "score": 0.3356
+      },
+      {
+        "sentence": "Was this post useful?",
+        "score": 0.3101
+      },
+      {
+        "sentence": "Disclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices.",
+        "score": 0.4266
+      },
+      {
+        "sentence": "All content is subject to change without notice.",
+        "score": 0.3056
+      },
+      {
+        "sentence": "By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "Get the latest Zscaler blog updates in your inbox By submitting the form, you are agreeing to our privacy policy.",
+        "score": 0.3241
+      }
+    ],
+    "T1027.007": [
+      {
+        "sentence": "Introduction HijackLoader (a.k.a.",
+        "score": 0.3385
+      },
+      {
+        "sentence": "IDAT Loader) is a malware loader initially spotted in 2023 that is capable of using a variety of modules for code injection and execution.",
+        "score": 0.3854
+      },
+      {
+        "sentence": "It uses a modular architecture, a feature that most loaders do not have – which we discussed in a previous HijackLoader blog.",
+        "score": 0.4313
+      },
+      {
+        "sentence": "ThreatLabz researchers recently analyzed a new HijackLoader sample that has updated evasion techniques.",
+        "score": 0.5301
+      },
+      {
+        "sentence": "These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time.",
+        "score": 0.531
+      },
+      {
+        "sentence": "HijackLoader now includes modules to add an exclusion for Windows Defender Antivirus, bypass User Account Control (UAC), evade inline API hooking that is often used by security software for detection, and employ process hollowing.",
+        "score": 0.4874
+      },
+      {
+        "sentence": "In addition, HijackLoader’s delivery method involves the use of a PNG image, which is decrypted and parsed to load the next stage of the attack.",
+        "score": 0.4936
+      },
+      {
+        "sentence": "ThreatLabz observed HijackLoader being used to drop multiple malware families, including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.3967
+      },
+      {
+        "sentence": "In this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples.",
+        "score": 0.5446
+      },
+      {
+        "sentence": "Additionally, we delve into the malware families deployed by HijackLoader from March 2024 to April 2024.",
+        "score": 0.4266
+      },
+      {
+        "sentence": "Technical Analysis The following sections focus on the new changes to HijackLoader.",
+        "score": 0.4301
+      },
+      {
+        "sentence": "First stage The purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64 module for 64-bit processes and ti module for 32-bit processes), and execute the second stage.",
+        "score": 0.5789
+      },
+      {
+        "sentence": "The first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header.",
+        "score": 0.728
+      },
+      {
+        "sentence": "The loader uses the SDBM hashing algorithm below to resolve APIs. def SDBMHash(apiName): finalHash = 0 for i in apiName: finalHash = (finalHash*0x1003F) & 0xFFFFFFFF finalHash = (finalHash + ord(i)) & 0xFFFFFFFF return finalHash Using the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection.",
+        "score": 0.6478
+      },
+      {
+        "sentence": "This is achieved with the following URL: https://apache.org/logos/res/incubator/default.png The loader repeats this process until there is an internet connection.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "After that, HijackLoader decrypts embedded shellcode by performing a simple addition operation with a key.",
+        "score": 0.5262
+      },
+      {
+        "sentence": "It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.",
+        "score": 0.567
+      },
+      {
+        "sentence": "Blocklist processes The shellcode uses the SDBM hash algorithm again to resolve additional APIs.",
+        "score": 0.7835
+      },
+      {
+        "sentence": "After that, the shellcode uses the RtlGetNativeSystemInfo API to check for blocklisted processes running on the system.",
+        "score": 0.4727
+      },
+      {
+        "sentence": "The names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes.",
+        "score": 0.5675
+      },
+      {
+        "sentence": "If these values match, execution is delayed using the NtDelayExecution API.",
+        "score": 0.5608
+      },
+      {
+        "sentence": "Information for the two blocklisted processes can be found in the table below. | Hash Value | Process Name | Description | |---|---|---| 5C7024B2 | avgsvc.exe | The avgsvc.exe file is a software component of AVG Internet Security. | B03D4537 | Unknown | N/A | Table 1: Processes blocklisted by HijackLoader.",
+        "score": 0.4136
+      },
+      {
+        "sentence": "Note that the AVG process was also previously blocklisted by earlier versions of HijackLoader.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "Second stage loading process There are two methods that HijackLoader uses to load the second stage, both of which are embedded in the malware’s configuration.",
+        "score": 0.56
+      },
+      {
+        "sentence": "HijackLoader retrieves a DWORD from the configuration at offset 0x110 and XOR’s the value with a DWORD from the configuration at offset 0x28.",
+        "score": 0.5178
+      },
+      {
+        "sentence": "Let's refer to the result of this XOR as the value “a”.",
+        "score": 0.5151
+      },
+      {
+        "sentence": "The malware loads a copy of itself into memory using GlobalAlloc and ReadFile .",
+        "score": 0.591
+      },
+      {
+        "sentence": "Then it reads a DWORD from the configuration at offset 0xC and adds this value to the address where the malware file was loaded into memory, and then reads a DWORD from this address.",
+        "score": 0.5329
+      },
+      {
+        "sentence": "Let's call this value “b”. - If “a” and “b” do not match, a PNG file is downloaded and used to load the second stage. - If “a” and “b” match, an embedded PNG is used to load the second stage.",
+        "score": 0.4891
+      },
+      {
+        "sentence": "The image below shows an example of an embedded PNG when rendered using an image viewer.",
+        "score": 0.4785
+      },
+      {
+        "sentence": "Figure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.",
+        "score": 0.5828
+      },
+      {
+        "sentence": "PNG payload The screenshot below displays the decompiled HijackLoader code that checks whether the PNG is embedded within the file or if it needs to be downloaded separately.",
+        "score": 0.5061
+      },
+      {
+        "sentence": "Figure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.",
+        "score": 0.5187
+      },
+      {
+        "sentence": "If the PNG is embedded, the malware starts searching for the PNG image with the following bytes: 49 44 41 54 C6 A5 79 EA .",
+        "score": 0.5027
+      },
+      {
+        "sentence": "This contains the IDAT header 49 44 41 54 and magic header C6 A5 79 EA .",
+        "score": 0.4262
+      },
+      {
+        "sentence": "Figure 3: The format of the IDAT header.",
+        "score": 0.4476
+      },
+      {
+        "sentence": "If the PNG needs to be downloaded, the URL is decrypted from the configuration using a simple XOR cipher.",
+        "score": 0.5075
+      },
+      {
+        "sentence": "Following that, the WinHTTP library is utilized to download the PNG from the decrypted URL.",
+        "score": 0.5061
+      },
+      {
+        "sentence": "There are multiple encrypted blobs in the PNG file.",
+        "score": 0.6303
+      },
+      {
+        "sentence": "Each encrypted blob is stored in the format Blob size:IDAT header .",
+        "score": 0.5926
+      },
+      {
+        "sentence": "Each of the encrypted blobs can be found by searching for the IDAT header.",
+        "score": 0.5693
+      },
+      {
+        "sentence": "The size of each encrypted blob is parsed and data of this size following the header is appended to a new memory address.",
+        "score": 0.6377
+      },
+      {
+        "sentence": "When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3 (which is a DWORD that follows the MAGIC Header ).",
+        "score": 0.5878
+      },
+      {
+        "sentence": "Then, the decrypted blob is decompressed using the LZNT1 algorithm.",
+        "score": 0.5429
+      },
+      {
+        "sentence": "This decompressed data contains the modules and configurations used to load the second stage.",
+        "score": 0.5155
+      },
+      {
+        "sentence": "The offset at 0xF4 of the decompressed data contains a DLL name (in this specific case pla.dll ) that is loaded into memory.",
+        "score": 0.6191
+      },
+      {
+        "sentence": "The modules are then parsed to locate the ti module (by name) using the SDBM hashing algorithm.",
+        "score": 0.5694
+      },
+      {
+        "sentence": "Then, the ti module is copied to the DLL’s BaseOfCode field and is executed.",
+        "score": 0.5017
+      },
+      {
+        "sentence": "The screenshot below shows the decompiled output for the injection of the second stage.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "Figure 4: The decompiled output for the injection of the second stage.",
+        "score": 0.4236
+      },
+      {
+        "sentence": "Second stage The main purpose of the second stage is to inject the main instrumentation module.",
+        "score": 0.3573
+      },
+      {
+        "sentence": "To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules.",
+        "score": 0.5859
+      },
+      {
+        "sentence": "The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.",
+        "score": 0.5377
+      },
+      {
+        "sentence": "Modules The malware developers have continued to create new modules.",
+        "score": 0.498
+      },
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.7358
+      },
+      {
+        "sentence": "If the first DWORD of the UACDATA module is two, modUAC elevates its privilege using the runas operation.",
+        "score": 0.4181
+      },
+      {
+        "sentence": "Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content.",
+        "score": 0.6652
+      },
+      {
+        "sentence": "The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader. ti module The ti module is the first module called by the first stage.",
+        "score": 0.6142
+      },
+      {
+        "sentence": "It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm.",
+        "score": 0.7245
+      },
+      {
+        "sentence": "It then checks if a mutex, whose name is resolved using CRC-32 hashing, is present on the system.",
+        "score": 0.4274
+      },
+      {
+        "sentence": "If the mutex is present, the process terminates; otherwise, it continues execution.",
+        "score": 0.4045
+      },
+      {
+        "sentence": "Next, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA% in our case), expands it, and checks if the current process is running under this directory.",
+        "score": 0.4225
+      },
+      {
+        "sentence": "If not, it copies itself to this location, executes the copied file, and terminates itself.",
+        "score": 0.3558
+      },
+      {
+        "sentence": "Next, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.",
+        "score": 0.4941
+      },
+      {
+        "sentence": "Bypass user mode hooks for injection To bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique.",
+        "score": 0.461
+      },
+      {
+        "sentence": "The screenshot below shows HijackLoader employing the Heaven’s Gate technique to execute an x64 direct syscall.",
+        "score": 0.4526
+      },
+      {
+        "sentence": "Figure 5: HijackLoader using Heaven’s Gate to execute a x64 direct syscall.",
+        "score": 0.4671
+      },
+      {
+        "sentence": "Subsequently, the execution is returned to the 32-bit code.",
+        "score": 0.3935
+      },
+      {
+        "sentence": "The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe in our specific case).",
+        "score": 0.5204
+      },
+      {
+        "sentence": "The cmd.exe is created as a child process, and the main instrumentation module is injected using process hollowing.",
+        "score": 0.4174
+      },
+      {
+        "sentence": "The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.",
+        "score": 0.5402
+      },
+      {
+        "sentence": "Malware Delivery In March 2024, ThreatLabz researchers analyzed around 50 samples of HijackLoader with an embedded PNG to identify which families are currently distributed by HijackLoader.",
+        "score": 0.4736
+      },
+      {
+        "sentence": "The figure below illustrates the distribution of malware families delivered by HijackLoader.",
+        "score": 0.3745
+      },
+      {
+        "sentence": "Figure 6: A pie chart showing the different malware families distributed by HijackLoader.",
+        "score": 0.3995
+      },
+      {
+        "sentence": "Conclusion HijackLoader has emerged as a significant threat, delivering multiple malware families such as Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.3761
+      },
+      {
+        "sentence": "The loading of the second stage involves the use of an embedded PNG image or PNG image downloaded from the web, which is decrypted and parsed to load the ti module.",
+        "score": 0.5248
+      },
+      {
+        "sentence": "Additionally, new modules have been integrated into HijackLoader, enhancing its capabilities and making it even more robust.",
+        "score": 0.428
+      },
+      {
+        "sentence": "To assist the research community in analyzing HijackLoader, we have created a Python script that is available in our GitHub repository.",
+        "score": 0.4218
+      },
+      {
+        "sentence": "The script enables the decryption and decompression of the second stage, providing access to HijackLoader’s modules.",
+        "score": 0.5395
+      },
+      {
+        "sentence": "ThreatLabz is actively monitoring this campaign and ensuring that Zscaler customers are protected from cybersecurity threats.",
+        "score": 0.3296
+      },
+      {
+        "sentence": "Zscaler Coverage Zscaler’s multilayered cloud security platform detects indicators related to HijackLoader at various levels.",
+        "score": 0.3764
+      },
+      {
+        "sentence": "The screenshot below depicts the Zscaler Cloud Sandbox, showing detection details for HijackLoader.",
+        "score": 0.3628
+      },
+      {
+        "sentence": "Was this post useful?",
+        "score": 0.3157
+      },
+      {
+        "sentence": "Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices.",
+        "score": 0.3346
+      },
+      {
+        "sentence": "By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.",
+        "score": 0.3037
+      }
+    ],
+    "T1140": [
+      {
+        "sentence": "Introduction HijackLoader (a.k.a.",
+        "score": 0.3169
+      },
+      {
+        "sentence": "IDAT Loader) is a malware loader initially spotted in 2023 that is capable of using a variety of modules for code injection and execution.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "It uses a modular architecture, a feature that most loaders do not have – which we discussed in a previous HijackLoader blog.",
+        "score": 0.4044
+      },
+      {
+        "sentence": "ThreatLabz researchers recently analyzed a new HijackLoader sample that has updated evasion techniques.",
+        "score": 0.3712
+      },
+      {
+        "sentence": "These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time.",
+        "score": 0.3911
+      },
+      {
+        "sentence": "In addition, HijackLoader’s delivery method involves the use of a PNG image, which is decrypted and parsed to load the next stage of the attack.",
+        "score": 0.7523
+      },
+      {
+        "sentence": "ThreatLabz observed HijackLoader being used to drop multiple malware families, including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.3814
+      },
+      {
+        "sentence": "In this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples.",
+        "score": 0.5865
+      },
+      {
+        "sentence": "Additionally, we delve into the malware families deployed by HijackLoader from March 2024 to April 2024.",
+        "score": 0.348
+      },
+      {
+        "sentence": "Technical Analysis The following sections focus on the new changes to HijackLoader.",
+        "score": 0.3931
+      },
+      {
+        "sentence": "First stage The purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64 module for 64-bit processes and ti module for 32-bit processes), and execute the second stage.",
+        "score": 0.8215
+      },
+      {
+        "sentence": "The first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header.",
+        "score": 0.508
+      },
+      {
+        "sentence": "The loader uses the SDBM hashing algorithm below to resolve APIs. def SDBMHash(apiName): finalHash = 0 for i in apiName: finalHash = (finalHash*0x1003F) & 0xFFFFFFFF finalHash = (finalHash + ord(i)) & 0xFFFFFFFF return finalHash Using the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection.",
+        "score": 0.4039
+      },
+      {
+        "sentence": "This is achieved with the following URL: https://apache.org/logos/res/incubator/default.png The loader repeats this process until there is an internet connection.",
+        "score": 0.4163
+      },
+      {
+        "sentence": "After that, HijackLoader decrypts embedded shellcode by performing a simple addition operation with a key.",
+        "score": 0.8296
+      },
+      {
+        "sentence": "It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.",
+        "score": 0.5474
+      },
+      {
+        "sentence": "Blocklist processes The shellcode uses the SDBM hash algorithm again to resolve additional APIs.",
+        "score": 0.5288
+      },
+      {
+        "sentence": "The names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes.",
+        "score": 0.3967
+      },
+      {
+        "sentence": "If these values match, execution is delayed using the NtDelayExecution API.",
+        "score": 0.4584
+      },
+      {
+        "sentence": "Second stage loading process There are two methods that HijackLoader uses to load the second stage, both of which are embedded in the malware’s configuration.",
+        "score": 0.5678
+      },
+      {
+        "sentence": "HijackLoader retrieves a DWORD from the configuration at offset 0x110 and XOR’s the value with a DWORD from the configuration at offset 0x28.",
+        "score": 0.5884
+      },
+      {
+        "sentence": "Let's refer to the result of this XOR as the value “a”.",
+        "score": 0.5608
+      },
+      {
+        "sentence": "The malware loads a copy of itself into memory using GlobalAlloc and ReadFile .",
+        "score": 0.4641
+      },
+      {
+        "sentence": "Then it reads a DWORD from the configuration at offset 0xC and adds this value to the address where the malware file was loaded into memory, and then reads a DWORD from this address.",
+        "score": 0.4815
+      },
+      {
+        "sentence": "Let's call this value “b”. - If “a” and “b” do not match, a PNG file is downloaded and used to load the second stage. - If “a” and “b” match, an embedded PNG is used to load the second stage.",
+        "score": 0.593
+      },
+      {
+        "sentence": "The image below shows an example of an embedded PNG when rendered using an image viewer.",
+        "score": 0.5892
+      },
+      {
+        "sentence": "Figure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.",
+        "score": 0.6354
+      },
+      {
+        "sentence": "PNG payload The screenshot below displays the decompiled HijackLoader code that checks whether the PNG is embedded within the file or if it needs to be downloaded separately.",
+        "score": 0.6013
+      },
+      {
+        "sentence": "Figure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.",
+        "score": 0.6524
+      },
+      {
+        "sentence": "If the PNG is embedded, the malware starts searching for the PNG image with the following bytes: 49 44 41 54 C6 A5 79 EA .",
+        "score": 0.4213
+      },
+      {
+        "sentence": "This contains the IDAT header 49 44 41 54 and magic header C6 A5 79 EA .",
+        "score": 0.3551
+      },
+      {
+        "sentence": "Figure 3: The format of the IDAT header.",
+        "score": 0.4998
+      },
+      {
+        "sentence": "If the PNG needs to be downloaded, the URL is decrypted from the configuration using a simple XOR cipher.",
+        "score": 0.724
+      },
+      {
+        "sentence": "Following that, the WinHTTP library is utilized to download the PNG from the decrypted URL.",
+        "score": 0.6609
+      },
+      {
+        "sentence": "There are multiple encrypted blobs in the PNG file.",
+        "score": 0.663
+      },
+      {
+        "sentence": "Each encrypted blob is stored in the format Blob size:IDAT header .",
+        "score": 0.5609
+      },
+      {
+        "sentence": "Each of the encrypted blobs can be found by searching for the IDAT header.",
+        "score": 0.6177
+      },
+      {
+        "sentence": "The size of each encrypted blob is parsed and data of this size following the header is appended to a new memory address.",
+        "score": 0.6177
+      },
+      {
+        "sentence": "When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3 (which is a DWORD that follows the MAGIC Header ).",
+        "score": 0.7075
+      },
+      {
+        "sentence": "Then, the decrypted blob is decompressed using the LZNT1 algorithm.",
+        "score": 0.7924
+      },
+      {
+        "sentence": "This decompressed data contains the modules and configurations used to load the second stage.",
+        "score": 0.8173
+      },
+      {
+        "sentence": "The offset at 0xF4 of the decompressed data contains a DLL name (in this specific case pla.dll ) that is loaded into memory.",
+        "score": 0.6974
+      },
+      {
+        "sentence": "The modules are then parsed to locate the ti module (by name) using the SDBM hashing algorithm.",
+        "score": 0.4865
+      },
+      {
+        "sentence": "Then, the ti module is copied to the DLL’s BaseOfCode field and is executed.",
+        "score": 0.4242
+      },
+      {
+        "sentence": "The screenshot below shows the decompiled output for the injection of the second stage.",
+        "score": 0.5467
+      },
+      {
+        "sentence": "Figure 4: The decompiled output for the injection of the second stage.",
+        "score": 0.5702
+      },
+      {
+        "sentence": "Second stage The main purpose of the second stage is to inject the main instrumentation module.",
+        "score": 0.3799
+      },
+      {
+        "sentence": "To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules.",
+        "score": 0.51
+      },
+      {
+        "sentence": "The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.",
+        "score": 0.3076
+      },
+      {
+        "sentence": "Modules The malware developers have continued to create new modules.",
+        "score": 0.389
+      },
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.5874
+      },
+      {
+        "sentence": "If the first DWORD of the UACDATA module is two, modUAC elevates its privilege using the runas operation.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content.",
+        "score": 0.4992
+      },
+      {
+        "sentence": "The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader. ti module The ti module is the first module called by the first stage.",
+        "score": 0.3553
+      },
+      {
+        "sentence": "It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm.",
+        "score": 0.499
+      },
+      {
+        "sentence": "If the mutex is present, the process terminates; otherwise, it continues execution.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "Next, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA% in our case), expands it, and checks if the current process is running under this directory.",
+        "score": 0.5346
+      },
+      {
+        "sentence": "If not, it copies itself to this location, executes the copied file, and terminates itself.",
+        "score": 0.3858
+      },
+      {
+        "sentence": "Next, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.",
+        "score": 0.3761
+      },
+      {
+        "sentence": "Bypass user mode hooks for injection To bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique.",
+        "score": 0.3157
+      },
+      {
+        "sentence": "Figure 5: HijackLoader using Heaven’s Gate to execute a x64 direct syscall.",
+        "score": 0.3082
+      },
+      {
+        "sentence": "Subsequently, the execution is returned to the 32-bit code.",
+        "score": 0.4773
+      },
+      {
+        "sentence": "Following this, the next stage is injected.",
+        "score": 0.3682
+      },
+      {
+        "sentence": "The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe in our specific case).",
+        "score": 0.6279
+      },
+      {
+        "sentence": "The cmd.exe is created as a child process, and the main instrumentation module is injected using process hollowing.",
+        "score": 0.3121
+      },
+      {
+        "sentence": "The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.",
+        "score": 0.7926
+      },
+      {
+        "sentence": "Malware Delivery In March 2024, ThreatLabz researchers analyzed around 50 samples of HijackLoader with an embedded PNG to identify which families are currently distributed by HijackLoader.",
+        "score": 0.4558
+      },
+      {
+        "sentence": "The figure below illustrates the distribution of malware families delivered by HijackLoader.",
+        "score": 0.4106
+      },
+      {
+        "sentence": "Figure 6: A pie chart showing the different malware families distributed by HijackLoader.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "Conclusion HijackLoader has emerged as a significant threat, delivering multiple malware families such as Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.3853
+      },
+      {
+        "sentence": "Among these, Amadey has been the most commonly delivered family by HijackLoader.",
+        "score": 0.378
+      },
+      {
+        "sentence": "The loading of the second stage involves the use of an embedded PNG image or PNG image downloaded from the web, which is decrypted and parsed to load the ti module.",
+        "score": 0.7533
+      },
+      {
+        "sentence": "Additionally, new modules have been integrated into HijackLoader, enhancing its capabilities and making it even more robust.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "To assist the research community in analyzing HijackLoader, we have created a Python script that is available in our GitHub repository.",
+        "score": 0.4466
+      },
+      {
+        "sentence": "The script enables the decryption and decompression of the second stage, providing access to HijackLoader’s modules.",
+        "score": 0.8518
+      },
+      {
+        "sentence": "Was this post useful?",
+        "score": 0.3081
+      },
+      {
+        "sentence": "Zscaler assumes no responsibility for any errors or omissions or for any actions taken based on the information provided.",
+        "score": 0.3267
+      },
+      {
+        "sentence": "Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices.",
+        "score": 0.3188
+      },
+      {
+        "sentence": "By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.",
+        "score": 0.3748
+      }
+    ],
+    "T1562.001": [
+      {
+        "sentence": "ThreatLabz researchers recently analyzed a new HijackLoader sample that has updated evasion techniques.",
+        "score": 0.4366
+      },
+      {
+        "sentence": "These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time.",
+        "score": 0.3747
+      },
+      {
+        "sentence": "HijackLoader now includes modules to add an exclusion for Windows Defender Antivirus, bypass User Account Control (UAC), evade inline API hooking that is often used by security software for detection, and employ process hollowing.",
+        "score": 0.742
+      },
+      {
+        "sentence": "In this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples.",
+        "score": 0.3186
+      },
+      {
+        "sentence": "The first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header.",
+        "score": 0.3754
+      },
+      {
+        "sentence": "The loader uses the SDBM hashing algorithm below to resolve APIs. def SDBMHash(apiName): finalHash = 0 for i in apiName: finalHash = (finalHash*0x1003F) & 0xFFFFFFFF finalHash = (finalHash + ord(i)) & 0xFFFFFFFF return finalHash Using the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection.",
+        "score": 0.3169
+      },
+      {
+        "sentence": "It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.",
+        "score": 0.3841
+      },
+      {
+        "sentence": "Blocklist processes The shellcode uses the SDBM hash algorithm again to resolve additional APIs.",
+        "score": 0.4649
+      },
+      {
+        "sentence": "After that, the shellcode uses the RtlGetNativeSystemInfo API to check for blocklisted processes running on the system.",
+        "score": 0.3784
+      },
+      {
+        "sentence": "In previous versions of HijackLoader, the loader checked for five processes related to antivirus applications.",
+        "score": 0.5526
+      },
+      {
+        "sentence": "Now, the code only checks for two processes.",
+        "score": 0.3437
+      },
+      {
+        "sentence": "The names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes.",
+        "score": 0.3458
+      },
+      {
+        "sentence": "Information for the two blocklisted processes can be found in the table below. | Hash Value | Process Name | Description | |---|---|---| 5C7024B2 | avgsvc.exe | The avgsvc.exe file is a software component of AVG Internet Security. | B03D4537 | Unknown | N/A | Table 1: Processes blocklisted by HijackLoader.",
+        "score": 0.585
+      },
+      {
+        "sentence": "Note that the AVG process was also previously blocklisted by earlier versions of HijackLoader.",
+        "score": 0.6715
+      },
+      {
+        "sentence": "The malware loads a copy of itself into memory using GlobalAlloc and ReadFile .",
+        "score": 0.3072
+      },
+      {
+        "sentence": "Figure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.",
+        "score": 0.6164
+      },
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.3843
+      },
+      {
+        "sentence": "If the first DWORD of the UACDATA module is two, modUAC elevates its privilege using the runas operation.",
+        "score": 0.3638
+      },
+      {
+        "sentence": "Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content.",
+        "score": 0.4953
+      },
+      {
+        "sentence": "The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader. ti module The ti module is the first module called by the first stage.",
+        "score": 0.638
+      },
+      {
+        "sentence": "It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm.",
+        "score": 0.3923
+      },
+      {
+        "sentence": "It then checks if a mutex, whose name is resolved using CRC-32 hashing, is present on the system.",
+        "score": 0.3926
+      },
+      {
+        "sentence": "If the mutex is present, the process terminates; otherwise, it continues execution.",
+        "score": 0.3585
+      },
+      {
+        "sentence": "Next, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.",
+        "score": 0.4413
+      },
+      {
+        "sentence": "Bypass user mode hooks for injection To bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe in our specific case).",
+        "score": 0.3148
+      },
+      {
+        "sentence": "Additionally, new modules have been integrated into HijackLoader, enhancing its capabilities and making it even more robust.",
+        "score": 0.3321
+      },
+      {
+        "sentence": "ThreatLabz is actively monitoring this campaign and ensuring that Zscaler customers are protected from cybersecurity threats.",
+        "score": 0.34
+      },
+      {
+        "sentence": "Zscaler Coverage Zscaler’s multilayered cloud security platform detects indicators related to HijackLoader at various levels.",
+        "score": 0.3173
+      },
+      {
+        "sentence": "The screenshot below depicts the Zscaler Cloud Sandbox, showing detection details for HijackLoader.",
+        "score": 0.4009
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time.",
+        "score": 0.3263
+      },
+      {
+        "sentence": "In this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples.",
+        "score": 0.3198
+      },
+      {
+        "sentence": "First stage The purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64 module for 64-bit processes and ti module for 32-bit processes), and execute the second stage.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "The first stage resolves the APIs dynamically by walking the process environment block (PEB) and parsing the Portable Executable (PE) header.",
+        "score": 0.4764
+      },
+      {
+        "sentence": "The loader uses the SDBM hashing algorithm below to resolve APIs. def SDBMHash(apiName): finalHash = 0 for i in apiName: finalHash = (finalHash*0x1003F) & 0xFFFFFFFF finalHash = (finalHash + ord(i)) & 0xFFFFFFFF return finalHash Using the SDBM hash algorithm above, the loader resolves the WinHTTP APIs to check for an internet connection.",
+        "score": 0.3678
+      },
+      {
+        "sentence": "Blocklist processes The shellcode uses the SDBM hash algorithm again to resolve additional APIs.",
+        "score": 0.3912
+      },
+      {
+        "sentence": "After that, the shellcode uses the RtlGetNativeSystemInfo API to check for blocklisted processes running on the system.",
+        "score": 0.6786
+      },
+      {
+        "sentence": "In previous versions of HijackLoader, the loader checked for five processes related to antivirus applications.",
+        "score": 0.6349
+      },
+      {
+        "sentence": "Now, the code only checks for two processes.",
+        "score": 0.7265
+      },
+      {
+        "sentence": "The names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes.",
+        "score": 0.6756
+      },
+      {
+        "sentence": "If these values match, execution is delayed using the NtDelayExecution API.",
+        "score": 0.3438
+      },
+      {
+        "sentence": "Information for the two blocklisted processes can be found in the table below. | Hash Value | Process Name | Description | |---|---|---| 5C7024B2 | avgsvc.exe | The avgsvc.exe file is a software component of AVG Internet Security. | B03D4537 | Unknown | N/A | Table 1: Processes blocklisted by HijackLoader.",
+        "score": 0.6251
+      },
+      {
+        "sentence": "Note that the AVG process was also previously blocklisted by earlier versions of HijackLoader.",
+        "score": 0.4628
+      },
+      {
+        "sentence": "HijackLoader retrieves a DWORD from the configuration at offset 0x110 and XOR’s the value with a DWORD from the configuration at offset 0x28.",
+        "score": 0.3327
+      },
+      {
+        "sentence": "Then it reads a DWORD from the configuration at offset 0xC and adds this value to the address where the malware file was loaded into memory, and then reads a DWORD from this address.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "PNG payload The screenshot below displays the decompiled HijackLoader code that checks whether the PNG is embedded within the file or if it needs to be downloaded separately.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "Figure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "If the PNG is embedded, the malware starts searching for the PNG image with the following bytes: 49 44 41 54 C6 A5 79 EA .",
+        "score": 0.3471
+      },
+      {
+        "sentence": "Each of the encrypted blobs can be found by searching for the IDAT header.",
+        "score": 0.4181
+      },
+      {
+        "sentence": "When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3 (which is a DWORD that follows the MAGIC Header ).",
+        "score": 0.3464
+      },
+      {
+        "sentence": "The modules are then parsed to locate the ti module (by name) using the SDBM hashing algorithm.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "The modules have features that include a UAC bypass, Windows Defender Antivirus exclusion, using Heaven's Gate to execute x64 direct syscalls, and process hollowing.",
+        "score": 0.3435
+      },
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader. ti module The ti module is the first module called by the first stage.",
+        "score": 0.326
+      },
+      {
+        "sentence": "It dynamically resolves APIs by walking the PEB and parsing PE headers using CRC-32 as a hashing algorithm.",
+        "score": 0.4423
+      },
+      {
+        "sentence": "It then checks if a mutex, whose name is resolved using CRC-32 hashing, is present on the system.",
+        "score": 0.4843
+      },
+      {
+        "sentence": "If the mutex is present, the process terminates; otherwise, it continues execution.",
+        "score": 0.4879
+      },
+      {
+        "sentence": "Next, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA% in our case), expands it, and checks if the current process is running under this directory.",
+        "score": 0.5097
+      },
+      {
+        "sentence": "The process designated for injection is stored in the decompressed data at offset 0x90 (%windir%\\SysWOW64\\cmd.exe in our specific case).",
+        "score": 0.3812
+      },
+      {
+        "sentence": "The cmd.exe is created as a child process, and the main instrumentation module is injected using process hollowing.",
+        "score": 0.3376
+      },
+      {
+        "sentence": "The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.",
+        "score": 0.3625
+      },
+      {
+        "sentence": "Malware Delivery In March 2024, ThreatLabz researchers analyzed around 50 samples of HijackLoader with an embedded PNG to identify which families are currently distributed by HijackLoader.",
+        "score": 0.3402
+      },
+      {
+        "sentence": "The screenshot below depicts the Zscaler Cloud Sandbox, showing detection details for HijackLoader.",
+        "score": 0.3124
+      }
+    ],
+    "T1548.001": [
+      {
+        "sentence": "These enhancements aim to increase the malware’s stealthiness, thereby remaining undetected for longer periods of time.",
+        "score": 0.3155
+      },
+      {
+        "sentence": "In addition, HijackLoader’s delivery method involves the use of a PNG image, which is decrypted and parsed to load the next stage of the attack.",
+        "score": 0.3181
+      },
+      {
+        "sentence": "ThreatLabz observed HijackLoader being used to drop multiple malware families, including Amadey, Lumma Stealer, Racoon Stealer v2, and Remcos RAT.",
+        "score": 0.362
+      },
+      {
+        "sentence": "In this blog post, we discuss HijackLoader updates and provide a Python script to extract the malware configuration and modules from HijackLoader samples.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "Technical Analysis The following sections focus on the new changes to HijackLoader.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "First stage The purpose of the loader’s first stage is to decrypt and decompress the HijackLoader modules, including the second stage (ti64 module for 64-bit processes and ti module for 32-bit processes), and execute the second stage.",
+        "score": 0.3769
+      },
+      {
+        "sentence": "This is achieved with the following URL: https://apache.org/logos/res/incubator/default.png The loader repeats this process until there is an internet connection.",
+        "score": 0.3098
+      },
+      {
+        "sentence": "After that, HijackLoader decrypts embedded shellcode by performing a simple addition operation with a key.",
+        "score": 0.3397
+      },
+      {
+        "sentence": "It then sets the execute permission using VirtualProtect for the decrypted shellcode and calls the start address of the shellcode.",
+        "score": 0.344
+      },
+      {
+        "sentence": "The names of current running processes are converted to lowercase letters and the SDBM hashing algorithm is compared with the hashes of the two processes.",
+        "score": 0.3689
+      },
+      {
+        "sentence": "Second stage loading process There are two methods that HijackLoader uses to load the second stage, both of which are embedded in the malware’s configuration.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "HijackLoader retrieves a DWORD from the configuration at offset 0x110 and XOR’s the value with a DWORD from the configuration at offset 0x28.",
+        "score": 0.3255
+      },
+      {
+        "sentence": "Let's refer to the result of this XOR as the value “a”.",
+        "score": 0.4242
+      },
+      {
+        "sentence": "Let's call this value “b”. - If “a” and “b” do not match, a PNG file is downloaded and used to load the second stage. - If “a” and “b” match, an embedded PNG is used to load the second stage.",
+        "score": 0.363
+      },
+      {
+        "sentence": "Figure 1: An embedded PNG image containing the encrypted modules used by HijackLoader in a PNG viewer.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "Figure 2: The decompiled output of HijackLoader to find if the PNG is embedded or if it should be downloaded.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "If the PNG needs to be downloaded, the URL is decrypted from the configuration using a simple XOR cipher.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "There are multiple encrypted blobs in the PNG file.",
+        "score": 0.3627
+      },
+      {
+        "sentence": "Each encrypted blob is stored in the format Blob size:IDAT header .",
+        "score": 0.3049
+      },
+      {
+        "sentence": "Each of the encrypted blobs can be found by searching for the IDAT header.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "When the total size is reached, the encrypted data is decrypted using a simple XOR cipher with the key: 32 A3 49 B3 (which is a DWORD that follows the MAGIC Header ).",
+        "score": 0.3722
+      },
+      {
+        "sentence": "Then, the decrypted blob is decompressed using the LZNT1 algorithm.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "This decompressed data contains the modules and configurations used to load the second stage.",
+        "score": 0.3497
+      },
+      {
+        "sentence": "Then, the ti module is copied to the DLL’s BaseOfCode field and is executed.",
+        "score": 0.3444
+      },
+      {
+        "sentence": "To increase stealthiness, the second stage of the loader employs more anti-analysis techniques using multiple modules.",
+        "score": 0.3969
+      },
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.394
+      },
+      {
+        "sentence": "If the first DWORD of the UACDATA module is two, modUAC elevates its privilege using the runas operation.",
+        "score": 0.5152
+      },
+      {
+        "sentence": "Otherwise, modUAC bypasses UAC using the CMSTPLUA COM interface. | 7366BCF3 | modUAC64 | This module is the 64-bit version of modUAC . | 4F7A1A39 | modWriteFile | Only handles the encryption and decryption of the ti module, similar to the modCreateProcess module. modWriteFile does not perform x86 call stack spoofing or use the TinycallProxy module to call APIs. modWriteFile uses CreateFile to obtain the file handle and WriteFile to write the content.",
+        "score": 0.4275
+      },
+      {
+        "sentence": "The parameters lpFileName and dwCreationDisposition for CreateFile , and lpBuffer and nNumberOfBytesToWrite for WriteFile , are provided by the ti module based on the requirements. | 1C549B37 | modWriteFile64 | This module is the 64-bit version of modWriteFile . | 1003C017 | WDDATA | This module contains a PowerShell command to add a Windows Defender Antivirus exclusion. | Table 2: The new modules added to HijackLoader. ti module The ti module is the first module called by the first stage.",
+        "score": 0.3029
+      },
+      {
+        "sentence": "If the mutex is present, the process terminates; otherwise, it continues execution.",
+        "score": 0.3741
+      },
+      {
+        "sentence": "Next, the ti module retrieves the environment variable at offset 0x45 from the decompressed data (%APPDATA% in our case), expands it, and checks if the current process is running under this directory.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "If not, it copies itself to this location, executes the copied file, and terminates itself.",
+        "score": 0.334
+      },
+      {
+        "sentence": "Next, the loader uses the Heaven's Gate technique to bypass user mode hooks – this is further explored in the next section.",
+        "score": 0.4032
+      },
+      {
+        "sentence": "Bypass user mode hooks for injection To bypass user mode hooks, the loader uses a combination of Heaven's Gate and a direct syscall technique.",
+        "score": 0.3237
+      },
+      {
+        "sentence": "Subsequently, the execution is returned to the 32-bit code.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "The main instrumentation module uses the same process mentioned in our previous blog to decrypt the final payload and execute it.",
+        "score": 0.3616
+      },
+      {
+        "sentence": "The loading of the second stage involves the use of an embedded PNG image or PNG image downloaded from the web, which is decrypted and parsed to load the ti module.",
+        "score": 0.3153
+      },
+      {
+        "sentence": "To assist the research community in analyzing HijackLoader, we have created a Python script that is available in our GitHub repository.",
+        "score": 0.3421
+      },
+      {
+        "sentence": "The script enables the decryption and decompression of the second stage, providing access to HijackLoader’s modules.",
+        "score": 0.3515
+      }
+    ],
+    "T1547.001": [
+      {
+        "sentence": "The table below shows the HijackLoader modules added since our last blog. | Hash Value | Module Name | Description | |---|---|---| 8858AC11 | modCreateProcess | Before transferring control to the | 9757C10F | modCreateProcess64 | This module is the 64-bit version of modCreateProcess . | 3B2859F5 | modUAC | Handles the encryption and decryption of the ti module, performs x86 call stack spoofing, and utilizes the TinycallProxy module to call APIs, similar to the modCreateProcess module.",
+        "score": 0.3202
+      }
+    ]
+  }
+}

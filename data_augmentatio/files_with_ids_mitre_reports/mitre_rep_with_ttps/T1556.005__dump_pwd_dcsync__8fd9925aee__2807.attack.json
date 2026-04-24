@@ -1,0 +1,277 @@
+{
+  "original_txt": "The two key goals of any attack is access and persistence. This post covers elements of each.\nIn a post-exploitation scenario where the attacker has compromised the domain or an account with delegated rights, it’s possible to dump the clear-text passwords of admins without being a Domain Admin*. This method requires the Active Directory Domain Functional Level (DFL) to be Windows Server 2008 or higher and a patient attacker (as well as appropriate rights).\n* depending on existing AD delegation or attacker configured delegation. Required rights are described at the end of this post\nMimikatz DCSync Capability:\nThe Mimikatz DCSync capability is pretty amazing from an offensive perspective since it provides the capability to pull domain account password data remotely from the Domain Controller. The account that runs DCSync needs to have the proper rights since DCSync pulls account data through the standard Domain Controller replication API. Prior to this Mimikatz capability, added in late August, dumping all or selective account password hashes from Active Directory required code execution on the Domain Controller, pulling the AD database (ntds.dit) and dumping the contents, or running something like Invoke-Mimikatz over PowerShell Remoting.\nWith DCSync, and the proper rights, the attacker can pull useful password data on the account including (potentially):\n- SAM Account name\n- Account Type\n- User Account Control options\n- Account Expiration\n- Password last set date\n- Security ID (SID)\n- RID\n- Current and previous (password history) NTLM password hashes which shows the password history, at least in NTLM hash format.\n- Current and previous LM password hashes which shows the password history in LM hash format.\n- Clear text password (requires reversible encryption)\nUser Account Password Encrypted, Not Hashed:\nThere’s a legacy feature for Active Directory accounts called “reversible encryption”. Normally a user’s password is hashed using the NT one-way function to create the NTLM password hash. The NTLM password hash can’t be reversed it would have to be cracked, meaning that a tool would have to be used to create passwords and perform the NT hash function to get the NTLM password hash. If the user’s password hash matches the generated one, then the password was successfully guessed (known as brute force password guessing). If reversible encryption is enabled, then the user’s password is stored using encryption which means the encrypted data can be reversed back to the user’s password. The password stored with reversible encryption is not a hash since a function can be called to get back to the original clear-text password.\nThe next question is: once the account is enabled for reversible encryption, is the clear-text password for the account immediately available?\nNo, the Domain Controllers only stores the user’s NTLM password hash, so the clear-text password is not available. If reversible encryption is enabled on the account and the user changes the password after this configuration is set, then the clear-text password is saved in the Active Directory database. This occurs when the user sends the clear-text password to the DC when changing the password (occurs over encrypted RPC).\nThere’s a few different ways to set an account to use “reversible encryption” which effectively has a clear-text password in the Active Directory database (ntds.dit) on all the Domain Controllers in the domain.\n- Modify the domain-linked Group Policy with the highest precedence that configures the domain password policy so it enables reversible encryption. Modifying this GPO is much more likely to be noticed. The policy option is Computer Configuration, Policies, Windows Settings, Security Settings, Account Policies, Password Policy: “Store passwords using reversible encryption”. Check the box and set to Enabled and all user accounts will have their passwords stored using reversible encryption after the next password change.\n- Modify the individual user accounts to enable “AllowReversiblePasswordEncryption” by checking the box next to “Store password using reversible encryption”. This is not very obvious and most organizations probably aren’t looking at this. An example of how to do this is shown in the “Defense” section at the end.\n- If the Domain Functional Level is set to “Windows Server 2008” or higher, a new feature called “Fine-Grained Password Policy” is available to provide a wide-variety of password policies that can be applied to users or groups (not OUs).\nI like the third option the best since it’s not obvious – no modifying a domain root-linked GPO or an admin account directly. The only way to track this is to monitor group membership of domain-level admin accounts (and associate with existing Fine Grained Password Policies). When group membership is actually monitored, the opposite is true: monitor the members of specific privileged groups, not the groups privileged users are members of. While Microsoft made Fine-Grained Password Policies available starting with Windows Server 2008 (DFL), the Active Directory Administrative Center (ADAC) (which most admins still don’t use) wasn’t updated to support FGPP administration until Windows Server 2012. This means an attacker could configure new FGPP and they probably wouldn’t be noticed, especially if called something benign (“Exchange users”, “SharePoint Users”, etc). Enabling “Advanced Features” from the “View” menu option in Active Directory Users and Computers and then browsing down to System, Password Settings Container (CN=Password Settings Container,CN=System,DC=DOMAIN,DC=COM) will typically display any domain FGPP objects. Note that if “Advanced Features” is not enabled, the System container is not visible.\nThe Scenario:\nCompromise a Domain Admin account or account with delegated rights to create Fine-Grained Password Policies (“Create msDS-PasswordSettings” objects which exist in CN=Password Settings Container,CN=System,DC=DOMAIN,DC=COM).\nNote that the PowerShell cmdlets in this post are from the Active Directory module, although these are not strictly required for these operations, it makes it easier. HarmJ0y’s PowerView provides a lot of AD functionality in PowerShell without the Active Directory module.\nCreate a new group called something like “SharePont users” (misspelled on purpose so it won’t appear when admins search for SharePoint groups) and add all domain accounts with the attribute “AdminCount” set to 1. Accounts with the AdminCount attribute set to 1 are members of certain privileged domain groups.\nOnce the group is created, find all AD domain accounts with AdminCount set to 1 and add them to the new group “SharePontUsers”.\nCreate a Fine-Grained Password Policy (FGPP) called “SharePoint Policy” and apply to “SharePont users”.\nThe settings on this Fine-Grained Password Policy are interesting:\n- ComplexityEnabled: False\nThis determines whether the password complexity rules are required: 3 out of 4 categories including upper alpha, lower alpha, numeric, and symbols.\nThis should be set to TRUE - LokoutDuration: 00:00:00\nThis determines how long the account should be locked out after the bad password attempt threshold is triggered. 00:00:00 means the account is never locked out.\nThis should be set to a number if account lockout is desired. - LockoutObservationWindow: 00:00:00\nThis determines the period during which the lockout threshold is monitored. If set to 00:05:00, the account lockout observation window is 5 minutes, so if the lockout threshold is set to 5 and there are 5 bad password attempts in less than 5 minutes, the account is locked out. - LockoutThreshold: 0\nThis combined with the LockoutObservationWindow determines when an account is locked out. - MaxPasswordAge: 00:00:00\nThis determines how long a password may be used by the user. Typically this is set to a value between 90:00:00 and 180:00:00 to ensure that users change their passwords at least once a year.. - MinPasswordAge: 00:00:00\nThis determines how long a new password must be kept before changing. Setting this value to 00:00:00 means the user can change a password as frequently as they desire. - MinPasswordLength: 0\nThis determines the minimum length of the password which effectively sets the standard password length for all users in the domain. - PasswordHistoryCount: 0\nThis determines how many passwords the user must have before re-using a previous password. Typically set to 20 – 30. - Precedence: 1\nThis setting is specific to FGPPs since it determines which FGPP takes precedence if there are multiple FGPP applied to an account or accounts. - ReversibleEncryptionEnabled: True\nThis should be set to False. TThis sets all accounts associated with the FGPP (in this case, admin accounts) to store their passwords in clear text on the DCs at next password change.\nNote that the first item, “AppliesTo” is blank. Since we haven’t associated the new policy with an account or group, this is empty.\nOn to the next step: associate the new FGPP with the group we created.\nAfter associating the FGPP with the group, we re-run Get-ADFineGrainedPasswordPolicy to ensure it is properly associated.\nThe new FGPP effectively zeros out all standard domain password security settings usually configured by the Default Domain Policy at the domain root. should be set to False. ReversibleEncryptionEnabled sets all accounts associated with the FGPP (in this case, admin accounts) to store their passwords in clear text on the DCs at next password change. The clear-text password can be pulled using Mimikatz’s DCSync. Of course, initiating a password change “this password has expired and must be set” could be fun as well.\nGranted, the attacker can get the hashes using Mimikatz’s DCSync feature, so why bother with clear-text passwords? Why not? 🙂\nClear-text passwords provide insight into password versioning and are useful for RDP access as well as other “normal” user activity while use of password hashes may be flagged as “suspicious”.\nNote: The fine-grained password policy could be configured directly on the user accounts, but that’s probably a little obvious.\nAfter the FGPP is in place and the targeted user has changed his/her password, running DCSync shows the clear-text password.\nRights Required:\nIf an attacker gains access to an account in the Domain administrators or Domain Admins group, they have the necessary rights for this configuration. Otherwise, here are the required rights:\n| Action | Rights Required |\n| Create Group | “Create Group object” in OU/domain. |\n| Modify Group Membership | “Read/Write Members” on group or OU/domain. |\n| Modify User Account (enable “AllowReversiblePasswordEncryption”) | “Write all properties” and “All Validated Writes” on user objects in OU/domain. |\n| Create Fine-Grained Password Policy (FGPP) | “Create msDS-PasswordSettings objects” in the Password Settings Container (in System). |\n| Modify Fine-Grained Password Policy (FGPP) | “Write all properties” on msDS-PasswordSettings objects in the Password Settings Container (in System). |\n| Use Mimikatz DCSync to pull password data for account. | “Replicating Directory Changes” and “Replicating Directory Changes All” (and sometimes “”Replicating Directory Changes in Filtered Set” |\nDefense:\n- Monitor Fine-Grained Password Policies and the applied settings as well as who they apply to.\n- Monitor privileged account group membership.\n- Regularly audit user accounts for potential issues: reversible encryption, password never expires, admin accounts that allow delegation, etc.\nReferences:\n3 comments\nI notice in the DCSync output both NTLM and lm hashes are listed. Does this mean your lab domain is storing LM credentials for users in addition to NTLM hashes?\nAuthor\nThat’s correct. I have several lab environments with different levels of security configuration. This one is the default lab environment where I test most things first. It shows how keeping the default settings may leave an enterprise more open to compromise. Note that unless KB2871997 is installed on Windows 7/8/008R2/2012, the LM hash for users that logon is generated and stored in memory (LSASS), at least for passwords that are 14 characters or less. Furthermore, unless the registry key HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\SecurityProviders\\WDigest\\UseLogonCredential is set to 0 (set to 1 by default), the “clear-text” password is stored in LSASS as well (https://adsecurity.org/?p=559).\nHmm, but I thought the default in Server 2008/Vista or later environments was to set “Do not store LAN Manager hash value on next password change” to enabled, thus disabling the storage of LM hashes in AD. I tested in my environment by creating a user in ADUC then resetting its password via Powershell. Dcsync returns me LM hashes, however I don’t think they are valid. The passwords I set both start with “Password” which should generate two LM hashes that both have an identical first half, but they are completely different. They also don’t match what online LM hash generators says they should be. So not sure if this is a dcsync bug or if a junk value gets stored there or what.",
+  "sanitized_txt": "The two key goals of any attack is access and persistence. This post covers elements of each.\nIn a post-exploitation scenario where the attacker has compromised the domain or an account with delegated rights, it’s possible to dump the clear-text passwords of admins without being a Domain Admin*. This method requires the Active Directory Domain Functional Level (DFL) to be Windows Server 2008 or higher and a patient attacker (as well as appropriate rights).\n* depending on existing AD delegation or attacker configured delegation. Required rights are described at the end of this post Mimikatz DCSync Capability:\nThe Mimikatz DCSync capability is pretty amazing from an offensive perspective since it provides the capability to pull domain account password data remotely from the Domain Controller. The account that runs DCSync needs to have the proper rights since DCSync pulls account data through the standard Domain Controller replication API. Prior to this Mimikatz capability, added in late August, dumping all or selective account password hashes from Active Directory required code execution on the Domain Controller, pulling the AD database (ntds.dit) and dumping the contents, or running something like Invoke-Mimikatz over PowerShell Remoting.\nWith DCSync, and the proper rights, the attacker can pull useful password data on the account including (potentially):\n- SAM Account name - Account Type - User Account Control options - Account Expiration - Password last set date - Security ID (SID) - RID - Current and previous (password history) NTLM password hashes which shows the password history, at least in NTLM hash format.\n- Current and previous LM password hashes which shows the password history in LM hash format.\n- Clear text password (requires reversible encryption) User Account Password Encrypted, Not Hashed:\nThere’s a legacy feature for Active Directory accounts called “reversible encryption”. Normally a user’s password is hashed using the NT one-way function to create the NTLM password hash. The NTLM password hash can’t be reversed it would have to be cracked, meaning that a tool would have to be used to create passwords and perform the NT hash function to get the NTLM password hash. If the user’s password hash matches the generated one, then the password was successfully guessed (known as brute force password guessing). If reversible encryption is enabled, then the user’s password is stored using encryption which means the encrypted data can be reversed back to the user’s password. The password stored with reversible encryption is not a hash since a function can be called to get back to the original clear-text password.\nThe next question is: once the account is enabled for reversible encryption, is the clear-text password for the account immediately available?\nNo, the Domain Controllers only stores the user’s NTLM password hash, so the clear-text password is not available. If reversible encryption is enabled on the account and the user changes the password after this configuration is set, then the clear-text password is saved in the Active Directory database. This occurs when the user sends the clear-text password to the DC when changing the password (occurs over encrypted RPC).\nThere’s a few different ways to set an account to use “reversible encryption” which effectively has a clear-text password in the Active Directory database (ntds.dit) on all the Domain Controllers in the domain.\n- Modify the domain-linked Group Policy with the highest precedence that configures the domain password policy so it enables reversible encryption. Modifying this GPO is much more likely to be noticed. The policy option is Computer Configuration, Policies, Windows Settings, Security Settings, Account Policies, Password Policy: “Store passwords using reversible encryption”. Check the box and set to Enabled and all user accounts will have their passwords stored using reversible encryption after the next password change.\n- Modify the individual user accounts to enable “AllowReversiblePasswordEncryption” by checking the box next to “Store password using reversible encryption”. This is not very obvious and most organizations probably aren’t looking at this. An example of how to do this is shown in the “Defense” section at the end.\n- If the Domain Functional Level is set to “Windows Server 2008” or higher, a new feature called “Fine-Grained Password Policy” is available to provide a wide-variety of password policies that can be applied to users or groups (not OUs).\nI like the third option the best since it’s not obvious – no modifying a domain root-linked GPO or an admin account directly. The only way to track this is to monitor group membership of domain-level admin accounts (and associate with existing Fine Grained Password Policies). When group membership is actually monitored, the opposite is true: monitor the members of specific privileged groups, not the groups privileged users are members of. While Microsoft made Fine-Grained Password Policies available starting with Windows Server 2008 (DFL), the Active Directory Administrative Center (ADAC) (which most admins still don’t use) wasn’t updated to support FGPP administration until Windows Server 2012. This means an attacker could configure new FGPP and they probably wouldn’t be noticed, especially if called something benign (“Exchange users”, “SharePoint Users”, etc). Enabling “Advanced Features” from the “View” menu option in Active Directory Users and Computers and then browsing down to System, Password Settings Container (CN=Password Settings Container,CN=System,DC=DOMAIN,DC=COM) will typically display any domain FGPP objects. Note that if “Advanced Features” is not enabled, the System container is not visible.\nThe Scenario:\nCompromise a Domain Admin account or account with delegated rights to create Fine-Grained Password Policies (“Create msDS-PasswordSettings” objects which exist in CN=Password Settings Container,CN=System,DC=DOMAIN,DC=COM).\nNote that the PowerShell cmdlets in this post are from the Active Directory module, although these are not strictly required for these operations, it makes it easier. HarmJ0y’s PowerView provides a lot of AD functionality in PowerShell without the Active Directory module.\nCreate a new group called something like “SharePont users” (misspelled on purpose so it won’t appear when admins search for SharePoint groups) and add all domain accounts with the attribute “AdminCount” set to 1. Accounts with the AdminCount attribute set to 1 are members of certain privileged domain groups.\nOnce the group is created, find all AD domain accounts with AdminCount set to 1 and add them to the new group “SharePontUsers”.\nCreate a Fine-Grained Password Policy (FGPP) called “SharePoint Policy” and apply to “SharePont users”.\nThe settings on this Fine-Grained Password Policy are interesting:\n- ComplexityEnabled: False This determines whether the password complexity rules are required: 3 out of 4 categories including upper alpha, lower alpha, numeric, and symbols.\nThis should be set to TRUE - LokoutDuration: 00:00:00 This determines how long the account should be locked out after the bad password attempt threshold is triggered. 00:00:00 means the account is never locked out.\nThis should be set to a number if account lockout is desired. - LockoutObservationWindow: 00:00:00 This determines the period during which the lockout threshold is monitored. If set to 00:05:00, the account lockout observation window is 5 minutes, so if the lockout threshold is set to 5 and there are 5 bad password attempts in less than 5 minutes, the account is locked out. - LockoutThreshold: 0 This combined with the LockoutObservationWindow determines when an account is locked out. - MaxPasswordAge: 00:00:00 This determines how long a password may be used by the user. Typically this is set to a value between 90:00:00 and 180:00:00 to ensure that users change their passwords at least once a year.. - MinPasswordAge: 00:00:00 This determines how long a new password must be kept before changing. Setting this value to 00:00:00 means the user can change a password as frequently as they desire. - MinPasswordLength: 0 This determines the minimum length of the password which effectively sets the standard password length for all users in the domain. - PasswordHistoryCount: 0 This determines how many passwords the user must have before re-using a previous password. Typically set to 20 – 30. - Precedence: 1 This setting is specific to FGPPs since it determines which FGPP takes precedence if there are multiple FGPP applied to an account or accounts. - ReversibleEncryptionEnabled: True This should be set to False. TThis sets all accounts associated with the FGPP (in this case, admin accounts) to store their passwords in clear text on the DCs at next password change.\nNote that the first item, “AppliesTo” is blank. Since we haven’t associated the new policy with an account or group, this is empty.\nOn to the next step: associate the new FGPP with the group we created.\nAfter associating the FGPP with the group, we re-run Get-ADFineGrainedPasswordPolicy to ensure it is properly associated.\nThe new FGPP effectively zeros out all standard domain password security settings usually configured by the Default Domain Policy at the domain root. should be set to False. ReversibleEncryptionEnabled sets all accounts associated with the FGPP (in this case, admin accounts) to store their passwords in clear text on the DCs at next password change. The clear-text password can be pulled using Mimikatz’s DCSync. Of course, initiating a password change “this password has expired and must be set” could be fun as well.\nGranted, the attacker can get the hashes using Mimikatz’s DCSync feature, so why bother with clear-text passwords? Why not? 🙂 Clear-text passwords provide insight into password versioning and are useful for RDP access as well as other “normal” user activity while use of password hashes may be flagged as “suspicious”.\nNote: The fine-grained password policy could be configured directly on the user accounts, but that’s probably a little obvious.\nAfter the FGPP is in place and the targeted user has changed his/her password, running DCSync shows the clear-text password.\nRights Required:\nIf an attacker gains access to an account in the Domain administrators or Domain Admins group, they have the necessary rights for this configuration. Otherwise, here are the required rights:\n| Action | Rights Required | | Create Group | “Create Group object” in OU/domain. | | Modify Group Membership | “Read/Write Members” on group or OU/domain. | | Modify User Account (enable “AllowReversiblePasswordEncryption”) | “Write all properties” and “All Validated Writes” on user objects in OU/domain. | | Create Fine-Grained Password Policy (FGPP) | “Create msDS-PasswordSettings objects” in the Password Settings Container (in System). | | Modify Fine-Grained Password Policy (FGPP) | “Write all properties” on msDS-PasswordSettings objects in the Password Settings Container (in System). | | Use Mimikatz DCSync to pull password data for account. | “Replicating Directory Changes” and “Replicating Directory Changes All” (and sometimes “”Replicating Directory Changes in Filtered Set” | Defense:\n- Monitor Fine-Grained Password Policies and the applied settings as well as who they apply to.\n- Monitor privileged account group membership.\n- Regularly audit user accounts for potential issues: reversible encryption, password never expires, admin accounts that allow delegation, etc.\nReferences:\n3 comments I notice in the DCSync output both NTLM and lm hashes are listed. Does this mean your lab domain is storing LM credentials for users in addition to NTLM hashes?\nAuthor That’s correct. I have several lab environments with different levels of security configuration. This one is the default lab environment where I test most things first. It shows how keeping the default settings may leave an enterprise more open to compromise. Note that unless KB2871997 is installed on Windows 7/8/008R2/2012, the LM hash for users that logon is generated and stored in memory (LSASS), at least for passwords that are 14 characters or less. Furthermore, unless the registry key HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\SecurityProviders\\WDigest\\UseLogonCredential is set to 0 (set to 1 by default), the “clear-text” password is stored in LSASS as well (https://adsecurity.org/?p=559).\nHmm, but I thought the default in Server 2008/Vista or later environments was to set “Do not store LAN Manager hash value on next password change” to enabled, thus disabling the storage of LM hashes in AD. I tested in my environment by creating a user in ADUC then resetting its password via Powershell. Dcsync returns me LM hashes, however I don’t think they are valid. The passwords I set both start with “Password” which should generate two LM hashes that both have an identical first half, but they are completely different. They also don’t match what online LM hash generators says they should be. So not sure if this is a dcsync bug or if a junk value gets stored there or what.",
+  "ID_list": [
+    "T1556.005"
+  ],
+  "Name_list": [
+    "Brute Force",
+    "Execution",
+    "Persistence",
+    "PowerShell"
+  ],
+  "TTP_sentences": {
+    "T1556.005": [
+      {
+        "sentence": "The two key goals of any attack is access and persistence.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "This post covers elements of each.",
+        "score": 0.3276
+      },
+      {
+        "sentence": "In a post-exploitation scenario where the attacker has compromised the domain or an account with delegated rights, it’s possible to dump the clear-text passwords of admins without being a Domain Admin*.",
+        "score": 0.6759
+      },
+      {
+        "sentence": "This method requires the Active Directory Domain Functional Level (DFL) to be Windows Server 2008 or higher and a patient attacker (as well as appropriate rights). * depending on existing AD delegation or attacker configured delegation.",
+        "score": 0.5039
+      },
+      {
+        "sentence": "Required rights are described at the end of this post Mimikatz DCSync Capability: The Mimikatz DCSync capability is pretty amazing from an offensive perspective since it provides the capability to pull domain account password data remotely from the Domain Controller.",
+        "score": 0.6257
+      },
+      {
+        "sentence": "The account that runs DCSync needs to have the proper rights since DCSync pulls account data through the standard Domain Controller replication API.",
+        "score": 0.4215
+      },
+      {
+        "sentence": "Prior to this Mimikatz capability, added in late August, dumping all or selective account password hashes from Active Directory required code execution on the Domain Controller, pulling the AD database (ntds.dit) and dumping the contents, or running something like Invoke-Mimikatz over PowerShell Remoting.",
+        "score": 0.5905
+      },
+      {
+        "sentence": "Normally a user’s password is hashed using the NT one-way function to create the NTLM password hash.",
+        "score": 0.7234
+      },
+      {
+        "sentence": "The NTLM password hash can’t be reversed it would have to be cracked, meaning that a tool would have to be used to create passwords and perform the NT hash function to get the NTLM password hash.",
+        "score": 0.6742
+      },
+      {
+        "sentence": "If the user’s password hash matches the generated one, then the password was successfully guessed (known as brute force password guessing).",
+        "score": 0.5596
+      },
+      {
+        "sentence": "If reversible encryption is enabled, then the user’s password is stored using encryption which means the encrypted data can be reversed back to the user’s password.",
+        "score": 0.7798
+      },
+      {
+        "sentence": "The password stored with reversible encryption is not a hash since a function can be called to get back to the original clear-text password.",
+        "score": 0.7392
+      },
+      {
+        "sentence": "The next question is: once the account is enabled for reversible encryption, is the clear-text password for the account immediately available?",
+        "score": 0.7816
+      },
+      {
+        "sentence": "No, the Domain Controllers only stores the user’s NTLM password hash, so the clear-text password is not available.",
+        "score": 0.7557
+      },
+      {
+        "sentence": "If reversible encryption is enabled on the account and the user changes the password after this configuration is set, then the clear-text password is saved in the Active Directory database.",
+        "score": 0.8066
+      },
+      {
+        "sentence": "This occurs when the user sends the clear-text password to the DC when changing the password (occurs over encrypted RPC).",
+        "score": 0.5912
+      },
+      {
+        "sentence": "There’s a few different ways to set an account to use “reversible encryption” which effectively has a clear-text password in the Active Directory database (ntds.dit) on all the Domain Controllers in the domain. - Modify the domain-linked Group Policy with the highest precedence that configures the domain password policy so it enables reversible encryption.",
+        "score": 0.7612
+      },
+      {
+        "sentence": "The policy option is Computer Configuration, Policies, Windows Settings, Security Settings, Account Policies, Password Policy: “Store passwords using reversible encryption”.",
+        "score": 0.6681
+      },
+      {
+        "sentence": "Check the box and set to Enabled and all user accounts will have their passwords stored using reversible encryption after the next password change. - Modify the individual user accounts to enable “AllowReversiblePasswordEncryption” by checking the box next to “Store password using reversible encryption”.",
+        "score": 0.7541
+      },
+      {
+        "sentence": "An example of how to do this is shown in the “Defense” section at the end. - If the Domain Functional Level is set to “Windows Server 2008” or higher, a new feature called “Fine-Grained Password Policy” is available to provide a wide-variety of password policies that can be applied to users or groups (not OUs).",
+        "score": 0.6222
+      },
+      {
+        "sentence": "I like the third option the best since it’s not obvious – no modifying a domain root-linked GPO or an admin account directly.",
+        "score": 0.3834
+      },
+      {
+        "sentence": "The only way to track this is to monitor group membership of domain-level admin accounts (and associate with existing Fine Grained Password Policies).",
+        "score": 0.4906
+      },
+      {
+        "sentence": "When group membership is actually monitored, the opposite is true: monitor the members of specific privileged groups, not the groups privileged users are members of.",
+        "score": 0.3147
+      },
+      {
+        "sentence": "While Microsoft made Fine-Grained Password Policies available starting with Windows Server 2008 (DFL), the Active Directory Administrative Center (ADAC) (which most admins still don’t use) wasn’t updated to support FGPP administration until Windows Server 2012.",
+        "score": 0.5686
+      },
+      {
+        "sentence": "Enabling “Advanced Features” from the “View” menu option in Active Directory Users and Computers and then browsing down to System, Password Settings Container (CN=Password Settings Container,CN=System,DC=DOMAIN,DC=COM) will typically display any domain FGPP objects.",
+        "score": 0.4977
+      },
+      {
+        "sentence": "Note that if “Advanced Features” is not enabled, the System container is not visible.",
+        "score": 0.3634
+      },
+      {
+        "sentence": "The Scenario: Compromise a Domain Admin account or account with delegated rights to create Fine-Grained Password Policies (“Create msDS-PasswordSettings” objects which exist in CN=Password Settings Container,CN=System,DC=DOMAIN,DC=COM).",
+        "score": 0.5747
+      },
+      {
+        "sentence": "HarmJ0y’s PowerView provides a lot of AD functionality in PowerShell without the Active Directory module.",
+        "score": 0.378
+      },
+      {
+        "sentence": "Create a new group called something like “SharePont users” (misspelled on purpose so it won’t appear when admins search for SharePoint groups) and add all domain accounts with the attribute “AdminCount” set to 1.",
+        "score": 0.4072
+      },
+      {
+        "sentence": "Accounts with the AdminCount attribute set to 1 are members of certain privileged domain groups.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "Once the group is created, find all AD domain accounts with AdminCount set to 1 and add them to the new group “SharePontUsers”.",
+        "score": 0.4479
+      },
+      {
+        "sentence": "Create a Fine-Grained Password Policy (FGPP) called “SharePoint Policy” and apply to “SharePont users”.",
+        "score": 0.4998
+      },
+      {
+        "sentence": "The settings on this Fine-Grained Password Policy are interesting: - ComplexityEnabled: False This determines whether the password complexity rules are required: 3 out of 4 categories including upper alpha, lower alpha, numeric, and symbols.",
+        "score": 0.6402
+      },
+      {
+        "sentence": "This should be set to TRUE - LokoutDuration: 00:00:00 This determines how long the account should be locked out after the bad password attempt threshold is triggered.",
+        "score": 0.5667
+      },
+      {
+        "sentence": "00:00:00 means the account is never locked out.",
+        "score": 0.4351
+      },
+      {
+        "sentence": "This should be set to a number if account lockout is desired. - LockoutObservationWindow: 00:00:00 This determines the period during which the lockout threshold is monitored.",
+        "score": 0.452
+      },
+      {
+        "sentence": "If set to 00:05:00, the account lockout observation window is 5 minutes, so if the lockout threshold is set to 5 and there are 5 bad password attempts in less than 5 minutes, the account is locked out. - LockoutThreshold: 0 This combined with the LockoutObservationWindow determines when an account is locked out. - MaxPasswordAge: 00:00:00 This determines how long a password may be used by the user.",
+        "score": 0.6541
+      },
+      {
+        "sentence": "Typically this is set to a value between 90:00:00 and 180:00:00 to ensure that users change their passwords at least once a year.. - MinPasswordAge: 00:00:00 This determines how long a new password must be kept before changing.",
+        "score": 0.668
+      },
+      {
+        "sentence": "Setting this value to 00:00:00 means the user can change a password as frequently as they desire. - MinPasswordLength: 0 This determines the minimum length of the password which effectively sets the standard password length for all users in the domain. - PasswordHistoryCount: 0 This determines how many passwords the user must have before re-using a previous password.",
+        "score": 0.7135
+      },
+      {
+        "sentence": "Typically set to 20 – 30. - Precedence: 1 This setting is specific to FGPPs since it determines which FGPP takes precedence if there are multiple FGPP applied to an account or accounts. - ReversibleEncryptionEnabled: True This should be set to False.",
+        "score": 0.5207
+      },
+      {
+        "sentence": "TThis sets all accounts associated with the FGPP (in this case, admin accounts) to store their passwords in clear text on the DCs at next password change.",
+        "score": 0.6528
+      },
+      {
+        "sentence": "Note that the first item, “AppliesTo” is blank.",
+        "score": 0.362
+      },
+      {
+        "sentence": "Since we haven’t associated the new policy with an account or group, this is empty.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "After associating the FGPP with the group, we re-run Get-ADFineGrainedPasswordPolicy to ensure it is properly associated.",
+        "score": 0.4902
+      },
+      {
+        "sentence": "The new FGPP effectively zeros out all standard domain password security settings usually configured by the Default Domain Policy at the domain root. should be set to False.",
+        "score": 0.6388
+      },
+      {
+        "sentence": "ReversibleEncryptionEnabled sets all accounts associated with the FGPP (in this case, admin accounts) to store their passwords in clear text on the DCs at next password change.",
+        "score": 0.7032
+      },
+      {
+        "sentence": "The clear-text password can be pulled using Mimikatz’s DCSync.",
+        "score": 0.6963
+      },
+      {
+        "sentence": "Of course, initiating a password change “this password has expired and must be set” could be fun as well.",
+        "score": 0.5643
+      },
+      {
+        "sentence": "Granted, the attacker can get the hashes using Mimikatz’s DCSync feature, so why bother with clear-text passwords?",
+        "score": 0.7174
+      },
+      {
+        "sentence": "Why not? 🙂 Clear-text passwords provide insight into password versioning and are useful for RDP access as well as other “normal” user activity while use of password hashes may be flagged as “suspicious”.",
+        "score": 0.7637
+      },
+      {
+        "sentence": "Note: The fine-grained password policy could be configured directly on the user accounts, but that’s probably a little obvious.",
+        "score": 0.5304
+      },
+      {
+        "sentence": "After the FGPP is in place and the targeted user has changed his/her password, running DCSync shows the clear-text password.",
+        "score": 0.6864
+      },
+      {
+        "sentence": "Rights Required: If an attacker gains access to an account in the Domain administrators or Domain Admins group, they have the necessary rights for this configuration.",
+        "score": 0.5168
+      },
+      {
+        "sentence": "References: 3 comments I notice in the DCSync output both NTLM and lm hashes are listed.",
+        "score": 0.5808
+      },
+      {
+        "sentence": "Does this mean your lab domain is storing LM credentials for users in addition to NTLM hashes?",
+        "score": 0.6422
+      },
+      {
+        "sentence": "I have several lab environments with different levels of security configuration.",
+        "score": 0.3659
+      },
+      {
+        "sentence": "It shows how keeping the default settings may leave an enterprise more open to compromise.",
+        "score": 0.3458
+      },
+      {
+        "sentence": "Note that unless KB2871997 is installed on Windows 7/8/008R2/2012, the LM hash for users that logon is generated and stored in memory (LSASS), at least for passwords that are 14 characters or less.",
+        "score": 0.7397
+      },
+      {
+        "sentence": "Furthermore, unless the registry key HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\SecurityProviders\\WDigest\\UseLogonCredential is set to 0 (set to 1 by default), the “clear-text” password is stored in LSASS as well (https://adsecurity.org/?p=559).",
+        "score": 0.6972
+      },
+      {
+        "sentence": "Hmm, but I thought the default in Server 2008/Vista or later environments was to set “Do not store LAN Manager hash value on next password change” to enabled, thus disabling the storage of LM hashes in AD.",
+        "score": 0.6422
+      },
+      {
+        "sentence": "I tested in my environment by creating a user in ADUC then resetting its password via Powershell.",
+        "score": 0.4933
+      },
+      {
+        "sentence": "Dcsync returns me LM hashes, however I don’t think they are valid.",
+        "score": 0.5475
+      },
+      {
+        "sentence": "The passwords I set both start with “Password” which should generate two LM hashes that both have an identical first half, but they are completely different.",
+        "score": 0.6878
+      },
+      {
+        "sentence": "They also don’t match what online LM hash generators says they should be.",
+        "score": 0.4485
+      },
+      {
+        "sentence": "So not sure if this is a dcsync bug or if a junk value gets stored there or what.",
+        "score": 0.3287
+      }
+    ]
+  }
+}

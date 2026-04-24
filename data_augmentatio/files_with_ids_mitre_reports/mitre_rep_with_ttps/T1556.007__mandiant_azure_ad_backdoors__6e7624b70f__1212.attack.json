@@ -1,0 +1,358 @@
+{
+  "original_txt": "Detecting Microsoft 365 and Azure Active Directory Backdoors\nMandiant\nWritten by: Mike Burns\nMandiant has seen an uptick in incidents involving Microsoft 365 (M365) and Azure Active Directory (Azure AD). Most of these incidents are the result of a phishing email coercing a user to enter their credentials used for accessing M365 into a phishing site. Other incidents have been a result of password spraying, password stuffing, or simple brute force attempts against M365 tenants. In almost all of these incidents, the user or account was not protected by multi-factor authentication (MFA).\nThese opportunistic attacks are certainly the most common form of compromise for M365 and Azure AD, and are usually the initial vector to establish persistence. During both incident response (IR) engagements and proactive cloud assessments we are often asked:\n- What are some other types of attacks that Mandiant is seeing against M365 and Azure AD?\n- Is it possible for an on-premises compromise to “vertically” move to M365 and Azure AD?\n- If a global administrator account is compromised, is it possible to maintain persistence even after the compromised account has been detected, a password reset has occurred, and MFA has been applied?\nAADInternals PowerShell Module\nIn some incidents, Mandiant has witnessed attackers utilizing a PowerShell module called AADInternals, which can allow an attacker to vertically move from on-premises to Azure AD, establish backdoors, steal passwords, generate user security tokens, and bypass MFA protections. This PowerShell module has allowed attackers to maintain persistence in the tenant even after initial eradication efforts were conducted.\nTo see this module in action and understand how it works, Dr. Nestori Syynimaa’s PSCONFEU 2020 presentation, Abusing Azure Active Directory: Who would you like to be today?, provides an in-depth overview of the module.\nTo detect the use of AADInternals, it is important to understand how some of these attacks work. Once an understanding is established, abnormal usage can be detected through a combination of log analysis and host-based indicators.\nBackdoor 1: Abusing Pass-Through Authentication\nAttacker Requirements\n- Local Administrative Access to a server running Pass-through Authentication\nOr\n- M365 global administrator credentials\nThe AADInternals PowerShell module contains a function called Install-AADIntPTASPY. The function works by inserting itself as a man-in-the-middle within the Pass-through Authentication (PTA) process that occurs between Azure AD and the server running the PTA Agent in the on-premises environment. Commonly, the PTA Agent runs on the same on-premises server as Azure AD Connect (AAD Connect).\nWhen PTA is enabled, every logon that occurs against Azure AD gets redirected to the PTA Agent on-premises. The PTA Agent asks an on-premises Active Directory Domain Controller if a password is valid for an authenticating account. If valid, the PTA Agent responds back to Azure AD to grant the requestor access. Figure 1 provides the workflow of Pass-through Authentication and where AADInternals can intercept the request.\nFigure 1: Pass-through Authentication workflow\nOnce the function is running, every PTA attempt against Azure AD will be intercepted by the installed AADIntPTASpy module. The module will record the user’s password attempt and reply back to Azure AD on behalf of the PTA Agent. This reply advises Azure AD the password attempt was valid and grants the user access to the cloud, even if the password is incorrect. If an attacker has implanted AADIntPTASpy, they can log in as any user that attempts to authenticate using PTA—and will be granted access.\nAdditionally, all password attempts that are registered by the AADIntPTASpy module are recorded within a log file on the server (Default location: C:\\PTASpy\\PTASPy.csv). Figure 2 shows how the log file can be decoded to reveal a user’s password in cleartext.\nFigure 2: PTASpy.csv decoded passwords\nNot only will this function allow an attacker to login as any user who authenticates via PTA, but it will also act as a repository for collecting user passwords who are legitimately logging into Azure AD. This could allow an attacker to pivot their attack to other areas of the network—or use these credentials against other internet accessible portals that may leverage single-factor authentication (e.g., VPN gateway).\nAn attacker can use this module in one of two ways:\nMethod 1: On-Premises Compromise\nAn attacker has gained access to an on-premises domain and is able to laterally move to the AADConnect / PTA Agent Server. From this server, an attacker can potentially leverage the AADInternals PowerShell module and invoke the Install-AADIntPTASpy function.\nMethod 2: Cloud Compromise\nIf an attacker has successfully compromised an Azure AD global admin account, an attack can be conducted from an attacker’s own infrastructure. An attacker can install a PTA Agent on a server they manage and register the agent using the compromised global administrator account (Figure 3).\nFigure 3: Azure AD Portal—registered Pass-through Authentication agents\nOnce registered with Azure AD, the rogue server will begin to intercept and authorize all login attempts. As with Method 1, this server can also be used to harvest valid credentials.\nBackdoor 2: Abusing Identity Federation\nAttacker Requirements\n- Local administrative access to AD and server running Active Directory Federation Services\nOr\n- M365 global administrator credentials\nAnother method of authenticating to M365 is through the usage of federation services. When a M365 domain is configured as a federated domain, a trust is configured between M365 and an external identify provider. In many cases, this trust is established with an Active Directory Federation Services (ADFS) server for an on-premises Active Directory domain.\nOnce a trust is established, when a user logs into M365 using a federated domain, their request is redirected to the external identify provider (ADFS) where their authentication is validated (Figure 4). Once validated, the ADFS server provides the user a security token. This token is then trusted by M365 and grants the access to the platform.\nFigure 4: Microsoft 365 Federation Sign-in workflow\nAADInternals has a PowerShell function to craft security tokens, which mimics the ADFS authentication process. When providing the function a valid UserPrincipalName, Immutable ID and IssuerURI, an attacker can generate a security token as any user of the tenant. What’s even more concerning is that once this security token is generated, this can allow an attacker to bypass MFA.\nAs with Backdoor 1, this attack can either be performed from a compromised on-premises environment or from an attacker’s own infrastructure.\nMethod 1: On-Premises Compromise\nOnce an attacker has gained access to an on-premises domain with elevated access, they can begin to collect the required information to craft their own security tokens to backdoor into M365 as any user. An attacker will require:\n- A valid UserPrincipalName and Immutable.\n- Both of these attributes can be pulled from the on-premises Active Directory domain.\n- IssuerURI of the ADFS server and ADFS Signing certificate.\n- This can be obtained from an ADFS server when directly logged into the server or remotely querying the server via an privileged account.\nOnce an attacker has collected the necessary information, using the AADInternals Open-AADIntOffice365Portal command, a security token for the user can be generated granting an attacker access to M365 (Figure 5).\nFigure 5: AADInternals Open-AADIntOffice365Portal command\nMethod 2: Cloud Compromise\nIf an attacker has a compromised an M365 Global Administrator account, using their own infrastructure, an attacker can use their administrative access to collect user information and reconfigure the tenant to establish their backdoor. In this method, an attacker will require:\n- A valid UserPrincipalName and valid ImmutableId.\n- Figure 6 shows how the Get-MsolUser command can obtain a user’s ImmutableId from Azure AD.\nFigure 6: Get-MsolUser—list user UPN & ImmutableId\n- IssuerURI\n- This can be obtained by converting a managed domain to a federated domain. Figures 7 through 10 show how the AADInternals ConvertTo-AADIntBackdoor command (Figure 8) can be used to allow attacker to register their own IssuerURI for a federated domain.\nFigure 7: Get-msoldomain—list of registered domains and authentication\nFigure 8: ConvertTo-AADIntBackdoor—convert domain to federated authentication\nFigure 9: Changed authentication method\nFigure 10: Azure AD Portal registered domains\nNote: To not interrupt production and authentication with an existing federated domain (and to remain undetected), an attacker may opt to register a new domain with the tenant.\nFigure 11: AADInternals Open-AADIntOffice365Portal Command using new Federated domain\nOnce an attacker has properly configured the tenant, using the ImmutableId of any user, a security token can be generated by executing the Open-AADIntOffice365Portal command (Figure 11). This will allow an attacker to login as that user without the need for a valid certificate or a legitimate IssuerURI.\nFortunately for defenders, this method will generate a number of events in the unified audit log, which can be leveraged for monitoring and alerting.\nMitigation and Detection\nOnce persistence is established, it can be extremely difficult to detect login activity that is utilizing one of the previously described methods. In lieu of this, it is recommended to monitor and alert on M365 unified audit logs and Azure AD sign-in activity to detect anomalous activity.\nDetection in FireEye Helix\nBeing that Mandiant has seen this methodology being used in the wild, we felt it was necessary to build these detections into our FireEye Helix security platform. Helix engineers have created sever new detection rules that monitor for detectable activity of an attacker making use of the AADInternals PowerShell module.\nThe following five rules will monitor a server’s event logs and alert upon the installation and usage of the AADInternals PowerShell module (Figure 12). The detection of these activities could be high fidelity alerts that an attacker is preparing to configure backdoors into M365 and Azure AD environments.\nFigure 12: AADInternals Helix rules\nIf an attacker has successfully configured a backdoor using AADInternals, Helix will alert upon the following events registered in the Office 365 unified audit log and Azure Activity Log as indication of a possible event (Figure 13 and Figure 14). It is important to note that these alerts could be triggered upon legitimate administrator activity. When responding to these alerts, first check with your M365 and Azure AD administrator to verify the activity before raising a security event.\nFigure 13: Office 365 and Azure Helix rules\nFigure 14: PTA Connector Registered alert description\nHunting for Backdoors in M365 Unified Audit Logs and Azure AD Logs\nIf you suspect a global administrator account was compromised and you want to review Azure AD for indicators of potential abuse, the following should be reviewed (note that these same concepts can be used for proactive log monitoring):\n- From Azure AD Sign-ins logs, monitor logon activity from On-Premises Directory Synchronization Service Accounts. This account is used by the Azure AD Connect service (Figure 15).\nFigure 15: Azure AD Sign-ins\n- Baseline the IP addresses used by this account and make sure the IPs match those assigned to the on-premises WAN infrastructure. If the attacker has configure a PTA Agent on their own infrastructure, seeing an IP that does not match your baseline could be an indicator that a rogue PTA Agent has been configured by the attacker (Figure 16).\nFigure 16: Azure AD Sign-in logs—On-Premises Directory Synchronization Services account\nFrom Azure AD Sign-ins, monitor and baseline Azure AD Sign-ins to the Azure AD Application Proxy Connector. Make sure to validate username, IP and location.\nThese events are typically only generated when a new PTA agent is connected to the tenant. This could be an indicator that an attacker has connected a rogue PTA server hosted on an attacker’s infrastructure (Figure 17).\nFigure 17: Azure AD Sign-in logs—Azure AD Application Proxy Connector\nIf using Azure Sentinel, this event will also be registered in the Azure AuditLogs table as a “Register Connector” OperationName (Figure 18).\nFigure 18: Register Connector—Azure Sentinel logs\n- In the Azure Management Portal under the Azure AD Connect blade, review all registered servers running PTA Agent. The Authentication Agent and IP should match your infrastructure (Figure 19).\n- Log in to https://portal.azure.com\n- Select Azure AD Connect > Pass-through Authentication\n- Log in to https://portal.azure.com\nFigure 19: Azure Active Directory Pass-through Authentication agent status\n- Monitor and alert for \"Directory Administration Activity\" in Office 365 Security & Compliance Center’s unified audit log. When an attacker is able to create a domain federation within a compromised cloud tenant, and link this to attacker-owned infrastructure, this will generate activity in the log (Figure 21).\n- https://Protections.office.com/unifiedauitlog > Audit Log Search\n- Select Directory Administration Activates category to select all activities\n- Create New Alert Policy (Figure 20)\nFigure 20: Unified Audit Log > Create new alert policy\nFigure 21: Unified Audit Log filtered for domain related events\n- Using Azure Sentinel, more granular Directory Administration Activities can be modified for suspicious activity. This includes additions, deletions and modifications of domains and their authentication settings (Figure 22).\n- Monitoring for OfficeActivity Operations in Azure Sentinel can allow an organization to validate if this is normalized activity or if an attacker is working on setting up a backdoor for PTA or federation.\n- Table: OfficeActivity\n- Operation: Set-AcceptedDomain\n- Operation: Set-MsolDomainFederationSettings\n- Operation: Add-FederatedDomain\n- Operation: New-Accepted Domain\n- Operation: Remove-Accepted Domain\n- Operation: Remove-FederatedDomain\n- Table: OfficeActivity\n- Monitoring for OfficeActivity Operations in Azure Sentinel can allow an organization to validate if this is normalized activity or if an attacker is working on setting up a backdoor for PTA or federation.\nFigure 22: OfficeActivity Operations Azure Sentinel logs\nDetection On-Premises\nIf an attacker is able to compromise on-premises infrastructure and access a server running AD Connect or ADFS services with the intention of leveraging a tool such as AADInternals to expand the scope of their access to include cloud, timely on-premises detection and containment is key. The following methods can be leveraged to ensure optimized visibility and detection for the scope of activities described in this post:\n- Treat ADFS and Azure AD Connect servers as Tier 0 assets.\n- Use a dedicated server for each. Do not install these roles and server in addition to other. All too often we are seeing Azure AD Connect running on a file server.\n- Ensure PowerShell logging is optimized on AD Connect and ADFS servers\n- Review Microsoft-Windows-PowerShell/Operational logs on ADFS and AADConnect Server Logs.\n- If PowerShell logging is enabled, search for Event ID 4101. This event ID will record the event where AADInternals was installed (Figure 23).\nFigure 23: EventID 410—Installed Module\n- Additionally, with this logging enabled, you will be able to review the PowerShell commands used by an attacker.\n- In PowerShell, run Get-Module -All and look for the presence of AADInternals (Figure 24).\nFigure 24: Get-Module command to list installed modules\n- Alert for the presence of C:\\PTASpy and C:\\PTASpy\\PTASpy.csv.\n- This is the default location of the log file that contains records of all the accounts that were intercepted by the tool. Remember, an attacker may also use this to harvest credentials, so it is important to reset the password for these accounts (Figure 25).\nFigure 25: PTASpy.csv log activity\nMitigations\nIn order for this attack to be successful, an attacker must gain administrative privileges on a server running Azure AD Connect and/or gain global administrator rights within M365. Simple practices such as limiting and properly protecting global administrator accounts as well as properly protecting Tier 0 assets can greatly reduce the risk of an attacker successfully using the AADInternals PowerShell against your organization.\n- Limit or restrict access to Azure AD Connect servers.\n- Any server acting as an identity provider or facilitating identity federation should be treated as a Tier 0 asset.\n- Create separate dedicated global administrator accounts.\n- Global administrators should be cloud-only accounts.\n- These accounts should not retain any licensing.\n- Implement MFA on all accounts: admins, users and services.\n- If a particular account cannot use MFA, apply a conditional access rule that limits its logon to a trusted network. This works particularly well for service accounts.\n- Establish a roadmap to block legacy authentication.\n- Limit which accounts are synced from on-premises to the cloud.\n- Do not sync privileged or service accounts to the cloud.\n- Use Azure administrative roles.\n- Not everybody or everything needs to be a global admin to administer the environment.\n- Use password hash sync over Pass-through Authentication.\n- Many organizations are reluctant to sync their password to Azure AD. The benefits from this service greatly outweigh the risks. Being able to use global and custom banned passwords lists, for both the cloud and on-premises, is a tremendous benefit.\n- Forward all M365 unified audit logs and Azure logs to a SIEM and build detections.\n- Ensure you are forwarding the logs recommended in this post and building the appropriate detections and playbooks within your security operations teams.\n- Specifically monitor for:\n- Set-AcceptedDomain\n- Set-MsolDomainFederationSettings\n- Add-FederatedDomain\n- New-Accepted Domain\n- Remove-Accepted Domain\n- Remove-FederatedDomain\n- Periodically review all identity providers and custom domains configured in the M365 tenant.\n- If an attacker is successful at gaining global administrative privileges, they may choose to add their own identity provider and custom domain to maintain persistence.\nAcknowledgements\nI want to give a special thanks to Daniel Taylor, Roberto Bamberger and Jennifer Kendall at Microsoft for collaborating with Mandiant on the creation of this blog post.",
+  "sanitized_txt": "Detecting Microsoft 365 and Azure Active Directory Backdoors Mandiant Written by: Mike Burns Mandiant has seen an uptick in incidents involving Microsoft 365 (M365) and Azure Active Directory (Azure AD). Most of these incidents are the result of a phishing email coercing a user to enter their credentials used for accessing M365 into a phishing site. Other incidents have been a result of password spraying, password stuffing, or simple brute force attempts against M365 tenants. In almost all of these incidents, the user or account was not protected by multi-factor authentication (MFA).\nThese opportunistic attacks are certainly the most common form of compromise for M365 and Azure AD, and are usually the initial vector to establish persistence. During both incident response (IR) engagements and proactive cloud assessments we are often asked:\n- What are some other types of attacks that Mandiant is seeing against M365 and Azure AD?\n- Is it possible for an on-premises compromise to “vertically” move to M365 and Azure AD?\n- If a global administrator account is compromised, is it possible to maintain persistence even after the compromised account has been detected, a password reset has occurred, and MFA has been applied?\nAADInternals PowerShell Module In some incidents, Mandiant has witnessed attackers utilizing a PowerShell module called AADInternals, which can allow an attacker to vertically move from on-premises to Azure AD, establish backdoors, steal passwords, generate user security tokens, and bypass MFA protections. This PowerShell module has allowed attackers to maintain persistence in the tenant even after initial eradication efforts were conducted.\nTo see this module in action and understand how it works, Dr. Nestori Syynimaa’s PSCONFEU 2020 presentation, Abusing Azure Active Directory: Who would you like to be today?, provides an in-depth overview of the module.\nTo detect the use of AADInternals, it is important to understand how some of these attacks work. Once an understanding is established, abnormal usage can be detected through a combination of log analysis and host-based indicators.\nBackdoor 1: Abusing Pass-Through Authentication Attacker Requirements - Local Administrative Access to a server running Pass-through Authentication Or - M365 global administrator credentials The AADInternals PowerShell module contains a function called Install-AADIntPTASPY. The function works by inserting itself as a man-in-the-middle within the Pass-through Authentication (PTA) process that occurs between Azure AD and the server running the PTA Agent in the on-premises environment. Commonly, the PTA Agent runs on the same on-premises server as Azure AD Connect (AAD Connect).\nWhen PTA is enabled, every logon that occurs against Azure AD gets redirected to the PTA Agent on-premises. The PTA Agent asks an on-premises Active Directory Domain Controller if a password is valid for an authenticating account. If valid, the PTA Agent responds back to Azure AD to grant the requestor access. Figure 1 provides the workflow of Pass-through Authentication and where AADInternals can intercept the request.\nFigure 1: Pass-through Authentication workflow Once the function is running, every PTA attempt against Azure AD will be intercepted by the installed AADIntPTASpy module. The module will record the user’s password attempt and reply back to Azure AD on behalf of the PTA Agent. This reply advises Azure AD the password attempt was valid and grants the user access to the cloud, even if the password is incorrect. If an attacker has implanted AADIntPTASpy, they can log in as any user that attempts to authenticate using PTA—and will be granted access.\nAdditionally, all password attempts that are registered by the AADIntPTASpy module are recorded within a log file on the server (Default location: C:\\PTASpy\\PTASPy.csv). Figure 2 shows how the log file can be decoded to reveal a user’s password in cleartext.\nFigure 2: PTASpy.csv decoded passwords Not only will this function allow an attacker to login as any user who authenticates via PTA, but it will also act as a repository for collecting user passwords who are legitimately logging into Azure AD. This could allow an attacker to pivot their attack to other areas of the network—or use these credentials against other internet accessible portals that may leverage single-factor authentication (e.g., VPN gateway).\nAn attacker can use this module in one of two ways:\nMethod 1: On-Premises Compromise An attacker has gained access to an on-premises domain and is able to laterally move to the AADConnect / PTA Agent Server. From this server, an attacker can potentially leverage the AADInternals PowerShell module and invoke the Install-AADIntPTASpy function.\nMethod 2: Cloud Compromise If an attacker has successfully compromised an Azure AD global admin account, an attack can be conducted from an attacker’s own infrastructure. An attacker can install a PTA Agent on a server they manage and register the agent using the compromised global administrator account (Figure 3).\nFigure 3: Azure AD Portal—registered Pass-through Authentication agents Once registered with Azure AD, the rogue server will begin to intercept and authorize all login attempts. As with Method 1, this server can also be used to harvest valid credentials.\nBackdoor 2: Abusing Identity Federation Attacker Requirements - Local administrative access to AD and server running Active Directory Federation Services Or - M365 global administrator credentials Another method of authenticating to M365 is through the usage of federation services. When a M365 domain is configured as a federated domain, a trust is configured between M365 and an external identify provider. In many cases, this trust is established with an Active Directory Federation Services (ADFS) server for an on-premises Active Directory domain.\nOnce a trust is established, when a user logs into M365 using a federated domain, their request is redirected to the external identify provider (ADFS) where their authentication is validated (Figure 4). Once validated, the ADFS server provides the user a security token. This token is then trusted by M365 and grants the access to the platform.\nFigure 4: Microsoft 365 Federation Sign-in workflow AADInternals has a PowerShell function to craft security tokens, which mimics the ADFS authentication process. When providing the function a valid UserPrincipalName, Immutable ID and IssuerURI, an attacker can generate a security token as any user of the tenant. What’s even more concerning is that once this security token is generated, this can allow an attacker to bypass MFA.\nAs with Backdoor 1, this attack can either be performed from a compromised on-premises environment or from an attacker’s own infrastructure.\nMethod 1: On-Premises Compromise Once an attacker has gained access to an on-premises domain with elevated access, they can begin to collect the required information to craft their own security tokens to backdoor into M365 as any user. An attacker will require:\n- A valid UserPrincipalName and Immutable.\n- Both of these attributes can be pulled from the on-premises Active Directory domain.\n- IssuerURI of the ADFS server and ADFS Signing certificate.\n- This can be obtained from an ADFS server when directly logged into the server or remotely querying the server via an privileged account.\nOnce an attacker has collected the necessary information, using the AADInternals Open-AADIntOffice365Portal command, a security token for the user can be generated granting an attacker access to M365 (Figure 5).\nFigure 5: AADInternals Open-AADIntOffice365Portal command Method 2: Cloud Compromise If an attacker has a compromised an M365 Global Administrator account, using their own infrastructure, an attacker can use their administrative access to collect user information and reconfigure the tenant to establish their backdoor. In this method, an attacker will require:\n- A valid UserPrincipalName and valid ImmutableId.\n- Figure 6 shows how the Get-MsolUser command can obtain a user’s ImmutableId from Azure AD.\nFigure 6: Get-MsolUser—list user UPN & ImmutableId - IssuerURI - This can be obtained by converting a managed domain to a federated domain. Figures 7 through 10 show how the AADInternals ConvertTo-AADIntBackdoor command (Figure 8) can be used to allow attacker to register their own IssuerURI for a federated domain.\nFigure 7: Get-msoldomain—list of registered domains and authentication Figure 8: ConvertTo-AADIntBackdoor—convert domain to federated authentication Figure 9: Changed authentication method Figure 10: Azure AD Portal registered domains Note: To not interrupt production and authentication with an existing federated domain (and to remain undetected), an attacker may opt to register a new domain with the tenant.\nFigure 11: AADInternals Open-AADIntOffice365Portal Command using new Federated domain Once an attacker has properly configured the tenant, using the ImmutableId of any user, a security token can be generated by executing the Open-AADIntOffice365Portal command (Figure 11). This will allow an attacker to login as that user without the need for a valid certificate or a legitimate IssuerURI.\nFortunately for defenders, this method will generate a number of events in the unified audit log, which can be leveraged for monitoring and alerting.\nMitigation and Detection Once persistence is established, it can be extremely difficult to detect login activity that is utilizing one of the previously described methods. In lieu of this, it is recommended to monitor and alert on M365 unified audit logs and Azure AD sign-in activity to detect anomalous activity.\nDetection in FireEye Helix Being that Mandiant has seen this methodology being used in the wild, we felt it was necessary to build these detections into our FireEye Helix security platform. Helix engineers have created sever new detection rules that monitor for detectable activity of an attacker making use of the AADInternals PowerShell module.\nThe following five rules will monitor a server’s event logs and alert upon the installation and usage of the AADInternals PowerShell module (Figure 12). The detection of these activities could be high fidelity alerts that an attacker is preparing to configure backdoors into M365 and Azure AD environments.\nFigure 12: AADInternals Helix rules If an attacker has successfully configured a backdoor using AADInternals, Helix will alert upon the following events registered in the Office 365 unified audit log and Azure Activity Log as indication of a possible event (Figure 13 and Figure 14). It is important to note that these alerts could be triggered upon legitimate administrator activity. When responding to these alerts, first check with your M365 and Azure AD administrator to verify the activity before raising a security event.\nFigure 13: Office 365 and Azure Helix rules Figure 14: PTA Connector Registered alert description Hunting for Backdoors in M365 Unified Audit Logs and Azure AD Logs If you suspect a global administrator account was compromised and you want to review Azure AD for indicators of potential abuse, the following should be reviewed (note that these same concepts can be used for proactive log monitoring):\n- From Azure AD Sign-ins logs, monitor logon activity from On-Premises Directory Synchronization Service Accounts. This account is used by the Azure AD Connect service (Figure 15).\nFigure 15: Azure AD Sign-ins - Baseline the IP addresses used by this account and make sure the IPs match those assigned to the on-premises WAN infrastructure. If the attacker has configure a PTA Agent on their own infrastructure, seeing an IP that does not match your baseline could be an indicator that a rogue PTA Agent has been configured by the attacker (Figure 16).\nFigure 16: Azure AD Sign-in logs—On-Premises Directory Synchronization Services account From Azure AD Sign-ins, monitor and baseline Azure AD Sign-ins to the Azure AD Application Proxy Connector. Make sure to validate username, IP and location.\nThese events are typically only generated when a new PTA agent is connected to the tenant. This could be an indicator that an attacker has connected a rogue PTA server hosted on an attacker’s infrastructure (Figure 17).\nFigure 17: Azure AD Sign-in logs—Azure AD Application Proxy Connector If using Azure Sentinel, this event will also be registered in the Azure AuditLogs table as a “Register Connector” OperationName (Figure 18).\nFigure 18: Register Connector—Azure Sentinel logs - In the Azure Management Portal under the Azure AD Connect blade, review all registered servers running PTA Agent. The Authentication Agent and IP should match your infrastructure (Figure 19).\n- Log in to https://portal.azure.com - Select Azure AD Connect > Pass-through Authentication - Log in to https://portal.azure.com Figure 19: Azure Active Directory Pass-through Authentication agent status - Monitor and alert for \"Directory Administration Activity\" in Office 365 Security & Compliance Center’s unified audit log. When an attacker is able to create a domain federation within a compromised cloud tenant, and link this to attacker-owned infrastructure, this will generate activity in the log (Figure 21).\n- https://Protections.office.com/unifiedauitlog > Audit Log Search - Select Directory Administration Activates category to select all activities - Create New Alert Policy (Figure 20) Figure 20: Unified Audit Log > Create new alert policy Figure 21: Unified Audit Log filtered for domain related events - Using Azure Sentinel, more granular Directory Administration Activities can be modified for suspicious activity. This includes additions, deletions and modifications of domains and their authentication settings (Figure 22).\n- Monitoring for OfficeActivity Operations in Azure Sentinel can allow an organization to validate if this is normalized activity or if an attacker is working on setting up a backdoor for PTA or federation.\n- Table: OfficeActivity - Operation: Set-AcceptedDomain - Operation: Set-MsolDomainFederationSettings - Operation: Add-FederatedDomain - Operation: New-Accepted Domain - Operation: Remove-Accepted Domain - Operation: Remove-FederatedDomain - Table: OfficeActivity - Monitoring for OfficeActivity Operations in Azure Sentinel can allow an organization to validate if this is normalized activity or if an attacker is working on setting up a backdoor for PTA or federation.\nFigure 22: OfficeActivity Operations Azure Sentinel logs Detection On-Premises If an attacker is able to compromise on-premises infrastructure and access a server running AD Connect or ADFS services with the intention of leveraging a tool such as AADInternals to expand the scope of their access to include cloud, timely on-premises detection and containment is key. The following methods can be leveraged to ensure optimized visibility and detection for the scope of activities described in this post:\n- Treat ADFS and Azure AD Connect servers as Tier 0 assets.\n- Use a dedicated server for each. Do not install these roles and server in addition to other. All too often we are seeing Azure AD Connect running on a file server.\n- Ensure PowerShell logging is optimized on AD Connect and ADFS servers - Review Microsoft-Windows-PowerShell/Operational logs on ADFS and AADConnect Server Logs.\n- If PowerShell logging is enabled, search for Event ID 4101. This event ID will record the event where AADInternals was installed (Figure 23).\nFigure 23: EventID 410—Installed Module - Additionally, with this logging enabled, you will be able to review the PowerShell commands used by an attacker.\n- In PowerShell, run Get-Module -All and look for the presence of AADInternals (Figure 24).\nFigure 24: Get-Module command to list installed modules - Alert for the presence of C:\\PTASpy and C:\\PTASpy\\PTASpy.csv.\n- This is the default location of the log file that contains records of all the accounts that were intercepted by the tool. Remember, an attacker may also use this to harvest credentials, so it is important to reset the password for these accounts (Figure 25).\nFigure 25: PTASpy.csv log activity Mitigations In order for this attack to be successful, an attacker must gain administrative privileges on a server running Azure AD Connect and/or gain global administrator rights within M365. Simple practices such as limiting and properly protecting global administrator accounts as well as properly protecting Tier 0 assets can greatly reduce the risk of an attacker successfully using the AADInternals PowerShell against your organization.\n- Limit or restrict access to Azure AD Connect servers.\n- Any server acting as an identity provider or facilitating identity federation should be treated as a Tier 0 asset.\n- Create separate dedicated global administrator accounts.\n- Global administrators should be cloud-only accounts.\n- These accounts should not retain any licensing.\n- Implement MFA on all accounts: admins, users and services.\n- If a particular account cannot use MFA, apply a conditional access rule that limits its logon to a trusted network. This works particularly well for service accounts.\n- Establish a roadmap to block legacy authentication.\n- Limit which accounts are synced from on-premises to the cloud.\n- Do not sync privileged or service accounts to the cloud.\n- Use Azure administrative roles.\n- Not everybody or everything needs to be a global admin to administer the environment.\n- Use password hash sync over Pass-through Authentication.\n- Many organizations are reluctant to sync their password to Azure AD. The benefits from this service greatly outweigh the risks. Being able to use global and custom banned passwords lists, for both the cloud and on-premises, is a tremendous benefit.\n- Forward all M365 unified audit logs and Azure logs to a SIEM and build detections.\n- Ensure you are forwarding the logs recommended in this post and building the appropriate detections and playbooks within your security operations teams.\n- Specifically monitor for:\n- Set-AcceptedDomain - Set-MsolDomainFederationSettings - Add-FederatedDomain - New-Accepted Domain - Remove-Accepted Domain - Remove-FederatedDomain - Periodically review all identity providers and custom domains configured in the M365 tenant.\n- If an attacker is successful at gaining global administrative privileges, they may choose to add their own identity provider and custom domain to maintain persistence.\nAcknowledgements I want to give a special thanks to Daniel Taylor, Roberto Bamberger and Jennifer Kendall at Microsoft for collaborating with Mandiant on the creation of this blog post.",
+  "ID_list": [
+    "T1556.007"
+  ],
+  "Name_list": [
+    "Brute Force",
+    "Persistence",
+    "Phishing",
+    "PowerShell",
+    "Proxy"
+  ],
+  "TTP_sentences": {
+    "T1556.007": [
+      {
+        "sentence": "Detecting Microsoft 365 and Azure Active Directory Backdoors Mandiant Written by: Mike Burns Mandiant has seen an uptick in incidents involving Microsoft 365 (M365) and Azure Active Directory (Azure AD).",
+        "score": 0.589
+      },
+      {
+        "sentence": "Most of these incidents are the result of a phishing email coercing a user to enter their credentials used for accessing M365 into a phishing site.",
+        "score": 0.5419
+      },
+      {
+        "sentence": "Other incidents have been a result of password spraying, password stuffing, or simple brute force attempts against M365 tenants.",
+        "score": 0.3921
+      },
+      {
+        "sentence": "In almost all of these incidents, the user or account was not protected by multi-factor authentication (MFA).",
+        "score": 0.6968
+      },
+      {
+        "sentence": "These opportunistic attacks are certainly the most common form of compromise for M365 and Azure AD, and are usually the initial vector to establish persistence.",
+        "score": 0.5095
+      },
+      {
+        "sentence": "During both incident response (IR) engagements and proactive cloud assessments we are often asked: - What are some other types of attacks that Mandiant is seeing against M365 and Azure AD? - Is it possible for an on-premises compromise to “vertically” move to M365 and Azure AD? - If a global administrator account is compromised, is it possible to maintain persistence even after the compromised account has been detected, a password reset has occurred, and MFA has been applied?",
+        "score": 0.7278
+      },
+      {
+        "sentence": "AADInternals PowerShell Module In some incidents, Mandiant has witnessed attackers utilizing a PowerShell module called AADInternals, which can allow an attacker to vertically move from on-premises to Azure AD, establish backdoors, steal passwords, generate user security tokens, and bypass MFA protections.",
+        "score": 0.8
+      },
+      {
+        "sentence": "This PowerShell module has allowed attackers to maintain persistence in the tenant even after initial eradication efforts were conducted.",
+        "score": 0.4071
+      },
+      {
+        "sentence": "To see this module in action and understand how it works, Dr.",
+        "score": 0.3046
+      },
+      {
+        "sentence": "Nestori Syynimaa’s PSCONFEU 2020 presentation, Abusing Azure Active Directory: Who would you like to be today?, provides an in-depth overview of the module.",
+        "score": 0.5734
+      },
+      {
+        "sentence": "To detect the use of AADInternals, it is important to understand how some of these attacks work.",
+        "score": 0.3791
+      },
+      {
+        "sentence": "Once an understanding is established, abnormal usage can be detected through a combination of log analysis and host-based indicators.",
+        "score": 0.4007
+      },
+      {
+        "sentence": "Backdoor 1: Abusing Pass-Through Authentication Attacker Requirements - Local Administrative Access to a server running Pass-through Authentication Or - M365 global administrator credentials The AADInternals PowerShell module contains a function called Install-AADIntPTASPY.",
+        "score": 0.6964
+      },
+      {
+        "sentence": "The function works by inserting itself as a man-in-the-middle within the Pass-through Authentication (PTA) process that occurs between Azure AD and the server running the PTA Agent in the on-premises environment.",
+        "score": 0.4687
+      },
+      {
+        "sentence": "Commonly, the PTA Agent runs on the same on-premises server as Azure AD Connect (AAD Connect).",
+        "score": 0.5397
+      },
+      {
+        "sentence": "When PTA is enabled, every logon that occurs against Azure AD gets redirected to the PTA Agent on-premises.",
+        "score": 0.5925
+      },
+      {
+        "sentence": "The PTA Agent asks an on-premises Active Directory Domain Controller if a password is valid for an authenticating account.",
+        "score": 0.6806
+      },
+      {
+        "sentence": "If valid, the PTA Agent responds back to Azure AD to grant the requestor access.",
+        "score": 0.4935
+      },
+      {
+        "sentence": "Figure 1 provides the workflow of Pass-through Authentication and where AADInternals can intercept the request.",
+        "score": 0.4433
+      },
+      {
+        "sentence": "Figure 1: Pass-through Authentication workflow Once the function is running, every PTA attempt against Azure AD will be intercepted by the installed AADIntPTASpy module.",
+        "score": 0.5912
+      },
+      {
+        "sentence": "The module will record the user’s password attempt and reply back to Azure AD on behalf of the PTA Agent.",
+        "score": 0.5805
+      },
+      {
+        "sentence": "This reply advises Azure AD the password attempt was valid and grants the user access to the cloud, even if the password is incorrect.",
+        "score": 0.6541
+      },
+      {
+        "sentence": "If an attacker has implanted AADIntPTASpy, they can log in as any user that attempts to authenticate using PTA—and will be granted access.",
+        "score": 0.6693
+      },
+      {
+        "sentence": "Additionally, all password attempts that are registered by the AADIntPTASpy module are recorded within a log file on the server (Default location: C:\\PTASpy\\PTASPy.csv).",
+        "score": 0.5437
+      },
+      {
+        "sentence": "Figure 2 shows how the log file can be decoded to reveal a user’s password in cleartext.",
+        "score": 0.4184
+      },
+      {
+        "sentence": "Figure 2: PTASpy.csv decoded passwords Not only will this function allow an attacker to login as any user who authenticates via PTA, but it will also act as a repository for collecting user passwords who are legitimately logging into Azure AD.",
+        "score": 0.6463
+      },
+      {
+        "sentence": "This could allow an attacker to pivot their attack to other areas of the network—or use these credentials against other internet accessible portals that may leverage single-factor authentication (e.g., VPN gateway).",
+        "score": 0.6665
+      },
+      {
+        "sentence": "An attacker can use this module in one of two ways: Method 1: On-Premises Compromise An attacker has gained access to an on-premises domain and is able to laterally move to the AADConnect / PTA Agent Server.",
+        "score": 0.5646
+      },
+      {
+        "sentence": "From this server, an attacker can potentially leverage the AADInternals PowerShell module and invoke the Install-AADIntPTASpy function.",
+        "score": 0.4677
+      },
+      {
+        "sentence": "Method 2: Cloud Compromise If an attacker has successfully compromised an Azure AD global admin account, an attack can be conducted from an attacker’s own infrastructure.",
+        "score": 0.6576
+      },
+      {
+        "sentence": "An attacker can install a PTA Agent on a server they manage and register the agent using the compromised global administrator account (Figure 3).",
+        "score": 0.5705
+      },
+      {
+        "sentence": "Figure 3: Azure AD Portal—registered Pass-through Authentication agents Once registered with Azure AD, the rogue server will begin to intercept and authorize all login attempts.",
+        "score": 0.6877
+      },
+      {
+        "sentence": "As with Method 1, this server can also be used to harvest valid credentials.",
+        "score": 0.5214
+      },
+      {
+        "sentence": "Backdoor 2: Abusing Identity Federation Attacker Requirements - Local administrative access to AD and server running Active Directory Federation Services Or - M365 global administrator credentials Another method of authenticating to M365 is through the usage of federation services.",
+        "score": 0.8088
+      },
+      {
+        "sentence": "When a M365 domain is configured as a federated domain, a trust is configured between M365 and an external identify provider.",
+        "score": 0.5781
+      },
+      {
+        "sentence": "In many cases, this trust is established with an Active Directory Federation Services (ADFS) server for an on-premises Active Directory domain.",
+        "score": 0.6069
+      },
+      {
+        "sentence": "Once a trust is established, when a user logs into M365 using a federated domain, their request is redirected to the external identify provider (ADFS) where their authentication is validated (Figure 4).",
+        "score": 0.7523
+      },
+      {
+        "sentence": "Once validated, the ADFS server provides the user a security token.",
+        "score": 0.6407
+      },
+      {
+        "sentence": "This token is then trusted by M365 and grants the access to the platform.",
+        "score": 0.6492
+      },
+      {
+        "sentence": "Figure 4: Microsoft 365 Federation Sign-in workflow AADInternals has a PowerShell function to craft security tokens, which mimics the ADFS authentication process.",
+        "score": 0.7188
+      },
+      {
+        "sentence": "When providing the function a valid UserPrincipalName, Immutable ID and IssuerURI, an attacker can generate a security token as any user of the tenant.",
+        "score": 0.6803
+      },
+      {
+        "sentence": "What’s even more concerning is that once this security token is generated, this can allow an attacker to bypass MFA.",
+        "score": 0.6898
+      },
+      {
+        "sentence": "As with Backdoor 1, this attack can either be performed from a compromised on-premises environment or from an attacker’s own infrastructure.",
+        "score": 0.4304
+      },
+      {
+        "sentence": "Method 1: On-Premises Compromise Once an attacker has gained access to an on-premises domain with elevated access, they can begin to collect the required information to craft their own security tokens to backdoor into M365 as any user.",
+        "score": 0.7582
+      },
+      {
+        "sentence": "An attacker will require: - A valid UserPrincipalName and Immutable. - Both of these attributes can be pulled from the on-premises Active Directory domain. - IssuerURI of the ADFS server and ADFS Signing certificate. - This can be obtained from an ADFS server when directly logged into the server or remotely querying the server via an privileged account.",
+        "score": 0.7067
+      },
+      {
+        "sentence": "Once an attacker has collected the necessary information, using the AADInternals Open-AADIntOffice365Portal command, a security token for the user can be generated granting an attacker access to M365 (Figure 5).",
+        "score": 0.6859
+      },
+      {
+        "sentence": "Figure 5: AADInternals Open-AADIntOffice365Portal command Method 2: Cloud Compromise If an attacker has a compromised an M365 Global Administrator account, using their own infrastructure, an attacker can use their administrative access to collect user information and reconfigure the tenant to establish their backdoor.",
+        "score": 0.6795
+      },
+      {
+        "sentence": "In this method, an attacker will require: - A valid UserPrincipalName and valid ImmutableId. - Figure 6 shows how the Get-MsolUser command can obtain a user’s ImmutableId from Azure AD.",
+        "score": 0.6783
+      },
+      {
+        "sentence": "Figure 6: Get-MsolUser—list user UPN & ImmutableId - IssuerURI - This can be obtained by converting a managed domain to a federated domain.",
+        "score": 0.6027
+      },
+      {
+        "sentence": "Figures 7 through 10 show how the AADInternals ConvertTo-AADIntBackdoor command (Figure 8) can be used to allow attacker to register their own IssuerURI for a federated domain.",
+        "score": 0.527
+      },
+      {
+        "sentence": "Figure 7: Get-msoldomain—list of registered domains and authentication Figure 8: ConvertTo-AADIntBackdoor—convert domain to federated authentication Figure 9: Changed authentication method Figure 10: Azure AD Portal registered domains Note: To not interrupt production and authentication with an existing federated domain (and to remain undetected), an attacker may opt to register a new domain with the tenant.",
+        "score": 0.6976
+      },
+      {
+        "sentence": "Figure 11: AADInternals Open-AADIntOffice365Portal Command using new Federated domain Once an attacker has properly configured the tenant, using the ImmutableId of any user, a security token can be generated by executing the Open-AADIntOffice365Portal command (Figure 11).",
+        "score": 0.6768
+      },
+      {
+        "sentence": "This will allow an attacker to login as that user without the need for a valid certificate or a legitimate IssuerURI.",
+        "score": 0.6981
+      },
+      {
+        "sentence": "Fortunately for defenders, this method will generate a number of events in the unified audit log, which can be leveraged for monitoring and alerting.",
+        "score": 0.3426
+      },
+      {
+        "sentence": "Mitigation and Detection Once persistence is established, it can be extremely difficult to detect login activity that is utilizing one of the previously described methods.",
+        "score": 0.5696
+      },
+      {
+        "sentence": "In lieu of this, it is recommended to monitor and alert on M365 unified audit logs and Azure AD sign-in activity to detect anomalous activity.",
+        "score": 0.66
+      },
+      {
+        "sentence": "Detection in FireEye Helix Being that Mandiant has seen this methodology being used in the wild, we felt it was necessary to build these detections into our FireEye Helix security platform.",
+        "score": 0.4981
+      },
+      {
+        "sentence": "Helix engineers have created sever new detection rules that monitor for detectable activity of an attacker making use of the AADInternals PowerShell module.",
+        "score": 0.4365
+      },
+      {
+        "sentence": "The following five rules will monitor a server’s event logs and alert upon the installation and usage of the AADInternals PowerShell module (Figure 12).",
+        "score": 0.3856
+      },
+      {
+        "sentence": "The detection of these activities could be high fidelity alerts that an attacker is preparing to configure backdoors into M365 and Azure AD environments.",
+        "score": 0.5451
+      },
+      {
+        "sentence": "Figure 12: AADInternals Helix rules If an attacker has successfully configured a backdoor using AADInternals, Helix will alert upon the following events registered in the Office 365 unified audit log and Azure Activity Log as indication of a possible event (Figure 13 and Figure 14).",
+        "score": 0.4618
+      },
+      {
+        "sentence": "It is important to note that these alerts could be triggered upon legitimate administrator activity.",
+        "score": 0.4238
+      },
+      {
+        "sentence": "When responding to these alerts, first check with your M365 and Azure AD administrator to verify the activity before raising a security event.",
+        "score": 0.4763
+      },
+      {
+        "sentence": "This account is used by the Azure AD Connect service (Figure 15).",
+        "score": 0.6163
+      },
+      {
+        "sentence": "Figure 15: Azure AD Sign-ins - Baseline the IP addresses used by this account and make sure the IPs match those assigned to the on-premises WAN infrastructure.",
+        "score": 0.5585
+      },
+      {
+        "sentence": "If the attacker has configure a PTA Agent on their own infrastructure, seeing an IP that does not match your baseline could be an indicator that a rogue PTA Agent has been configured by the attacker (Figure 16).",
+        "score": 0.3947
+      },
+      {
+        "sentence": "Figure 16: Azure AD Sign-in logs—On-Premises Directory Synchronization Services account From Azure AD Sign-ins, monitor and baseline Azure AD Sign-ins to the Azure AD Application Proxy Connector.",
+        "score": 0.6383
+      },
+      {
+        "sentence": "Make sure to validate username, IP and location.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "These events are typically only generated when a new PTA agent is connected to the tenant.",
+        "score": 0.409
+      },
+      {
+        "sentence": "This could be an indicator that an attacker has connected a rogue PTA server hosted on an attacker’s infrastructure (Figure 17).",
+        "score": 0.3888
+      },
+      {
+        "sentence": "Figure 17: Azure AD Sign-in logs—Azure AD Application Proxy Connector If using Azure Sentinel, this event will also be registered in the Azure AuditLogs table as a “Register Connector” OperationName (Figure 18).",
+        "score": 0.6474
+      },
+      {
+        "sentence": "Figure 18: Register Connector—Azure Sentinel logs - In the Azure Management Portal under the Azure AD Connect blade, review all registered servers running PTA Agent.",
+        "score": 0.5163
+      },
+      {
+        "sentence": "The Authentication Agent and IP should match your infrastructure (Figure 19). - Log in to https://portal.azure.com - Select Azure AD Connect > Pass-through Authentication - Log in to https://portal.azure.com Figure 19: Azure Active Directory Pass-through Authentication agent status - Monitor and alert for \"Directory Administration Activity\" in Office 365 Security & Compliance Center’s unified audit log.",
+        "score": 0.7233
+      },
+      {
+        "sentence": "Figure 22: OfficeActivity Operations Azure Sentinel logs Detection On-Premises If an attacker is able to compromise on-premises infrastructure and access a server running AD Connect or ADFS services with the intention of leveraging a tool such as AADInternals to expand the scope of their access to include cloud, timely on-premises detection and containment is key.",
+        "score": 0.6338
+      },
+      {
+        "sentence": "The following methods can be leveraged to ensure optimized visibility and detection for the scope of activities described in this post: - Treat ADFS and Azure AD Connect servers as Tier 0 assets. - Use a dedicated server for each.",
+        "score": 0.5406
+      },
+      {
+        "sentence": "Do not install these roles and server in addition to other.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "All too often we are seeing Azure AD Connect running on a file server. - Ensure PowerShell logging is optimized on AD Connect and ADFS servers - Review Microsoft-Windows-PowerShell/Operational logs on ADFS and AADConnect Server Logs. - If PowerShell logging is enabled, search for Event ID 4101.",
+        "score": 0.4395
+      },
+      {
+        "sentence": "This event ID will record the event where AADInternals was installed (Figure 23).",
+        "score": 0.3079
+      },
+      {
+        "sentence": "Figure 23: EventID 410—Installed Module - Additionally, with this logging enabled, you will be able to review the PowerShell commands used by an attacker. - In PowerShell, run Get-Module -All and look for the presence of AADInternals (Figure 24).",
+        "score": 0.419
+      },
+      {
+        "sentence": "Figure 24: Get-Module command to list installed modules - Alert for the presence of C:\\PTASpy and C:\\PTASpy\\PTASpy.csv. - This is the default location of the log file that contains records of all the accounts that were intercepted by the tool.",
+        "score": 0.4258
+      },
+      {
+        "sentence": "Remember, an attacker may also use this to harvest credentials, so it is important to reset the password for these accounts (Figure 25).",
+        "score": 0.6113
+      },
+      {
+        "sentence": "Figure 25: PTASpy.csv log activity Mitigations In order for this attack to be successful, an attacker must gain administrative privileges on a server running Azure AD Connect and/or gain global administrator rights within M365.",
+        "score": 0.6741
+      },
+      {
+        "sentence": "This works particularly well for service accounts. - Establish a roadmap to block legacy authentication. - Limit which accounts are synced from on-premises to the cloud. - Do not sync privileged or service accounts to the cloud. - Use Azure administrative roles. - Not everybody or everything needs to be a global admin to administer the environment. - Use password hash sync over Pass-through Authentication. - Many organizations are reluctant to sync their password to Azure AD.",
+        "score": 0.7307
+      },
+      {
+        "sentence": "The benefits from this service greatly outweigh the risks.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "Acknowledgements I want to give a special thanks to Daniel Taylor, Roberto Bamberger and Jennifer Kendall at Microsoft for collaborating with Mandiant on the creation of this blog post.",
+        "score": 0.3416
+      }
+    ]
+  }
+}

@@ -1,0 +1,1991 @@
+{
+  "original_txt": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques. To achieve persistence, the malware registers a new local port monitor - a trick falling under the “\nPort Monitors\n” technique in the\nMITRE ATT&CK knowledgebase\n. For that, the malware uses the “Windows Default Print Monitor” name; that’s why we have named it DePriMon. Due to its complexity and modular architecture, we consider it to be a framework.\nAccording to our telemetry, DePriMon has been active since at least March 2017. DePriMon was detected in a private company, based in Central Europe, and at dozens of computers in the Middle East.\nSome of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign. However, DePriMon deserves attention beyond its targets’ geographical distribution: it is carefully written malware, with lots of encryption that is used properly.\nTo help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself. Because we’re missing initial stage(s), which we will refer to here as \"the first stage\", we don't know the initial distribution and compromise vector. What kind of final payload is used in the attacks is another question that remains to be answered.\nHowever, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame. ColoredLambert is used by the Lamberts (aka Longhorn) cyberespionage group and linked to the Vault 7 leak of CIA capabilities. Our colleagues from\nSymantec\nand\nKaspersky\npublished their analyses in April 2017.\nTechnical analysis\nStage two\nBoth DePriMon’s second and third stages are delivered to the victim’s disk in the first stage. The second stage installs itself and loads the third stage using an encrypted, hardcoded path. One of the possible explanations is that it was configured after the first stage of the attack occurred.\nThe described installation technique is unique. In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics. We believe DePriMon is the first example of malware using this technique ever publicly described.\nThe second stage registers the third-stage DLL as a port monitor by creating the following registry key and value:\nHKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors\\Windows Default Print Monitor\nDriver = %PathToThirdStageDLL%\nAdministrator rights are required for creating this registry key.\nAt system startup, the registered DLL will be loaded by\nspoolsv.exe\nwith\nSYSTEM\nprivileges, which, combined with the uniqueness of this method, makes this technique very effective for attackers.\nThe second stage checks regularly whether there is a file in the\n%system32%\nfolder with the same name as the third stage DLL file but without the “.dll” extension. This file serves as an uninstallation trigger – should DePriMon find it, it removes both this file and its own components in a secure way by overwriting the binaries and then deleting them.\nStage three\nThe third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.\nFor C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like\nWinHTTP\nor\nWinInet\n. Its configuration is very complex, as is the way the malware handles it. Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.\nC&C communication\nDePriMon communicates securely over TLS, however, not on a high level as is a typical scenario in malware. The connection is initialized with a Windows socket and can continue with initialization of an authenticated Security Support Provider Interface (SSPI) session with the Negotiate / NTLM SSP. After that, DePriMon uses Schannel.\nSSPI is used/not used according to a particular flag in the configuration file and can utilize the local proxy settings of the machine. The implementation is similar to this\nexample provided by Microsoft\n.\nThe malware’s implementation of TLS via Schannel is similar to this\nexample by Coast Research & Development\n. It includes creating credentials, performing the client handshake and verifying the server certificate.\nFigure 1. Part of the SSPI implementation as output by the Hex-Rays decompiler\nAfter the communication is established, the third stage encrypts and decrypts messages manually each time.\nConfiguration\nThe configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader. It is encrypted with AES-256 and embedded in the binary.\nDuring the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder. The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”. The extension of the configuration file is “.tmp”.\nAn example of a configuration file path:\n%temp%\\rb1us0wm99sslpa1vx.tmp\n.\nDuring the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.\nThanks to its secure design, the configuration is not left in memory in unencrypted form. Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.\nThis design protects the malware’s primary function – C&C communication - against memory forensics.\nFigure 2. Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again\nOf interest in the configuration file are:\nTwo entries for usernames and two members for passwords – for the proxy server if it is set on the machine. It means attackers are preparing to further their attack via a proxy with credentials. However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.\nThree entries for three C&C servers – each of them used on a different occasion.\nThree entries for three ports – each of them used on a different occasion.\nFlags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).\nIt should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.\nEncryption\nThe malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).\nKey 1: For decryption of various sensitive strings in the malware.\nKey 2: For encryption and decryption of the configuration data in memory (as described earlier). This key is also used to generate the third key.\nKey 3: For encryption and decryption of the configuration file on disk.\nThis key is not hardcoded but derived using a 32-byte array which is then encrypted. The array is generated as follows: the first 4 bytes are the volume serial number of the system drive, and the remaining 28 bytes contain the values 5 – 32. This array is encrypted with Key 2, resulting in Key 3.\nConclusion\nDePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.\nDePriMon is downloaded to memory and executed directly from there as a DLL using the reflective DLL loading technique. It is never stored on disk. It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.\nAs a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.\nIndicators of Compromise (IoCs)\nESET detection names\nWin32/DePriMon\nWin64/DePriMon\nSHA-1 hashes\n02B38F6E8B54885FA967851A5580F61C14A0AAB6\n03E047DD4CECB16F513C44599BF9B8BA82D0B7CB\n0996C280AB704E95C9043C5A250CCE077DF9C8B2\n15EBE328A501B1D603E66762FBB4583D73E109F7\n1911F6E8B05E38A3C994048C759C5EA2B95CE5F7\n2B30BE3F39DEF1F404264D8858B89769E6C032D9\n2D80B235CDF41E09D055DD1B01FD690E13BE0AC7\n6DB79671A3F31F7A9BB870151792A56276619DC1\n6FAB7AA0479D41700981983A39F962F28CCFBE29\n7D0B08654B47329AD6AE44B8FF158105EA736BC3\n7E8A7273C5A0D49DFE6DA04FEF963E30D5258814\n8B4F3A06BA41F859E4CC394985BB788D5F76C85C\n94C0BE25077D9A76F14A63CBF7A774A96E8006B8\n968B52550062848A717027C512AFEDED19254F58\n9C4BADE47865E8111DD3EEE6C5C4BC83F2489F5B\nAA59CB6715CFFF545579861E5E77308F6CAEAC36\nC2388C2B2ED6063EACBA8A4021CE32EB0929FAD2\nCA34050771678C65040065822729F44B35C87B0C\nD38045B42C7E87C199993AB929AD92ADE4F82398\nE272FDA0E9BA1A1B8EF444FF5F2E8EE419746384\nE2D39E290201010F49652EE6116FD9B35C9AD882\nF413EEE3CFD85A60D7AFC4D4ECC4445BB1F0B8BC\nDomains\nDomain\nIP address\nimg.dealscienters[.]net\n138.59.32.72\nteknikgorus[.]com\n88.119.179.17\nwnupdnew[.]com\n190.0.226.147\nbabmaftuh[.]com\n185.56.89.196\nalwatantrade[.]com\n188.241.60.109\nshayalyawm[.]com\n5.226.168.124\nelehenishing[.]com\n185.225.17.77\nalmawaddrial[.]com\n46.151.212.202\nmdeastserv[.]com\n46.151.212.201\nKeys - example\nKey 1:\nC097CF17DC3303BC8155534350464E50176ACA63842B0973831D8C6C8F136817\nKey 2:\n8D35913F80A23E820C23B3125ABF57901BC9A7B83283FB2B240193ABDEDE52B9\nKey 3: Derived as described earlier.\nFilenames\ndpnvmrs.dll\nhp3mlnv.dll\nhp4mlnv.dll\nhp5nhd.dll\nhp6nhd.dll\nhpjdnb64.dll\nhpmdnel3b.dll\nifssvc.dll\nifssvcmgr.dll\nmsprtmon64.dll\nmsptromn.dll\nplamgr.dll\nppcrlchk.dll\nppcrlupd.dll\nprntapt.dll\nprntqdl64.dll\npscript6f.dll\npscript6s.dll\nshprn64.dll\nstprn32.dll\nwinmnprt.dll\nMITRE ATT&CK techniques\nTactic\nID\nName\nDescription\nPersistence\nT1013\nPort Monitors\nDePriMon installs one of its components as a port monitor for achieving persistence.\nDefense Evasion\nT1036\nMasquerading\nDePriMon places its components into the System32 folder with names mimicking common system DLLs.\nT1107\nFile Deletion\nDePriMon can delete itself securely by overwriting its files with random data and then deleting them.\nT1112\nModify Registry\nDePriMon adds registry entry in\nHKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors\nto achieve persistence.\nT1134\nAccess Token Manipulation\nDePriMon obtains a user token for obtaining information about the proxy settings on the machine.\nT1140\nDeobfuscate/Decode Files or Information\nDePriMon encrypts some of its strings and its configuration file using AES-256.\nDiscovery\nT1007\nSystem Service Discovery\nDePriMon can list registered services on the system.\nT1057\nProcess Discovery\nDePriMon can list running processes on the system.\nT1082\nSystem Information Discovery\nDePriMon collects various information about the system.\nT1124\nSystem Time Discovery\nDePriMon regularly checks system time and performs various actions based on it, such as uninstallation.\nCommand And Control\nT1043\nCommonly Used Port\nDePriMon uses ports 443 and 8080 for C&C communication.\nT1071\nStandard Application Layer Protocol\nDePriMon uses HTTP for C&C communication.\nT1090\nConnection Proxy\nDePriMon uses local proxy settings to make its communication less suspicious.",
+  "sanitized_txt": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques. To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase . For that, the malware uses the “Windows Default Print Monitor” name; that’s why we have named it DePriMon. Due to its complexity and modular architecture, we consider it to be a framework.\nAccording to our telemetry, DePriMon has been active since at least March 2017. DePriMon was detected in a private company, based in Central Europe, and at dozens of computers in the Middle East.\nSome of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign. However, DePriMon deserves attention beyond its targets’ geographical distribution: it is carefully written malware, with lots of encryption that is used properly.\nTo help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself. Because we’re missing initial stage(s), which we will refer to here as \"the first stage\", we don't know the initial distribution and compromise vector. What kind of final payload is used in the attacks is another question that remains to be answered.\nHowever, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame. ColoredLambert is used by the Lamberts (aka Longhorn) cyberespionage group and linked to the Vault 7 leak of CIA capabilities. Our colleagues from Symantec and Kaspersky published their analyses in April 2017.\nTechnical analysis Stage two Both DePriMon’s second and third stages are delivered to the victim’s disk in the first stage. The second stage installs itself and loads the third stage using an encrypted, hardcoded path. One of the possible explanations is that it was configured after the first stage of the attack occurred.\nThe described installation technique is unique. In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics. We believe DePriMon is the first example of malware using this technique ever publicly described.\nThe second stage registers the third-stage DLL as a port monitor by creating the following registry key and value:\nHKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors\\Windows Default Print Monitor Driver = %PathToThirdStageDLL% Administrator rights are required for creating this registry key.\nAt system startup, the registered DLL will be loaded by spoolsv.exe with SYSTEM privileges, which, combined with the uniqueness of this method, makes this technique very effective for attackers.\nThe second stage checks regularly whether there is a file in the %system32% folder with the same name as the third stage DLL file but without the “.dll” extension. This file serves as an uninstallation trigger – should DePriMon find it, it removes both this file and its own components in a secure way by overwriting the binaries and then deleting them.\nStage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.\nFor C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like WinHTTP or WinInet . Its configuration is very complex, as is the way the malware handles it. Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.\nC&C communication DePriMon communicates securely over TLS, however, not on a high level as is a typical scenario in malware. The connection is initialized with a Windows socket and can continue with initialization of an authenticated Security Support Provider Interface (SSPI) session with the Negotiate / NTLM SSP. After that, DePriMon uses Schannel.\nSSPI is used/not used according to a particular flag in the configuration file and can utilize the local proxy settings of the machine. The implementation is similar to this example provided by Microsoft .\nThe malware’s implementation of TLS via Schannel is similar to this example by Coast Research & Development . It includes creating credentials, performing the client handshake and verifying the server certificate.\nFigure 1. Part of the SSPI implementation as output by the Hex-Rays decompiler After the communication is established, the third stage encrypts and decrypts messages manually each time.\nConfiguration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader. It is encrypted with AES-256 and embedded in the binary.\nDuring the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder. The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”. The extension of the configuration file is “.tmp”.\nAn example of a configuration file path:\n%temp%\\rb1us0wm99sslpa1vx.tmp .\nDuring the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.\nThanks to its secure design, the configuration is not left in memory in unencrypted form. Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.\nThis design protects the malware’s primary function – C&C communication - against memory forensics.\nFigure 2. Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are:\nTwo entries for usernames and two members for passwords – for the proxy server if it is set on the machine. It means attackers are preparing to further their attack via a proxy with credentials. However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.\nThree entries for three C&C servers – each of them used on a different occasion.\nThree entries for three ports – each of them used on a different occasion.\nFlags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).\nIt should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.\nEncryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).\nKey 1: For decryption of various sensitive strings in the malware.\nKey 2: For encryption and decryption of the configuration data in memory (as described earlier). This key is also used to generate the third key.\nKey 3: For encryption and decryption of the configuration file on disk.\nThis key is not hardcoded but derived using a 32-byte array which is then encrypted. The array is generated as follows: the first 4 bytes are the volume serial number of the system drive, and the remaining 28 bytes contain the values 5 – 32. This array is encrypted with Key 2, resulting in Key 3.\nConclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.\nDePriMon is downloaded to memory and executed directly from there as a DLL using the reflective DLL loading technique. It is never stored on disk. It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.\nAs a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.\nIndicators of Compromise (IoCs) ESET detection names Win32/DePriMon Win64/DePriMon SHA-1 hashes 02B38F6E8B54885FA967851A5580F61C14A0AAB6 03E047DD4CECB16F513C44599BF9B8BA82D0B7CB 0996C280AB704E95C9043C5A250CCE077DF9C8B2 15EBE328A501B1D603E66762FBB4583D73E109F7 1911F6E8B05E38A3C994048C759C5EA2B95CE5F7 2B30BE3F39DEF1F404264D8858B89769E6C032D9 2D80B235CDF41E09D055DD1B01FD690E13BE0AC7 6DB79671A3F31F7A9BB870151792A56276619DC1 6FAB7AA0479D41700981983A39F962F28CCFBE29 7D0B08654B47329AD6AE44B8FF158105EA736BC3 7E8A7273C5A0D49DFE6DA04FEF963E30D5258814 8B4F3A06BA41F859E4CC394985BB788D5F76C85C 94C0BE25077D9A76F14A63CBF7A774A96E8006B8 968B52550062848A717027C512AFEDED19254F58 9C4BADE47865E8111DD3EEE6C5C4BC83F2489F5B AA59CB6715CFFF545579861E5E77308F6CAEAC36 C2388C2B2ED6063EACBA8A4021CE32EB0929FAD2 CA34050771678C65040065822729F44B35C87B0C D38045B42C7E87C199993AB929AD92ADE4F82398 E272FDA0E9BA1A1B8EF444FF5F2E8EE419746384 E2D39E290201010F49652EE6116FD9B35C9AD882 F413EEE3CFD85A60D7AFC4D4ECC4445BB1F0B8BC Domains Domain IP address img.dealscienters[.]net 138.59.32.72 teknikgorus[.]com 88.119.179.17 wnupdnew[.]com 190.0.226.147 babmaftuh[.]com 185.56.89.196 alwatantrade[.]com 188.241.60.109 shayalyawm[.]com 5.226.168.124 elehenishing[.]com 185.225.17.77 almawaddrial[.]com 46.151.212.202 mdeastserv[.]com 46.151.212.201 Keys - example Key 1:\nC097CF17DC3303BC8155534350464E50176ACA63842B0973831D8C6C8F136817 Key 2:\n8D35913F80A23E820C23B3125ABF57901BC9A7B83283FB2B240193ABDEDE52B9 Key 3: Derived as described earlier.",
+  "ID_list": [
+    "T1007",
+    "T1013",
+    "T1036",
+    "T1043",
+    "T1057",
+    "T1071",
+    "T1082",
+    "T1090",
+    "T1107",
+    "T1112",
+    "T1124",
+    "T1134",
+    "T1140"
+  ],
+  "Name_list": [
+    "Persistence",
+    "Proxy"
+  ],
+  "TTP_sentences": {
+    "T1013": [
+      {
+        "sentence": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques.",
+        "score": 0.3386
+      },
+      {
+        "sentence": "To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase .",
+        "score": 0.5682
+      },
+      {
+        "sentence": "For that, the malware uses the “Windows Default Print Monitor” name; that’s why we have named it DePriMon.",
+        "score": 0.4557
+      },
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.3628
+      },
+      {
+        "sentence": "Technical analysis Stage two Both DePriMon’s second and third stages are delivered to the victim’s disk in the first stage.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.4446
+      },
+      {
+        "sentence": "One of the possible explanations is that it was configured after the first stage of the attack occurred.",
+        "score": 0.3392
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.3009
+      },
+      {
+        "sentence": "The second stage registers the third-stage DLL as a port monitor by creating the following registry key and value: HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors\\Windows Default Print Monitor Driver = %PathToThirdStageDLL% Administrator rights are required for creating this registry key.",
+        "score": 0.7005
+      },
+      {
+        "sentence": "At system startup, the registered DLL will be loaded by spoolsv.exe with SYSTEM privileges, which, combined with the uniqueness of this method, makes this technique very effective for attackers.",
+        "score": 0.6196
+      },
+      {
+        "sentence": "The second stage checks regularly whether there is a file in the %system32% folder with the same name as the third stage DLL file but without the “.dll” extension.",
+        "score": 0.3939
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "SSPI is used/not used according to a particular flag in the configuration file and can utilize the local proxy settings of the machine.",
+        "score": 0.3
+      },
+      {
+        "sentence": "Configuration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.4082
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.3996
+      },
+      {
+        "sentence": "An example of a configuration file path: %temp%\\rb1us0wm99sslpa1vx.tmp .",
+        "score": 0.3054
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.324
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.4262
+      },
+      {
+        "sentence": "Flags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).",
+        "score": 0.3089
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3119
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3118
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3455
+      },
+      {
+        "sentence": "This key is also used to generate the third key.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.3612
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.3251
+      },
+      {
+        "sentence": "The array is generated as follows: the first 4 bytes are the volume serial number of the system drive, and the remaining 28 bytes contain the values 5 – 32.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "This array is encrypted with Key 2, resulting in Key 3.",
+        "score": 0.3757
+      },
+      {
+        "sentence": "DePriMon is downloaded to memory and executed directly from there as a DLL using the reflective DLL loading technique.",
+        "score": 0.4317
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.3256
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.5735
+      },
+      {
+        "sentence": "Defense Evasion Masquerading DePriMon places its components into the System32 folder with names mimicking common system DLLs.",
+        "score": 0.4711
+      },
+      {
+        "sentence": "Modify Registry DePriMon adds registry entry in HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors to achieve persistence.",
+        "score": 0.524
+      },
+      {
+        "sentence": "System Information Discovery DePriMon collects various information about the system.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.3601
+      },
+      {
+        "sentence": "Connection Proxy DePriMon uses local proxy settings to make its communication less suspicious.",
+        "score": 0.3286
+      }
+    ],
+    "T1036": [
+      {
+        "sentence": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques.",
+        "score": 0.4718
+      },
+      {
+        "sentence": "For that, the malware uses the “Windows Default Print Monitor” name; that’s why we have named it DePriMon.",
+        "score": 0.5627
+      },
+      {
+        "sentence": "Due to its complexity and modular architecture, we consider it to be a framework.",
+        "score": 0.325
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.396
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.3602
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.4011
+      },
+      {
+        "sentence": "The described installation technique is unique.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.3523
+      },
+      {
+        "sentence": "At system startup, the registered DLL will be loaded by spoolsv.exe with SYSTEM privileges, which, combined with the uniqueness of this method, makes this technique very effective for attackers.",
+        "score": 0.3391
+      },
+      {
+        "sentence": "The second stage checks regularly whether there is a file in the %system32% folder with the same name as the third stage DLL file but without the “.dll” extension.",
+        "score": 0.3966
+      },
+      {
+        "sentence": "This file serves as an uninstallation trigger – should DePriMon find it, it removes both this file and its own components in a secure way by overwriting the binaries and then deleting them.",
+        "score": 0.4679
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.337
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.4328
+      },
+      {
+        "sentence": "The implementation is similar to this example provided by Microsoft .",
+        "score": 0.3224
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.3769
+      },
+      {
+        "sentence": "The extension of the configuration file is “.tmp”.",
+        "score": 0.3263
+      },
+      {
+        "sentence": "An example of a configuration file path: %temp%\\rb1us0wm99sslpa1vx.tmp .",
+        "score": 0.3484
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3576
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.4082
+      },
+      {
+        "sentence": "DePriMon is downloaded to memory and executed directly from there as a DLL using the reflective DLL loading technique.",
+        "score": 0.3436
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "Defense Evasion Masquerading DePriMon places its components into the System32 folder with names mimicking common system DLLs.",
+        "score": 0.6913
+      },
+      {
+        "sentence": "File Deletion DePriMon can delete itself securely by overwriting its files with random data and then deleting them.",
+        "score": 0.3043
+      },
+      {
+        "sentence": "Modify Registry DePriMon adds registry entry in HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors to achieve persistence.",
+        "score": 0.3027
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3796
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.358
+      },
+      {
+        "sentence": "Connection Proxy DePriMon uses local proxy settings to make its communication less suspicious.",
+        "score": 0.3131
+      }
+    ],
+    "T1071": [
+      {
+        "sentence": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques.",
+        "score": 0.3332
+      },
+      {
+        "sentence": "To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase .",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Due to its complexity and modular architecture, we consider it to be a framework.",
+        "score": 0.3905
+      },
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3164
+      },
+      {
+        "sentence": "Some of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign.",
+        "score": 0.4523
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.3902
+      },
+      {
+        "sentence": "Because we’re missing initial stage(s), which we will refer to here as \"the first stage\", we don't know the initial distribution and compromise vector.",
+        "score": 0.3175
+      },
+      {
+        "sentence": "What kind of final payload is used in the attacks is another question that remains to be answered.",
+        "score": 0.4476
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.3049
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.3503
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.4796
+      },
+      {
+        "sentence": "For C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like WinHTTP or WinInet .",
+        "score": 0.6747
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.3696
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "C&C communication DePriMon communicates securely over TLS, however, not on a high level as is a typical scenario in malware.",
+        "score": 0.6965
+      },
+      {
+        "sentence": "The connection is initialized with a Windows socket and can continue with initialization of an authenticated Security Support Provider Interface (SSPI) session with the Negotiate / NTLM SSP.",
+        "score": 0.5425
+      },
+      {
+        "sentence": "SSPI is used/not used according to a particular flag in the configuration file and can utilize the local proxy settings of the machine.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "The malware’s implementation of TLS via Schannel is similar to this example by Coast Research & Development .",
+        "score": 0.4646
+      },
+      {
+        "sentence": "It includes creating credentials, performing the client handshake and verifying the server certificate.",
+        "score": 0.4242
+      },
+      {
+        "sentence": "Part of the SSPI implementation as output by the Hex-Rays decompiler After the communication is established, the third stage encrypts and decrypts messages manually each time.",
+        "score": 0.4979
+      },
+      {
+        "sentence": "Configuration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader.",
+        "score": 0.3342
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.381
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.4265
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3351
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.4254
+      },
+      {
+        "sentence": "This design protects the malware’s primary function – C&C communication - against memory forensics.",
+        "score": 0.4478
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.4092
+      },
+      {
+        "sentence": "It means attackers are preparing to further their attack via a proxy with credentials.",
+        "score": 0.4868
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "Three entries for three C&C servers – each of them used on a different occasion.",
+        "score": 0.4819
+      },
+      {
+        "sentence": "Three entries for three ports – each of them used on a different occasion.",
+        "score": 0.5136
+      },
+      {
+        "sentence": "Flags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).",
+        "score": 0.5782
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.538
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3879
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3757
+      },
+      {
+        "sentence": "This key is also used to generate the third key.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.3521
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "This array is encrypted with Key 2, resulting in Key 3.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.3862
+      },
+      {
+        "sentence": "It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.",
+        "score": 0.5365
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.4326
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.3048
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3823
+      },
+      {
+        "sentence": "Process Discovery DePriMon can list running processes on the system.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "Command And Control Commonly Used Port DePriMon uses ports 443 and 8080 for C&C communication.",
+        "score": 0.7103
+      },
+      {
+        "sentence": "Standard Application Layer Protocol DePriMon uses HTTP for C&C communication.",
+        "score": 0.6892
+      },
+      {
+        "sentence": "Connection Proxy DePriMon uses local proxy settings to make its communication less suspicious.",
+        "score": 0.4362
+      }
+    ],
+    "T1107": [
+      {
+        "sentence": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.3128
+      },
+      {
+        "sentence": "Technical analysis Stage two Both DePriMon’s second and third stages are delivered to the victim’s disk in the first stage.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.3215
+      },
+      {
+        "sentence": "This file serves as an uninstallation trigger – should DePriMon find it, it removes both this file and its own components in a secure way by overwriting the binaries and then deleting them.",
+        "score": 0.7979
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.327
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.4311
+      },
+      {
+        "sentence": "Part of the SSPI implementation as output by the Hex-Rays decompiler After the communication is established, the third stage encrypts and decrypts messages manually each time.",
+        "score": 0.3222
+      },
+      {
+        "sentence": "Configuration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader.",
+        "score": 0.3045
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.3887
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.347
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.3724
+      },
+      {
+        "sentence": "An example of a configuration file path: %temp%\\rb1us0wm99sslpa1vx.tmp .",
+        "score": 0.3219
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3589
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3851
+      },
+      {
+        "sentence": "This design protects the malware’s primary function – C&C communication - against memory forensics.",
+        "score": 0.3072
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3357
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3429
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.3856
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.3774
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "File Deletion DePriMon can delete itself securely by overwriting its files with random data and then deleting them.",
+        "score": 0.8048
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.4891
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.3408
+      }
+    ],
+    "T1134": [
+      {
+        "sentence": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase .",
+        "score": 0.3175
+      },
+      {
+        "sentence": "For that, the malware uses the “Windows Default Print Monitor” name; that’s why we have named it DePriMon.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "Due to its complexity and modular architecture, we consider it to be a framework.",
+        "score": 0.3172
+      },
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.4064
+      },
+      {
+        "sentence": "ColoredLambert is used by the Lamberts (aka Longhorn) cyberespionage group and linked to the Vault 7 leak of CIA capabilities.",
+        "score": 0.3294
+      },
+      {
+        "sentence": "In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics.",
+        "score": 0.4213
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.3399
+      },
+      {
+        "sentence": "At system startup, the registered DLL will be loaded by spoolsv.exe with SYSTEM privileges, which, combined with the uniqueness of this method, makes this technique very effective for attackers.",
+        "score": 0.4232
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.301
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.3393
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "The connection is initialized with a Windows socket and can continue with initialization of an authenticated Security Support Provider Interface (SSPI) session with the Negotiate / NTLM SSP.",
+        "score": 0.376
+      },
+      {
+        "sentence": "The implementation is similar to this example provided by Microsoft .",
+        "score": 0.3216
+      },
+      {
+        "sentence": "It includes creating credentials, performing the client handshake and verifying the server certificate.",
+        "score": 0.3647
+      },
+      {
+        "sentence": "Part of the SSPI implementation as output by the Hex-Rays decompiler After the communication is established, the third stage encrypts and decrypts messages manually each time.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "Configuration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.3675
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.4068
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3834
+      },
+      {
+        "sentence": "Thanks to its secure design, the configuration is not left in memory in unencrypted form.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3854
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "It means attackers are preparing to further their attack via a proxy with credentials.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.479
+      },
+      {
+        "sentence": "Flags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).",
+        "score": 0.3136
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3629
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3618
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3733
+      },
+      {
+        "sentence": "This key is also used to generate the third key.",
+        "score": 0.3326
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.398
+      },
+      {
+        "sentence": "This array is encrypted with Key 2, resulting in Key 3.",
+        "score": 0.3718
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.31
+      },
+      {
+        "sentence": "DePriMon is downloaded to memory and executed directly from there as a DLL using the reflective DLL loading technique.",
+        "score": 0.3637
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.4227
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.6323
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "System Information Discovery DePriMon collects various information about the system.",
+        "score": 0.3102
+      }
+    ],
+    "T1140": [
+      {
+        "sentence": "DePriMon is a malicious downloader, with several stages and using many non-traditional techniques.",
+        "score": 0.5379
+      },
+      {
+        "sentence": "Due to its complexity and modular architecture, we consider it to be a framework.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "Some of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign.",
+        "score": 0.4171
+      },
+      {
+        "sentence": "However, DePriMon deserves attention beyond its targets’ geographical distribution: it is carefully written malware, with lots of encryption that is used properly.",
+        "score": 0.3821
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.571
+      },
+      {
+        "sentence": "Because we’re missing initial stage(s), which we will refer to here as \"the first stage\", we don't know the initial distribution and compromise vector.",
+        "score": 0.3356
+      },
+      {
+        "sentence": "What kind of final payload is used in the attacks is another question that remains to be answered.",
+        "score": 0.4428
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "ColoredLambert is used by the Lamberts (aka Longhorn) cyberespionage group and linked to the Vault 7 leak of CIA capabilities.",
+        "score": 0.3464
+      },
+      {
+        "sentence": "Our colleagues from Symantec and Kaspersky published their analyses in April 2017.",
+        "score": 0.3704
+      },
+      {
+        "sentence": "Technical analysis Stage two Both DePriMon’s second and third stages are delivered to the victim’s disk in the first stage.",
+        "score": 0.4589
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.5294
+      },
+      {
+        "sentence": "One of the possible explanations is that it was configured after the first stage of the attack occurred.",
+        "score": 0.3607
+      },
+      {
+        "sentence": "The described installation technique is unique.",
+        "score": 0.325
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.3889
+      },
+      {
+        "sentence": "This file serves as an uninstallation trigger – should DePriMon find it, it removes both this file and its own components in a secure way by overwriting the binaries and then deleting them.",
+        "score": 0.4492
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.5172
+      },
+      {
+        "sentence": "For C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like WinHTTP or WinInet .",
+        "score": 0.3996
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.5035
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.6312
+      },
+      {
+        "sentence": "C&C communication DePriMon communicates securely over TLS, however, not on a high level as is a typical scenario in malware.",
+        "score": 0.3587
+      },
+      {
+        "sentence": "After that, DePriMon uses Schannel.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "The implementation is similar to this example provided by Microsoft .",
+        "score": 0.4098
+      },
+      {
+        "sentence": "The malware’s implementation of TLS via Schannel is similar to this example by Coast Research & Development .",
+        "score": 0.3067
+      },
+      {
+        "sentence": "It includes creating credentials, performing the client handshake and verifying the server certificate.",
+        "score": 0.3013
+      },
+      {
+        "sentence": "Part of the SSPI implementation as output by the Hex-Rays decompiler After the communication is established, the third stage encrypts and decrypts messages manually each time.",
+        "score": 0.7636
+      },
+      {
+        "sentence": "Configuration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader.",
+        "score": 0.4292
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.6305
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.7819
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.6608
+      },
+      {
+        "sentence": "The extension of the configuration file is “.tmp”.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "An example of a configuration file path: %temp%\\rb1us0wm99sslpa1vx.tmp .",
+        "score": 0.3427
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.4917
+      },
+      {
+        "sentence": "Thanks to its secure design, the configuration is not left in memory in unencrypted form.",
+        "score": 0.5604
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.8022
+      },
+      {
+        "sentence": "This design protects the malware’s primary function – C&C communication - against memory forensics.",
+        "score": 0.4352
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.6381
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.3302
+      },
+      {
+        "sentence": "Three entries for three C&C servers – each of them used on a different occasion.",
+        "score": 0.4051
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.4769
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.5389
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.8451
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.8282
+      },
+      {
+        "sentence": "This key is also used to generate the third key.",
+        "score": 0.5088
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.7812
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.6052
+      },
+      {
+        "sentence": "The array is generated as follows: the first 4 bytes are the volume serial number of the system drive, and the remaining 28 bytes contain the values 5 – 32.",
+        "score": 0.3018
+      },
+      {
+        "sentence": "This array is encrypted with Key 2, resulting in Key 3.",
+        "score": 0.5678
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.6103
+      },
+      {
+        "sentence": "DePriMon is downloaded to memory and executed directly from there as a DLL using the reflective DLL loading technique.",
+        "score": 0.43
+      },
+      {
+        "sentence": "It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.",
+        "score": 0.4605
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.3352
+      },
+      {
+        "sentence": "File Deletion DePriMon can delete itself securely by overwriting its files with random data and then deleting them.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.7461
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.336
+      }
+    ],
+    "T1007": [
+      {
+        "sentence": "To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase .",
+        "score": 0.3151
+      },
+      {
+        "sentence": "For that, the malware uses the “Windows Default Print Monitor” name; that’s why we have named it DePriMon.",
+        "score": 0.3036
+      },
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3146
+      },
+      {
+        "sentence": "DePriMon was detected in a private company, based in Central Europe, and at dozens of computers in the Middle East.",
+        "score": 0.3183
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.3955
+      },
+      {
+        "sentence": "In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "The second stage checks regularly whether there is a file in the %system32% folder with the same name as the third stage DLL file but without the “.dll” extension.",
+        "score": 0.5043
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3182
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.313
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.3565
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3141
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.3024
+      },
+      {
+        "sentence": "The array is generated as follows: the first 4 bytes are the volume serial number of the system drive, and the remaining 28 bytes contain the values 5 – 32.",
+        "score": 0.3982
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.5632
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.3353
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "Discovery System Service Discovery DePriMon can list registered services on the system.",
+        "score": 0.5963
+      },
+      {
+        "sentence": "Process Discovery DePriMon can list running processes on the system.",
+        "score": 0.567
+      },
+      {
+        "sentence": "System Information Discovery DePriMon collects various information about the system.",
+        "score": 0.6809
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.6894
+      }
+    ],
+    "T1043": [
+      {
+        "sentence": "To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase .",
+        "score": 0.4755
+      },
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "Some of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign.",
+        "score": 0.4168
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.3454
+      },
+      {
+        "sentence": "What kind of final payload is used in the attacks is another question that remains to be answered.",
+        "score": 0.35
+      },
+      {
+        "sentence": "In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "For C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like WinHTTP or WinInet .",
+        "score": 0.6862
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.318
+      },
+      {
+        "sentence": "C&C communication DePriMon communicates securely over TLS, however, not on a high level as is a typical scenario in malware.",
+        "score": 0.624
+      },
+      {
+        "sentence": "The connection is initialized with a Windows socket and can continue with initialization of an authenticated Security Support Provider Interface (SSPI) session with the Negotiate / NTLM SSP.",
+        "score": 0.6125
+      },
+      {
+        "sentence": "SSPI is used/not used according to a particular flag in the configuration file and can utilize the local proxy settings of the machine.",
+        "score": 0.4103
+      },
+      {
+        "sentence": "The malware’s implementation of TLS via Schannel is similar to this example by Coast Research & Development .",
+        "score": 0.4559
+      },
+      {
+        "sentence": "It includes creating credentials, performing the client handshake and verifying the server certificate.",
+        "score": 0.3655
+      },
+      {
+        "sentence": "Part of the SSPI implementation as output by the Hex-Rays decompiler After the communication is established, the third stage encrypts and decrypts messages manually each time.",
+        "score": 0.4253
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.3669
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.3805
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3196
+      },
+      {
+        "sentence": "This design protects the malware’s primary function – C&C communication - against memory forensics.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.377
+      },
+      {
+        "sentence": "It means attackers are preparing to further their attack via a proxy with credentials.",
+        "score": 0.5416
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.313
+      },
+      {
+        "sentence": "Three entries for three C&C servers – each of them used on a different occasion.",
+        "score": 0.4344
+      },
+      {
+        "sentence": "Three entries for three ports – each of them used on a different occasion.",
+        "score": 0.7692
+      },
+      {
+        "sentence": "Flags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).",
+        "score": 0.6835
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.4665
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3512
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3378
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "This array is encrypted with Key 2, resulting in Key 3.",
+        "score": 0.323
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.3067
+      },
+      {
+        "sentence": "It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.",
+        "score": 0.4318
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.3384
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.3209
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.3321
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3295
+      },
+      {
+        "sentence": "Discovery System Service Discovery DePriMon can list registered services on the system.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "Process Discovery DePriMon can list running processes on the system.",
+        "score": 0.3256
+      },
+      {
+        "sentence": "Command And Control Commonly Used Port DePriMon uses ports 443 and 8080 for C&C communication.",
+        "score": 0.8402
+      },
+      {
+        "sentence": "Standard Application Layer Protocol DePriMon uses HTTP for C&C communication.",
+        "score": 0.603
+      },
+      {
+        "sentence": "Connection Proxy DePriMon uses local proxy settings to make its communication less suspicious.",
+        "score": 0.5364
+      }
+    ],
+    "T1090": [
+      {
+        "sentence": "To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase .",
+        "score": 0.4362
+      },
+      {
+        "sentence": "Due to its complexity and modular architecture, we consider it to be a framework.",
+        "score": 0.3962
+      },
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3904
+      },
+      {
+        "sentence": "DePriMon was detected in a private company, based in Central Europe, and at dozens of computers in the Middle East.",
+        "score": 0.3236
+      },
+      {
+        "sentence": "Some of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign.",
+        "score": 0.545
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "What kind of final payload is used in the attacks is another question that remains to be answered.",
+        "score": 0.3885
+      },
+      {
+        "sentence": "ColoredLambert is used by the Lamberts (aka Longhorn) cyberespionage group and linked to the Vault 7 leak of CIA capabilities.",
+        "score": 0.3901
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.3792
+      },
+      {
+        "sentence": "One of the possible explanations is that it was configured after the first stage of the attack occurred.",
+        "score": 0.3779
+      },
+      {
+        "sentence": "In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics.",
+        "score": 0.3562
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.384
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.3338
+      },
+      {
+        "sentence": "For C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like WinHTTP or WinInet .",
+        "score": 0.4805
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "C&C communication DePriMon communicates securely over TLS, however, not on a high level as is a typical scenario in malware.",
+        "score": 0.4914
+      },
+      {
+        "sentence": "The connection is initialized with a Windows socket and can continue with initialization of an authenticated Security Support Provider Interface (SSPI) session with the Negotiate / NTLM SSP.",
+        "score": 0.4995
+      },
+      {
+        "sentence": "SSPI is used/not used according to a particular flag in the configuration file and can utilize the local proxy settings of the machine.",
+        "score": 0.5912
+      },
+      {
+        "sentence": "The implementation is similar to this example provided by Microsoft .",
+        "score": 0.3532
+      },
+      {
+        "sentence": "The malware’s implementation of TLS via Schannel is similar to this example by Coast Research & Development .",
+        "score": 0.3709
+      },
+      {
+        "sentence": "It includes creating credentials, performing the client handshake and verifying the server certificate.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "Part of the SSPI implementation as output by the Hex-Rays decompiler After the communication is established, the third stage encrypts and decrypts messages manually each time.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "Configuration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader.",
+        "score": 0.3067
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.3675
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.3122
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.3374
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.349
+      },
+      {
+        "sentence": "This design protects the malware’s primary function – C&C communication - against memory forensics.",
+        "score": 0.3914
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.4769
+      },
+      {
+        "sentence": "It means attackers are preparing to further their attack via a proxy with credentials.",
+        "score": 0.8472
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.3577
+      },
+      {
+        "sentence": "Three entries for three C&C servers – each of them used on a different occasion.",
+        "score": 0.5071
+      },
+      {
+        "sentence": "Three entries for three ports – each of them used on a different occasion.",
+        "score": 0.5173
+      },
+      {
+        "sentence": "Flags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).",
+        "score": 0.7657
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.5541
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3165
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3031
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.3009
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.3157
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.3746
+      },
+      {
+        "sentence": "DePriMon is downloaded to memory and executed directly from there as a DLL using the reflective DLL loading technique.",
+        "score": 0.3238
+      },
+      {
+        "sentence": "It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.3404
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.3014
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.4803
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3168
+      },
+      {
+        "sentence": "Discovery System Service Discovery DePriMon can list registered services on the system.",
+        "score": 0.3053
+      },
+      {
+        "sentence": "Command And Control Commonly Used Port DePriMon uses ports 443 and 8080 for C&C communication.",
+        "score": 0.6328
+      },
+      {
+        "sentence": "Standard Application Layer Protocol DePriMon uses HTTP for C&C communication.",
+        "score": 0.4489
+      },
+      {
+        "sentence": "Connection Proxy DePriMon uses local proxy settings to make its communication less suspicious.",
+        "score": 0.7839
+      }
+    ],
+    "T1124": [
+      {
+        "sentence": "To achieve persistence, the malware registers a new local port monitor - a trick falling under the “ Port Monitors ” technique in the MITRE ATT&CK knowledgebase .",
+        "score": 0.3132
+      },
+      {
+        "sentence": "For that, the malware uses the “Windows Default Print Monitor” name; that’s why we have named it DePriMon.",
+        "score": 0.3917
+      },
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.332
+      },
+      {
+        "sentence": "DePriMon was detected in a private company, based in Central Europe, and at dozens of computers in the Middle East.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "Some of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign.",
+        "score": 0.3453
+      },
+      {
+        "sentence": "However, DePriMon deserves attention beyond its targets’ geographical distribution: it is carefully written malware, with lots of encryption that is used properly.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.3505
+      },
+      {
+        "sentence": "ColoredLambert is used by the Lamberts (aka Longhorn) cyberespionage group and linked to the Vault 7 leak of CIA capabilities.",
+        "score": 0.342
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.302
+      },
+      {
+        "sentence": "The second stage checks regularly whether there is a file in the %system32% folder with the same name as the third stage DLL file but without the “.dll” extension.",
+        "score": 0.3495
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.314
+      },
+      {
+        "sentence": "For C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like WinHTTP or WinInet .",
+        "score": 0.3136
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.317
+      },
+      {
+        "sentence": "After that, DePriMon uses Schannel.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.3089
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.3722
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3655
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "Three entries for three C&C servers – each of them used on a different occasion.",
+        "score": 0.3228
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.3704
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3014
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3229
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "The array is generated as follows: the first 4 bytes are the volume serial number of the system drive, and the remaining 28 bytes contain the values 5 – 32.",
+        "score": 0.4174
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.4599
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.3426
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3321
+      },
+      {
+        "sentence": "Discovery System Service Discovery DePriMon can list registered services on the system.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "System Information Discovery DePriMon collects various information about the system.",
+        "score": 0.6512
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.8227
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.3356
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.3822
+      },
+      {
+        "sentence": "In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics.",
+        "score": 0.3611
+      },
+      {
+        "sentence": "The second stage checks regularly whether there is a file in the %system32% folder with the same name as the third stage DLL file but without the “.dll” extension.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "It includes creating credentials, performing the client handshake and verifying the server certificate.",
+        "score": 0.3095
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.3495
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.3542
+      },
+      {
+        "sentence": "Three entries for three ports – each of them used on a different occasion.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.329
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3455
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3057
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3044
+      },
+      {
+        "sentence": "This key is also used to generate the third key.",
+        "score": 0.3232
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "This array is encrypted with Key 2, resulting in Key 3.",
+        "score": 0.3584
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.4512
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "Discovery System Service Discovery DePriMon can list registered services on the system.",
+        "score": 0.4582
+      },
+      {
+        "sentence": "Process Discovery DePriMon can list running processes on the system.",
+        "score": 0.8967
+      },
+      {
+        "sentence": "System Information Discovery DePriMon collects various information about the system.",
+        "score": 0.4987
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.516
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "According to our telemetry, DePriMon has been active since at least March 2017.",
+        "score": 0.3367
+      },
+      {
+        "sentence": "DePriMon was detected in a private company, based in Central Europe, and at dozens of computers in the Middle East.",
+        "score": 0.3541
+      },
+      {
+        "sentence": "Some of the domain names used as C&C servers contain Arabic words, which gives an indication of a region‑specific campaign.",
+        "score": 0.3185
+      },
+      {
+        "sentence": "However, DePriMon deserves attention beyond its targets’ geographical distribution: it is carefully written malware, with lots of encryption that is used properly.",
+        "score": 0.3484
+      },
+      {
+        "sentence": "To help defenders stay safe from this threat, we’ve thoroughly analyzed this newly discovered malware, focusing on the downloader itself.",
+        "score": 0.3251
+      },
+      {
+        "sentence": "Because we’re missing initial stage(s), which we will refer to here as \"the first stage\", we don't know the initial distribution and compromise vector.",
+        "score": 0.3657
+      },
+      {
+        "sentence": "What kind of final payload is used in the attacks is another question that remains to be answered.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "However, it should be noted that, in a few cases, DePriMon was detected with ColoredLambert malware on the same computers within a short time frame.",
+        "score": 0.429
+      },
+      {
+        "sentence": "ColoredLambert is used by the Lamberts (aka Longhorn) cyberespionage group and linked to the Vault 7 leak of CIA capabilities.",
+        "score": 0.4019
+      },
+      {
+        "sentence": "Technical analysis Stage two Both DePriMon’s second and third stages are delivered to the victim’s disk in the first stage.",
+        "score": 0.3267
+      },
+      {
+        "sentence": "The second stage installs itself and loads the third stage using an encrypted, hardcoded path.",
+        "score": 0.3072
+      },
+      {
+        "sentence": "In principle, it is described in the MITRE ATT&CK taxonomy as “Port Monitors”, under both Persistence and Privilege Escalation tactics.",
+        "score": 0.3331
+      },
+      {
+        "sentence": "We believe DePriMon is the first example of malware using this technique ever publicly described.",
+        "score": 0.3498
+      },
+      {
+        "sentence": "The second stage checks regularly whether there is a file in the %system32% folder with the same name as the third stage DLL file but without the “.dll” extension.",
+        "score": 0.4175
+      },
+      {
+        "sentence": "Stage three The third stage, responsible for downloading the main payload(s) from DePriMon’s operators, also implements some interesting techniques.",
+        "score": 0.3489
+      },
+      {
+        "sentence": "For C&C communication, it uses the Microsoft implementation of SSL/TLS, Secure Channel, instead of common APIs like WinHTTP or WinInet .",
+        "score": 0.3048
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.3321
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.3531
+      },
+      {
+        "sentence": "It includes creating credentials, performing the client handshake and verifying the server certificate.",
+        "score": 0.3538
+      },
+      {
+        "sentence": "Configuration The configuration data for DePriMon’s third stage has 27 members, which is an unusually large number for a downloader.",
+        "score": 0.3446
+      },
+      {
+        "sentence": "It is encrypted with AES-256 and embedded in the binary.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.333
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3656
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.374
+      },
+      {
+        "sentence": "This design protects the malware’s primary function – C&C communication - against memory forensics.",
+        "score": 0.3022
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.3591
+      },
+      {
+        "sentence": "However, we haven’t seen functionality for stealing these details, so it appears that it is done in another phase of the attack.",
+        "score": 0.4748
+      },
+      {
+        "sentence": "Three entries for three C&C servers – each of them used on a different occasion.",
+        "score": 0.3578
+      },
+      {
+        "sentence": "Flags indicating whether the downloader initializes a connection through Security Support Provider Interface (SSPI) with a possible proxy or only with a socket (described later).",
+        "score": 0.3118
+      },
+      {
+        "sentence": "It should be noted that besides C&C servers extracted from malware samples, we identified additional domains and servers likely related to this malware.",
+        "score": 0.4227
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.3799
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.345
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.3342
+      },
+      {
+        "sentence": "This key is also used to generate the third key.",
+        "score": 0.3295
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "This key is not hardcoded but derived using a 32-byte array which is then encrypted.",
+        "score": 0.3663
+      },
+      {
+        "sentence": "The array is generated as follows: the first 4 bytes are the volume serial number of the system drive, and the remaining 28 bytes contain the values 5 – 32.",
+        "score": 0.5426
+      },
+      {
+        "sentence": "This array is encrypted with Key 2, resulting in Key 3.",
+        "score": 0.3141
+      },
+      {
+        "sentence": "Conclusion DePriMon is an unusually advanced downloader whose developers have put extra effort into setting up the architecture and crafting the critical components.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.",
+        "score": 0.3396
+      },
+      {
+        "sentence": "As a result, DePriMon is a powerful, flexible and persistent tool designed to download a payload and execute it, and to collect some basic information about the system and its user along the way.",
+        "score": 0.6973
+      },
+      {
+        "sentence": "Filenames dpnvmrs.dll hp3mlnv.dll hp4mlnv.dll hp5nhd.dll hp6nhd.dll hpjdnb64.dll hpmdnel3b.dll ifssvc.dll ifssvcmgr.dll msprtmon64.dll msptromn.dll plamgr.dll ppcrlchk.dll ppcrlupd.dll prntapt.dll prntqdl64.dll pscript6f.dll pscript6s.dll shprn64.dll stprn32.dll winmnprt.dll MITRE ATT&CK techniques Tactic ID Name Description Persistence Port Monitors DePriMon installs one of its components as a port monitor for achieving persistence.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.3839
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.3609
+      },
+      {
+        "sentence": "Discovery System Service Discovery DePriMon can list registered services on the system.",
+        "score": 0.449
+      },
+      {
+        "sentence": "Process Discovery DePriMon can list running processes on the system.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "System Information Discovery DePriMon collects various information about the system.",
+        "score": 0.8956
+      },
+      {
+        "sentence": "System Time Discovery DePriMon regularly checks system time and performs various actions based on it, such as uninstallation.",
+        "score": 0.7
+      }
+    ],
+    "T1112": [
+      {
+        "sentence": "One of the possible explanations is that it was configured after the first stage of the attack occurred.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "The second stage registers the third-stage DLL as a port monitor by creating the following registry key and value: HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors\\Windows Default Print Monitor Driver = %PathToThirdStageDLL% Administrator rights are required for creating this registry key.",
+        "score": 0.6759
+      },
+      {
+        "sentence": "This file serves as an uninstallation trigger – should DePriMon find it, it removes both this file and its own components in a secure way by overwriting the binaries and then deleting them.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "Its configuration is very complex, as is the way the malware handles it.",
+        "score": 0.4028
+      },
+      {
+        "sentence": "Finally, the authors have put significant effort into encryption, making the DePriMon malware more difficult to analyze.",
+        "score": 0.3602
+      },
+      {
+        "sentence": "During the first run, DePriMon’s third stage (the downloader itself) decrypts the configuration data with Key 2 (see the IoCs section), encrypts it with Key 3 and stores the encrypted configuration file in a temporary folder.",
+        "score": 0.3709
+      },
+      {
+        "sentence": "The filename for the configuration file is created via the following process: Starting with the second byte, the value of Key 2 is transformed into a number in base 36 but encoded using custom alphabet “abc…xyz012…789”.",
+        "score": 0.3877
+      },
+      {
+        "sentence": "The extension of the configuration file is “.tmp”.",
+        "score": 0.3477
+      },
+      {
+        "sentence": "An example of a configuration file path: %temp%\\rb1us0wm99sslpa1vx.tmp .",
+        "score": 0.3597
+      },
+      {
+        "sentence": "During the second run, the downloader reads the configuration data from the file, not from itself – this way, the attacker can easily update the configuration.",
+        "score": 0.3687
+      },
+      {
+        "sentence": "Thanks to its secure design, the configuration is not left in memory in unencrypted form.",
+        "score": 0.4022
+      },
+      {
+        "sentence": "Every time the downloader needs to use some element of the configuration file, it decrypts the configuration file, retrieves the member and encrypts the file again.",
+        "score": 0.3942
+      },
+      {
+        "sentence": "Part of the code as seen by the Hex-Rays decompiler, which illustrates how the DePriMon malware decrypts the configuration file, saves a few members to local variables and encrypts it again Of interest in the configuration file are: Two entries for usernames and two members for passwords – for the proxy server if it is set on the machine.",
+        "score": 0.4567
+      },
+      {
+        "sentence": "Encryption The malware uses the AES encryption algorithm with three different 256-bit keys for different purposes (these keys are listed in the IoCs section).",
+        "score": 0.329
+      },
+      {
+        "sentence": "Key 1: For decryption of various sensitive strings in the malware.",
+        "score": 0.3534
+      },
+      {
+        "sentence": "Key 2: For encryption and decryption of the configuration data in memory (as described earlier).",
+        "score": 0.4415
+      },
+      {
+        "sentence": "Key 3: For encryption and decryption of the configuration file on disk.",
+        "score": 0.4219
+      },
+      {
+        "sentence": "It has a surprisingly extensive configuration file with several interesting elements, its encryption is properly implemented and protects the C&C communication effectively.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "Modify Registry DePriMon adds registry entry in HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors to achieve persistence.",
+        "score": 0.8078
+      },
+      {
+        "sentence": "Access Token Manipulation DePriMon obtains a user token for obtaining information about the proxy settings on the machine.",
+        "score": 0.3415
+      },
+      {
+        "sentence": "Deobfuscate/Decode Files or Information DePriMon encrypts some of its strings and its configuration file using AES-256.",
+        "score": 0.4203
+      }
+    ]
+  }
+}

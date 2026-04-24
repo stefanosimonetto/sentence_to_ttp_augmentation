@@ -1,0 +1,1874 @@
+{
+  "original_txt": "Introduction\nIn a recent incident response case, we discovered a new and notable ransomware family in active use by the attackers, which we named “Ymir”. The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.\nIn the case we analyzed, the attacker was able to gain access to the system via PowerShell remote control commands. After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner. Eventually, after reducing system security, the adversary ran Ymir to achieve their goals.\nIn this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.\nAnalysis\nStatic analysis\nOur analysis began with a basic inspection of the artifact. We started by analyzing its properties, such as the file type, and relevant strings and capabilities, as shown in the table and images below.\n| Hash | Value |\n| MD5 | 12acbb05741a218a1c83eaa1cfc2401f |\n| SHA-1 | 3648359ebae8ce7cacae1e631103659f5a8c630e |\n| SHA-256 | cb88edd192d49db12f444f764c3bdc287703666167a4ca8d533d51f86ba428d8 |\nAlthough the binary does not raise suspicions of being packed, as its entropy is not high enough, the presence of API calls to functions like malloc, memmove and memcmp indicates that it can allocate memory to perform malicious functions.\nThe binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries. These API calls are typically found in various ransomware samples.\nEven though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.\nThe attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).\nThe following table shows other useful string indicators we found in the course of our analysis.\n| Type | Value | Description |\n| String (command) | powershell -w h -c Start-Sleep -Seconds 5; Remove-Item -Force -Path | Auto-delete command execution via PowerShell. |\n| String (URL) | hxxps://github[.]com/qTox/qTox/releases/download/v1.17.6/setup-qtox-x86_64-release.exe | Present in the PDF, software (qTox client) for contacting the attackers. |\n| String | 6C5oy2dVr6 | Encryption extension. |\n| String (filename) | INCIDENT_REPORT.pdf | Ransom note PDF filename. PDFs are placed in various directories. |\n| String (date) | D:20240831154833-06’00’ | PDF creation date metadata. |\n| String | x64dbg | Debugger name. |\nOne interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.\nStatic analysis also shows that the PDF used as the ransom note is present in the .data section of the binary. The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.\nAfter reaching the main function, the malware executes another function with calls to other functions to get system information. To streamline our analysis, we renamed this function to Get_System_Information:\nThe malware also contains some execution restrictions which are activated when certain parameters are set. For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.\nWhile reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.\nThe malware also has a hardcoded list of file name extensions to exclude from encryption.\nFile name extensions to ignore\nDynamic analysis\nWhile running the ransomware, we spotted hundreds of calls to the memmove function. After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions. The following image shows a fragment of the malware loading environment variables after calling memmove.\nThe malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.\nIt also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.\nDuring the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.\nThe artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.\nAdditionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.\nThe ransom note informs the victim about what happened to the affected system and instructs them to contact the attackers for a deal. Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration. This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.\nWe spotted one odd string, a comment written in the Lingala language. This language is used in the Democratic Republic of the Congo, Republic of the Congo, Angola and the Central African Republic.\nAnother interesting fact is that the sample searches for PowerShell in each subdirectory. Once PowerShell is located, the malware uses it for deleting itself. In our investigation, we copied powershell.exe into our Desktop folder, so it was used for deleting the sample.\nThe following diagram shows a summary of the sample’s execution. Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system. Subsequently, PowerShell calls conhost.exe, which is used for running services in the background.\nThe malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.\nYARA rule\nBased on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time. The rule considers the file type, relevant strings and library function imports.\n|\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 |\nimport \"pe\" rule Ymir { meta: author = \"Kaspersky - GERT\" description = \"Yara rule for detecting the Ymir ransomware.\" target_entity = \"file\" strings: $s1 = \"powershell -w h -c Start-Sleep -Seconds 5; Remove-Item -Force -Path\" wide ascii nocase $s2 = \"setup-qtox-x86_64-release.exe\" wide ascii nocase $s3 = \"6C5oy2dVr6\" wide ascii nocase $s4 = \"INCIDENT_REPORT.pdf\" wide ascii nocase $s5 = \"D:20240831154833-06\" wide ascii nocase $s6 = \"ChaCha\" wide ascii nocase $s7 = \"x64dbg\" wide ascii nocase condition: (3 of ($s*)) and pe.imports(\"msvcrt.dll\", \"memmove\") } |\nTelemetry\nUsing the above rule, we were able to query threat intelligence portals and find a similar sample originating from Pakistan. We believe that the attacker used a VPN network or Tor to hide their IP. The artifact we discovered looks like a test binary sent by the attacker to check if it would be detected by security vendors. The sample receives a --path parameter from the command line, which specifies the directory to be encrypted. However, it neither encrypts the files nor generates a ransom note.\nWhat caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.\nBy comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings. These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.\nAt the time of our research, 12 security vendors including Kaspersky detected the threat.\nThe ransomware incident\nIn addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained. Our forensic analysis revealed that crucial evidence had been lost through the attacker’s efforts to cover their tracks. We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure. Malicious activity was detected on a domain controller shortly after, including compromised access on behalf of legitimate users, including one with high privileges. The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe.\n| Filename | AudioDriver2.0.exe |\n| Size | 3334144 bytes (3.2 MB) |\n| MD5 | 5ee1befc69d120976a60a97d3254e9eb |\n| SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 |\nThis sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system. This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.\nThis sample also connects to the C2 server 74.50.84[.]181 on port 443, detected by Kaspersky as a host for malicious files since August 2024.\nThe attackers compromised the domain controller and used it to continue infiltrating systems in the targeted infrastructure. They abused compromised credentials gathered by the stealer to hop between systems using WinRM and PowerShell remote control capabilities, and then executed a set of two scripts that were confirmed to be a part of the proxy malware threat SystemBC.\n| Filename | 1.ps1 | 1.ps1 |\n| Size | 16239 bytes (15 KiB) | 4209 bytes (4 KiB) |\n| MD5 | 5384d704fadf229d08eab696404cbba6 | 39df773139f505657d11749804953be5 |\n| Path | %windir%\\temp\\ | HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run |\nBoth scripts use PowerShell to establish a covert channel to the IP address 94.158.244[.]69 on port 443. Based on the strings from the scripts we were able to obtain, we implemented Yara rules for identifying other samples and C2 servers configured with the same codification and spotted in the wild.\n| SHA256 | First seen | First reported from | C2 server | Verdict |\n| 8287d54c83db03b8adcdf1409f5d1c9abb1693ac 8d000b5ae75b3a296cb3061c |\n2024-09-16 03:24:06 UTC | Australia | 94.158.244[.]69 | |\n| 51ffc0b7358b7611492ef458fdf9b97f121e49e70f 86a6b53b93ed923b707a03 |\n2024-08-18 18:59:01 UTC | Ukraine | 85.239.61[.]60 | UDS:Trojan.PowerShell. Dnoper.posh |\n| b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a |\n2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb |\nOne of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80). It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions.\n- GetServerByFilename,\n- SendFile,\n- SearchRoot.\nThe script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.\nThe SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.\nThe script is Base64 encoded and passed to the following command for execution.\n|\n1 |\n$selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> |\nAccording to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.\nAt the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems.\n- advanced_ip_scanner.exe;\n- processhacker-2.39-setup.exe.\nFinally, two days after the initial RustyStealer intrusion, attackers deployed the Ymir ransomware by executing remote connections and uploading the payload. Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script. Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”:\nConclusion\nA link between malware stealer botnets acting as access brokers and the ransomware execution is evident. The Ymir development represents a threat to all types of companies and confirms the existence of emerging groups that can impact business and organizations with a configurable, robust and well-developed malware. We have seen initial access brokers invade an organization and ensure persistence. Ymir was deployed to the targeted system shortly after. This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system. The group behind this threat has not presented a dedicated leak site or any additional information yet, but we will continue monitoring their activity. Alerts were triggered two days prior to the ransomware incident, and the lack of action on the critical system warnings allowed the attackers to launch the ransomware. This highlights the need for improved response strategies beyond relying solely on endpoint protection platforms (EPP).\nKaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.\nTactics, techniques and procedures\nBelow are the Ymir TTPs identified from our malware analysis.\n| Tactic | Technique | ID |\n| Discovery | File and Directory Discovery | T1083 |\n| Discovery | System Information Discovery | T1082 |\n| Execution | Command and Scripting Interpreter: PowerShell | T1059.001 |\n| Impact | Data Encrypted for Impact | T1486 |\n| Defense evasion | Virtualization/Sandbox Evasion: Time Based Evasion | T1497.003 |\n| Defense evasion | Indicator Removal: File Deletion | T1070.004 |\nRustyStealer TTPs:\n| Tactic | Technique | ID |\n| Discovery | File and Directory Discovery | T1083 |\n| Discovery | Process Discovery | T1057 |\n| Execution | Shared Modules | T1129 |\n| Defense evasion | Obfuscated Files or Information | T1027 |\nIndicators of Compromise\nFile Hashes\n3648359ebae8ce7cacae1e631103659f5a8c630e\nfe6de75d6042de714c28c0a3c0816b37e0fa4bb3\nf954d1b1d13a5e4f62f108c9965707a2aa2a3c89 (INCIDENT_REPORT.pdf)\n5ee1befc69d120976a60a97d3254e9eb\n5384d704fadf229d08eab696404cbba6\n39df773139f505657d11749804953be5\n8287d54c83db03b8adcdf1409f5d1c9abb1693ac8d000b5ae75b3a296cb3061c\n51ffc0b7358b7611492ef458fdf9b97f121e49e70f86a6b53b93ed923b707a03\nb087e1309f3eab6302d7503079af1ad6af06d70a932f7a6ae1421b942048e28a\nIPs\n74.50.84[.]181:443\n94.158.244[.]69:443\n5.255.117[.]134:80\n85.239.61[.]60\nYmir: new stealthy ransomware in the wild",
+  "sanitized_txt": "Introduction In a recent incident response case, we discovered a new and notable ransomware family in active use by the attackers, which we named “Ymir”. The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.\nIn the case we analyzed, the attacker was able to gain access to the system via PowerShell remote control commands. After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner. Eventually, after reducing system security, the adversary ran Ymir to achieve their goals.\nIn this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.\nAnalysis Static analysis Our analysis began with a basic inspection of the artifact. We started by analyzing its properties, such as the file type, and relevant strings and capabilities, as shown in the table and images below.\n| Hash | Value | | MD5 | 12acbb05741a218a1c83eaa1cfc2401f | | SHA-1 | 3648359ebae8ce7cacae1e631103659f5a8c630e | | SHA-256 | cb88edd192d49db12f444f764c3bdc287703666167a4ca8d533d51f86ba428d8 | Although the binary does not raise suspicions of being packed, as its entropy is not high enough, the presence of API calls to functions like malloc, memmove and memcmp indicates that it can allocate memory to perform malicious functions.\nThe binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries. These API calls are typically found in various ransomware samples.\nEven though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.\nThe attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).\nThe following table shows other useful string indicators we found in the course of our analysis.\n| Type | Value | Description | | String (command) | powershell -w h -c Start-Sleep -Seconds 5; Remove-Item -Force -Path | Auto-delete command execution via PowerShell. | | String (URL) | hxxps://github[.]com/qTox/qTox/releases/download/v1.17.6/setup-qtox-x86_64-release.exe | Present in the PDF, software (qTox client) for contacting the attackers. | | String | 6C5oy2dVr6 | Encryption extension. | | String (filename) | INCIDENT_REPORT.pdf | Ransom note PDF filename. PDFs are placed in various directories. | | String (date) | D:20240831154833-06’00’ | PDF creation date metadata. | | String | x64dbg | Debugger name. | One interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.\nStatic analysis also shows that the PDF used as the ransom note is present in the .data section of the binary. The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.\nAfter reaching the main function, the malware executes another function with calls to other functions to get system information. To streamline our analysis, we renamed this function to Get_System_Information:\nThe malware also contains some execution restrictions which are activated when certain parameters are set. For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.\nWhile reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.\nThe malware also has a hardcoded list of file name extensions to exclude from encryption.\nFile name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function. After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions. The following image shows a fragment of the malware loading environment variables after calling memmove.\nThe malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.\nIt also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.\nDuring the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.\nThe artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.\nAdditionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.\nThe ransom note informs the victim about what happened to the affected system and instructs them to contact the attackers for a deal. Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration. This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.\nWe spotted one odd string, a comment written in the Lingala language. This language is used in the Democratic Republic of the Congo, Republic of the Congo, Angola and the Central African Republic.\nAnother interesting fact is that the sample searches for PowerShell in each subdirectory. Once PowerShell is located, the malware uses it for deleting itself. In our investigation, we copied powershell.exe into our Desktop folder, so it was used for deleting the sample.\nThe following diagram shows a summary of the sample’s execution. Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system. Subsequently, PowerShell calls conhost.exe, which is used for running services in the background.\nThe malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.\nYARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time. The rule considers the file type, relevant strings and library function imports.\n| 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 | import \"pe\" rule Ymir { meta: author = \"Kaspersky - GERT\" description = \"Yara rule for detecting the Ymir ransomware.\" target_entity = \"file\" strings: $s1 = \"powershell -w h -c Start-Sleep -Seconds 5; Remove-Item -Force -Path\" wide ascii nocase $s2 = \"setup-qtox-x86_64-release.exe\" wide ascii nocase $s3 = \"6C5oy2dVr6\" wide ascii nocase $s4 = \"INCIDENT_REPORT.pdf\" wide ascii nocase $s5 = \"D:20240831154833-06\" wide ascii nocase $s6 = \"ChaCha\" wide ascii nocase $s7 = \"x64dbg\" wide ascii nocase condition: (3 of ($s*)) and pe.imports(\"msvcrt.dll\", \"memmove\") } | Telemetry Using the above rule, we were able to query threat intelligence portals and find a similar sample originating from Pakistan. We believe that the attacker used a VPN network or Tor to hide their IP. The artifact we discovered looks like a test binary sent by the attacker to check if it would be detected by security vendors. The sample receives a --path parameter from the command line, which specifies the directory to be encrypted. However, it neither encrypts the files nor generates a ransom note.\nWhat caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.\nBy comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings. These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.\nAt the time of our research, 12 security vendors including Kaspersky detected the threat.\nThe ransomware incident In addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained. Our forensic analysis revealed that crucial evidence had been lost through the attacker’s efforts to cover their tracks. We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure. Malicious activity was detected on a domain controller shortly after, including compromised access on behalf of legitimate users, including one with high privileges. The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe.\n| Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system. This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.\nThis sample also connects to the C2 server 74.50.84[.]181 on port 443, detected by Kaspersky as a host for malicious files since August 2024.\nThe attackers compromised the domain controller and used it to continue infiltrating systems in the targeted infrastructure. They abused compromised credentials gathered by the stealer to hop between systems using WinRM and PowerShell remote control capabilities, and then executed a set of two scripts that were confirmed to be a part of the proxy malware threat SystemBC.\n| Filename | 1.ps1 | 1.ps1 | | Size | 16239 bytes (15 KiB) | 4209 bytes (4 KiB) | | MD5 | 5384d704fadf229d08eab696404cbba6 | 39df773139f505657d11749804953be5 | | Path | %windir%\\temp\\ | HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run | Both scripts use PowerShell to establish a covert channel to the IP address 94.158.244[.]69 on port 443. Based on the strings from the scripts we were able to obtain, we implemented Yara rules for identifying other samples and C2 servers configured with the same codification and spotted in the wild.\n| SHA256 | First seen | First reported from | C2 server | Verdict | | 8287d54c83db03b8adcdf1409f5d1c9abb1693ac 8d000b5ae75b3a296cb3061c | 2024-09-16 03:24:06 UTC | Australia | 94.158.244[.]69 | | | 51ffc0b7358b7611492ef458fdf9b97f121e49e70f 86a6b53b93ed923b707a03 | 2024-08-18 18:59:01 UTC | Ukraine | 85.239.61[.]60 | UDS:Trojan.PowerShell. Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80). It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions.\n- GetServerByFilename, - SendFile, - SearchRoot.\nThe script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.\nThe SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.\nThe script is Base64 encoded and passed to the following command for execution.\n| 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.\nAt the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems.\n- advanced_ip_scanner.exe;\n- processhacker-2.39-setup.exe.\nFinally, two days after the initial RustyStealer intrusion, attackers deployed the Ymir ransomware by executing remote connections and uploading the payload. Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script. Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”:\nConclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident. The Ymir development represents a threat to all types of companies and confirms the existence of emerging groups that can impact business and organizations with a configurable, robust and well-developed malware. We have seen initial access brokers invade an organization and ensure persistence. Ymir was deployed to the targeted system shortly after. This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system. The group behind this threat has not presented a dedicated leak site or any additional information yet, but we will continue monitoring their activity. Alerts were triggered two days prior to the ransomware incident, and the lack of action on the critical system warnings allowed the attackers to launch the ransomware. This highlights the need for improved response strategies beyond relying solely on endpoint protection platforms (EPP).\nKaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.\nTactics, techniques and procedures Below are the Ymir TTPs identified from our malware analysis.",
+  "ID_list": [
+    "T1027",
+    "T1057",
+    "T1059.001",
+    "T1070.004",
+    "T1082",
+    "T1083",
+    "T1129",
+    "T1486",
+    "T1497.003"
+  ],
+  "Name_list": [
+    "Execution",
+    "Exfiltration",
+    "Impact",
+    "Initial Access",
+    "Persistence",
+    "PowerShell",
+    "Proxy",
+    "Shared Modules",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1027": [
+      {
+        "sentence": "Introduction In a recent incident response case, we discovered a new and notable ransomware family in active use by the attackers, which we named “Ymir”.",
+        "score": 0.4598
+      },
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.4728
+      },
+      {
+        "sentence": "After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner.",
+        "score": 0.4368
+      },
+      {
+        "sentence": "Eventually, after reducing system security, the adversary ran Ymir to achieve their goals.",
+        "score": 0.4292
+      },
+      {
+        "sentence": "In this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.",
+        "score": 0.4456
+      },
+      {
+        "sentence": "Analysis Static analysis Our analysis began with a basic inspection of the artifact.",
+        "score": 0.5344
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.5344
+      },
+      {
+        "sentence": "These API calls are typically found in various ransomware samples.",
+        "score": 0.5464
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.8561
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.482
+      },
+      {
+        "sentence": "PDFs are placed in various directories. | | String (date) | D:20240831154833-06’00’ | PDF creation date metadata. | | String | x64dbg | Debugger name. | One interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.",
+        "score": 0.4248
+      },
+      {
+        "sentence": "Static analysis also shows that the PDF used as the ransom note is present in the .data section of the binary.",
+        "score": 0.6318
+      },
+      {
+        "sentence": "The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.",
+        "score": 0.5172
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.5029
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.5278
+      },
+      {
+        "sentence": "For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.",
+        "score": 0.3778
+      },
+      {
+        "sentence": "While reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.",
+        "score": 0.6824
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.4731
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.5681
+      },
+      {
+        "sentence": "After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions.",
+        "score": 0.6391
+      },
+      {
+        "sentence": "The following image shows a fragment of the malware loading environment variables after calling memmove.",
+        "score": 0.5568
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.4196
+      },
+      {
+        "sentence": "It also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.",
+        "score": 0.356
+      },
+      {
+        "sentence": "During the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.",
+        "score": 0.609
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.7011
+      },
+      {
+        "sentence": "Additionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.",
+        "score": 0.4935
+      },
+      {
+        "sentence": "The ransom note informs the victim about what happened to the affected system and instructs them to contact the attackers for a deal.",
+        "score": 0.445
+      },
+      {
+        "sentence": "Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration.",
+        "score": 0.3479
+      },
+      {
+        "sentence": "This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "We spotted one odd string, a comment written in the Lingala language.",
+        "score": 0.5631
+      },
+      {
+        "sentence": "This language is used in the Democratic Republic of the Congo, Republic of the Congo, Angola and the Central African Republic.",
+        "score": 0.4194
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.3354
+      },
+      {
+        "sentence": "Once PowerShell is located, the malware uses it for deleting itself.",
+        "score": 0.5272
+      },
+      {
+        "sentence": "In our investigation, we copied powershell.exe into our Desktop folder, so it was used for deleting the sample.",
+        "score": 0.519
+      },
+      {
+        "sentence": "The following diagram shows a summary of the sample’s execution.",
+        "score": 0.4848
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.4778
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.5566
+      },
+      {
+        "sentence": "YARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time.",
+        "score": 0.5015
+      },
+      {
+        "sentence": "We believe that the attacker used a VPN network or Tor to hide their IP.",
+        "score": 0.4449
+      },
+      {
+        "sentence": "The artifact we discovered looks like a test binary sent by the attacker to check if it would be detected by security vendors.",
+        "score": 0.5306
+      },
+      {
+        "sentence": "The sample receives a --path parameter from the command line, which specifies the directory to be encrypted.",
+        "score": 0.3523
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.5802
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.4446
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.7683
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.6438
+      },
+      {
+        "sentence": "At the time of our research, 12 security vendors including Kaspersky detected the threat.",
+        "score": 0.4103
+      },
+      {
+        "sentence": "The ransomware incident In addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained.",
+        "score": 0.4836
+      },
+      {
+        "sentence": "Our forensic analysis revealed that crucial evidence had been lost through the attacker’s efforts to cover their tracks.",
+        "score": 0.4923
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.3976
+      },
+      {
+        "sentence": "Malicious activity was detected on a domain controller shortly after, including compromised access on behalf of legitimate users, including one with high privileges.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.4735
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.6652
+      },
+      {
+        "sentence": "This sample also connects to the C2 server 74.50.84[.]181 on port 443, detected by Kaspersky as a host for malicious files since August 2024.",
+        "score": 0.4114
+      },
+      {
+        "sentence": "The attackers compromised the domain controller and used it to continue infiltrating systems in the targeted infrastructure.",
+        "score": 0.3113
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.5081
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.3896
+      },
+      {
+        "sentence": "The script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.",
+        "score": 0.3262
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.33
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.5838
+      },
+      {
+        "sentence": "At the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems. - advanced_ip_scanner.exe; - processhacker-2.39-setup.exe.",
+        "score": 0.4019
+      },
+      {
+        "sentence": "Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script.",
+        "score": 0.5816
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.461
+      },
+      {
+        "sentence": "The Ymir development represents a threat to all types of companies and confirms the existence of emerging groups that can impact business and organizations with a configurable, robust and well-developed malware.",
+        "score": 0.4836
+      },
+      {
+        "sentence": "We have seen initial access brokers invade an organization and ensure persistence.",
+        "score": 0.3145
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.6618
+      },
+      {
+        "sentence": "The group behind this threat has not presented a dedicated leak site or any additional information yet, but we will continue monitoring their activity.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "Alerts were triggered two days prior to the ransomware incident, and the lack of action on the critical system warnings allowed the attackers to launch the ransomware.",
+        "score": 0.3832
+      },
+      {
+        "sentence": "This highlights the need for improved response strategies beyond relying solely on endpoint protection platforms (EPP).",
+        "score": 0.3207
+      },
+      {
+        "sentence": "Kaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.",
+        "score": 0.483
+      }
+    ],
+    "T1059.001": [
+      {
+        "sentence": "Introduction In a recent incident response case, we discovered a new and notable ransomware family in active use by the attackers, which we named “Ymir”.",
+        "score": 0.386
+      },
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "In the case we analyzed, the attacker was able to gain access to the system via PowerShell remote control commands.",
+        "score": 0.5031
+      },
+      {
+        "sentence": "After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner.",
+        "score": 0.5319
+      },
+      {
+        "sentence": "Eventually, after reducing system security, the adversary ran Ymir to achieve their goals.",
+        "score": 0.3732
+      },
+      {
+        "sentence": "In this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "Analysis Static analysis Our analysis began with a basic inspection of the artifact.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.4075
+      },
+      {
+        "sentence": "These API calls are typically found in various ransomware samples.",
+        "score": 0.4315
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.5229
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.4614
+      },
+      {
+        "sentence": "Static analysis also shows that the PDF used as the ransom note is present in the .data section of the binary.",
+        "score": 0.3608
+      },
+      {
+        "sentence": "The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.",
+        "score": 0.358
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.5053
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.5163
+      },
+      {
+        "sentence": "For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.",
+        "score": 0.337
+      },
+      {
+        "sentence": "While reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.",
+        "score": 0.4153
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions.",
+        "score": 0.4802
+      },
+      {
+        "sentence": "The following image shows a fragment of the malware loading environment variables after calling memmove.",
+        "score": 0.4214
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.327
+      },
+      {
+        "sentence": "During the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.",
+        "score": 0.4073
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "Additionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "The ransom note informs the victim about what happened to the affected system and instructs them to contact the attackers for a deal.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration.",
+        "score": 0.4067
+      },
+      {
+        "sentence": "This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "We spotted one odd string, a comment written in the Lingala language.",
+        "score": 0.403
+      },
+      {
+        "sentence": "This language is used in the Democratic Republic of the Congo, Republic of the Congo, Angola and the Central African Republic.",
+        "score": 0.3481
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.4988
+      },
+      {
+        "sentence": "Once PowerShell is located, the malware uses it for deleting itself.",
+        "score": 0.5491
+      },
+      {
+        "sentence": "In our investigation, we copied powershell.exe into our Desktop folder, so it was used for deleting the sample.",
+        "score": 0.5345
+      },
+      {
+        "sentence": "The following diagram shows a summary of the sample’s execution.",
+        "score": 0.4782
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.6141
+      },
+      {
+        "sentence": "Subsequently, PowerShell calls conhost.exe, which is used for running services in the background.",
+        "score": 0.5167
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.6384
+      },
+      {
+        "sentence": "YARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time.",
+        "score": 0.4453
+      },
+      {
+        "sentence": "The artifact we discovered looks like a test binary sent by the attacker to check if it would be detected by security vendors.",
+        "score": 0.4046
+      },
+      {
+        "sentence": "The sample receives a --path parameter from the command line, which specifies the directory to be encrypted.",
+        "score": 0.4195
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.3648
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.4642
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "At the time of our research, 12 security vendors including Kaspersky detected the threat.",
+        "score": 0.3049
+      },
+      {
+        "sentence": "The ransomware incident In addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained.",
+        "score": 0.3889
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.5138
+      },
+      {
+        "sentence": "Malicious activity was detected on a domain controller shortly after, including compromised access on behalf of legitimate users, including one with high privileges.",
+        "score": 0.3493
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.3944
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.4721
+      },
+      {
+        "sentence": "This sample also connects to the C2 server 74.50.84[.]181 on port 443, detected by Kaspersky as a host for malicious files since August 2024.",
+        "score": 0.4136
+      },
+      {
+        "sentence": "The attackers compromised the domain controller and used it to continue infiltrating systems in the targeted infrastructure.",
+        "score": 0.374
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.5846
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.415
+      },
+      {
+        "sentence": "The script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.",
+        "score": 0.3495
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.6527
+      },
+      {
+        "sentence": "At the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems. - advanced_ip_scanner.exe; - processhacker-2.39-setup.exe.",
+        "score": 0.4996
+      },
+      {
+        "sentence": "Finally, two days after the initial RustyStealer intrusion, attackers deployed the Ymir ransomware by executing remote connections and uploading the payload.",
+        "score": 0.4898
+      },
+      {
+        "sentence": "Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script.",
+        "score": 0.5475
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.3651
+      },
+      {
+        "sentence": "The Ymir development represents a threat to all types of companies and confirms the existence of emerging groups that can impact business and organizations with a configurable, robust and well-developed malware.",
+        "score": 0.3955
+      },
+      {
+        "sentence": "Ymir was deployed to the targeted system shortly after.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "The group behind this threat has not presented a dedicated leak site or any additional information yet, but we will continue monitoring their activity.",
+        "score": 0.3889
+      },
+      {
+        "sentence": "Alerts were triggered two days prior to the ransomware incident, and the lack of action on the critical system warnings allowed the attackers to launch the ransomware.",
+        "score": 0.3518
+      },
+      {
+        "sentence": "Kaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.",
+        "score": 0.3015
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "Introduction In a recent incident response case, we discovered a new and notable ransomware family in active use by the attackers, which we named “Ymir”.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.3033
+      },
+      {
+        "sentence": "After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "In this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "Analysis Static analysis Our analysis began with a basic inspection of the artifact.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "These API calls are typically found in various ransomware samples.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.3595
+      },
+      {
+        "sentence": "PDFs are placed in various directories. | | String (date) | D:20240831154833-06’00’ | PDF creation date metadata. | | String | x64dbg | Debugger name. | One interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.",
+        "score": 0.458
+      },
+      {
+        "sentence": "The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.",
+        "score": 0.4204
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.6653
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.6417
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.4145
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.353
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.4634
+      },
+      {
+        "sentence": "It also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.",
+        "score": 0.4896
+      },
+      {
+        "sentence": "During the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.",
+        "score": 0.3619
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.3344
+      },
+      {
+        "sentence": "The ransom note informs the victim about what happened to the affected system and instructs them to contact the attackers for a deal.",
+        "score": 0.4515
+      },
+      {
+        "sentence": "Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration.",
+        "score": 0.4162
+      },
+      {
+        "sentence": "This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.",
+        "score": 0.3313
+      },
+      {
+        "sentence": "We spotted one odd string, a comment written in the Lingala language.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.3403
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.3136
+      },
+      {
+        "sentence": "Subsequently, PowerShell calls conhost.exe, which is used for running services in the background.",
+        "score": 0.3074
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.3092
+      },
+      {
+        "sentence": "YARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "We believe that the attacker used a VPN network or Tor to hide their IP.",
+        "score": 0.3002
+      },
+      {
+        "sentence": "The sample receives a --path parameter from the command line, which specifies the directory to be encrypted.",
+        "score": 0.304
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.3623
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.3297
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "The ransomware incident In addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained.",
+        "score": 0.349
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.5006
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.6325
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.3405
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.3794
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.453
+      },
+      {
+        "sentence": "The script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.",
+        "score": 0.4924
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.335
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.4453
+      },
+      {
+        "sentence": "At the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems. - advanced_ip_scanner.exe; - processhacker-2.39-setup.exe.",
+        "score": 0.3619
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.3863
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "The group behind this threat has not presented a dedicated leak site or any additional information yet, but we will continue monitoring their activity.",
+        "score": 0.3215
+      },
+      {
+        "sentence": "Kaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.",
+        "score": 0.3699
+      }
+    ],
+    "T1129": [
+      {
+        "sentence": "Introduction In a recent incident response case, we discovered a new and notable ransomware family in active use by the attackers, which we named “Ymir”.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.522
+      },
+      {
+        "sentence": "In the case we analyzed, the attacker was able to gain access to the system via PowerShell remote control commands.",
+        "score": 0.3292
+      },
+      {
+        "sentence": "After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner.",
+        "score": 0.4734
+      },
+      {
+        "sentence": "Eventually, after reducing system security, the adversary ran Ymir to achieve their goals.",
+        "score": 0.3327
+      },
+      {
+        "sentence": "In this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.",
+        "score": 0.3751
+      },
+      {
+        "sentence": "Analysis Static analysis Our analysis began with a basic inspection of the artifact.",
+        "score": 0.3522
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.646
+      },
+      {
+        "sentence": "These API calls are typically found in various ransomware samples.",
+        "score": 0.5197
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.5245
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.4515
+      },
+      {
+        "sentence": "PDFs are placed in various directories. | | String (date) | D:20240831154833-06’00’ | PDF creation date metadata. | | String | x64dbg | Debugger name. | One interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.",
+        "score": 0.3602
+      },
+      {
+        "sentence": "Static analysis also shows that the PDF used as the ransom note is present in the .data section of the binary.",
+        "score": 0.3995
+      },
+      {
+        "sentence": "The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.",
+        "score": 0.3395
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.5209
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.5087
+      },
+      {
+        "sentence": "For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.",
+        "score": 0.4045
+      },
+      {
+        "sentence": "While reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.",
+        "score": 0.5626
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.3561
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.5906
+      },
+      {
+        "sentence": "After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions.",
+        "score": 0.6599
+      },
+      {
+        "sentence": "The following image shows a fragment of the malware loading environment variables after calling memmove.",
+        "score": 0.6014
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.4205
+      },
+      {
+        "sentence": "It also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.",
+        "score": 0.468
+      },
+      {
+        "sentence": "During the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.",
+        "score": 0.7232
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "Additionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.",
+        "score": 0.523
+      },
+      {
+        "sentence": "Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration.",
+        "score": 0.3534
+      },
+      {
+        "sentence": "This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.",
+        "score": 0.3711
+      },
+      {
+        "sentence": "We spotted one odd string, a comment written in the Lingala language.",
+        "score": 0.3905
+      },
+      {
+        "sentence": "This language is used in the Democratic Republic of the Congo, Republic of the Congo, Angola and the Central African Republic.",
+        "score": 0.3303
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.337
+      },
+      {
+        "sentence": "Once PowerShell is located, the malware uses it for deleting itself.",
+        "score": 0.437
+      },
+      {
+        "sentence": "In our investigation, we copied powershell.exe into our Desktop folder, so it was used for deleting the sample.",
+        "score": 0.482
+      },
+      {
+        "sentence": "The following diagram shows a summary of the sample’s execution.",
+        "score": 0.4258
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.5025
+      },
+      {
+        "sentence": "Subsequently, PowerShell calls conhost.exe, which is used for running services in the background.",
+        "score": 0.432
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "YARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time.",
+        "score": 0.3547
+      },
+      {
+        "sentence": "The artifact we discovered looks like a test binary sent by the attacker to check if it would be detected by security vendors.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "The sample receives a --path parameter from the command line, which specifies the directory to be encrypted.",
+        "score": 0.347
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.3667
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.3265
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.471
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.3743
+      },
+      {
+        "sentence": "The ransomware incident In addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained.",
+        "score": 0.4221
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.3976
+      },
+      {
+        "sentence": "Malicious activity was detected on a domain controller shortly after, including compromised access on behalf of legitimate users, including one with high privileges.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.6677
+      },
+      {
+        "sentence": "This sample also connects to the C2 server 74.50.84[.]181 on port 443, detected by Kaspersky as a host for malicious files since August 2024.",
+        "score": 0.4595
+      },
+      {
+        "sentence": "The attackers compromised the domain controller and used it to continue infiltrating systems in the targeted infrastructure.",
+        "score": 0.337
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.5049
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.4028
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.512
+      },
+      {
+        "sentence": "At the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems. - advanced_ip_scanner.exe; - processhacker-2.39-setup.exe.",
+        "score": 0.3415
+      },
+      {
+        "sentence": "Finally, two days after the initial RustyStealer intrusion, attackers deployed the Ymir ransomware by executing remote connections and uploading the payload.",
+        "score": 0.5056
+      },
+      {
+        "sentence": "Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script.",
+        "score": 0.4443
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.3341
+      },
+      {
+        "sentence": "The Ymir development represents a threat to all types of companies and confirms the existence of emerging groups that can impact business and organizations with a configurable, robust and well-developed malware.",
+        "score": 0.3796
+      },
+      {
+        "sentence": "Ymir was deployed to the targeted system shortly after.",
+        "score": 0.3364
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.4182
+      },
+      {
+        "sentence": "The group behind this threat has not presented a dedicated leak site or any additional information yet, but we will continue monitoring their activity.",
+        "score": 0.3823
+      },
+      {
+        "sentence": "Alerts were triggered two days prior to the ransomware incident, and the lack of action on the critical system warnings allowed the attackers to launch the ransomware.",
+        "score": 0.3371
+      }
+    ],
+    "T1486": [
+      {
+        "sentence": "Introduction In a recent incident response case, we discovered a new and notable ransomware family in active use by the attackers, which we named “Ymir”.",
+        "score": 0.5134
+      },
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.3913
+      },
+      {
+        "sentence": "After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner.",
+        "score": 0.3014
+      },
+      {
+        "sentence": "Eventually, after reducing system security, the adversary ran Ymir to achieve their goals.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "In this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.",
+        "score": 0.4044
+      },
+      {
+        "sentence": "Analysis Static analysis Our analysis began with a basic inspection of the artifact.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.4451
+      },
+      {
+        "sentence": "These API calls are typically found in various ransomware samples.",
+        "score": 0.4358
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.5909
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.386
+      },
+      {
+        "sentence": "PDFs are placed in various directories. | | String (date) | D:20240831154833-06’00’ | PDF creation date metadata. | | String | x64dbg | Debugger name. | One interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.",
+        "score": 0.4434
+      },
+      {
+        "sentence": "Static analysis also shows that the PDF used as the ransom note is present in the .data section of the binary.",
+        "score": 0.5317
+      },
+      {
+        "sentence": "The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.4189
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.4626
+      },
+      {
+        "sentence": "For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.",
+        "score": 0.4786
+      },
+      {
+        "sentence": "While reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.",
+        "score": 0.4313
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.5971
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.5229
+      },
+      {
+        "sentence": "After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions.",
+        "score": 0.3583
+      },
+      {
+        "sentence": "The following image shows a fragment of the malware loading environment variables after calling memmove.",
+        "score": 0.397
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.5863
+      },
+      {
+        "sentence": "It also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.",
+        "score": 0.4453
+      },
+      {
+        "sentence": "During the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.",
+        "score": 0.4222
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.6044
+      },
+      {
+        "sentence": "Additionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.",
+        "score": 0.6668
+      },
+      {
+        "sentence": "The ransom note informs the victim about what happened to the affected system and instructs them to contact the attackers for a deal.",
+        "score": 0.5281
+      },
+      {
+        "sentence": "Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.",
+        "score": 0.4098
+      },
+      {
+        "sentence": "We spotted one odd string, a comment written in the Lingala language.",
+        "score": 0.3705
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.3315
+      },
+      {
+        "sentence": "Once PowerShell is located, the malware uses it for deleting itself.",
+        "score": 0.445
+      },
+      {
+        "sentence": "In our investigation, we copied powershell.exe into our Desktop folder, so it was used for deleting the sample.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.3137
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "YARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "The sample receives a --path parameter from the command line, which specifies the directory to be encrypted.",
+        "score": 0.4011
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.7295
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.4798
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.473
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.7288
+      },
+      {
+        "sentence": "The ransomware incident In addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained.",
+        "score": 0.486
+      },
+      {
+        "sentence": "Our forensic analysis revealed that crucial evidence had been lost through the attacker’s efforts to cover their tracks.",
+        "score": 0.4547
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.457
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.5507
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "This sample also connects to the C2 server 74.50.84[.]181 on port 443, detected by Kaspersky as a host for malicious files since August 2024.",
+        "score": 0.3057
+      },
+      {
+        "sentence": "The attackers compromised the domain controller and used it to continue infiltrating systems in the targeted infrastructure.",
+        "score": 0.3297
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.3575
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.4304
+      },
+      {
+        "sentence": "The script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.",
+        "score": 0.3249
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.5261
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.4774
+      },
+      {
+        "sentence": "At the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems. - advanced_ip_scanner.exe; - processhacker-2.39-setup.exe.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "Finally, two days after the initial RustyStealer intrusion, attackers deployed the Ymir ransomware by executing remote connections and uploading the payload.",
+        "score": 0.3743
+      },
+      {
+        "sentence": "Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script.",
+        "score": 0.4183
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.5216
+      },
+      {
+        "sentence": "The Ymir development represents a threat to all types of companies and confirms the existence of emerging groups that can impact business and organizations with a configurable, robust and well-developed malware.",
+        "score": 0.4513
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.7955
+      },
+      {
+        "sentence": "Alerts were triggered two days prior to the ransomware incident, and the lack of action on the critical system warnings allowed the attackers to launch the ransomware.",
+        "score": 0.4838
+      },
+      {
+        "sentence": "Kaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.",
+        "score": 0.3335
+      }
+    ],
+    "T1070.004": [
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.3733
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.3464
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.4307
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.3008
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.3682
+      },
+      {
+        "sentence": "For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.",
+        "score": 0.5868
+      },
+      {
+        "sentence": "While reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.",
+        "score": 0.3272
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.367
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.4434
+      },
+      {
+        "sentence": "After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "The following image shows a fragment of the malware loading environment variables after calling memmove.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.4417
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.3929
+      },
+      {
+        "sentence": "Additionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.",
+        "score": 0.4351
+      },
+      {
+        "sentence": "Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration.",
+        "score": 0.3211
+      },
+      {
+        "sentence": "We spotted one odd string, a comment written in the Lingala language.",
+        "score": 0.3063
+      },
+      {
+        "sentence": "Once PowerShell is located, the malware uses it for deleting itself.",
+        "score": 0.6919
+      },
+      {
+        "sentence": "In our investigation, we copied powershell.exe into our Desktop folder, so it was used for deleting the sample.",
+        "score": 0.5026
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.326
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.5719
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.4359
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.6226
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.3612
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.427
+      },
+      {
+        "sentence": "Our forensic analysis revealed that crucial evidence had been lost through the attacker’s efforts to cover their tracks.",
+        "score": 0.4392
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.3656
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.4015
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.3254
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.4005
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.4433
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script.",
+        "score": 0.4739
+      },
+      {
+        "sentence": "The Ymir development represents a threat to all types of companies and confirms the existence of emerging groups that can impact business and organizations with a configurable, robust and well-developed malware.",
+        "score": 0.3276
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.4672
+      }
+    ],
+    "T1083": [
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.3186
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "These API calls are typically found in various ransomware samples.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.3404
+      },
+      {
+        "sentence": "PDFs are placed in various directories. | | String (date) | D:20240831154833-06’00’ | PDF creation date metadata. | | String | x64dbg | Debugger name. | One interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.",
+        "score": 0.4766
+      },
+      {
+        "sentence": "The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.463
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.4013
+      },
+      {
+        "sentence": "For example, the --path parameter disables self-delete, allowing the attacker to reuse the binary for other directories.",
+        "score": 0.3853
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.7187
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.3708
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.7603
+      },
+      {
+        "sentence": "It also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.",
+        "score": 0.7094
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "Additionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.",
+        "score": 0.4971
+      },
+      {
+        "sentence": "Although the note mentions that the attackers have stolen the data from the affected machine, the malware does not have any network capabilities for data exfiltration.",
+        "score": 0.3389
+      },
+      {
+        "sentence": "This leads us to believe that the adversaries would steal data with other means once they obtained access to the computer, such as through HTTP, FTP or cloud storage uploads.",
+        "score": 0.3434
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.565
+      },
+      {
+        "sentence": "Once PowerShell is located, the malware uses it for deleting itself.",
+        "score": 0.3496
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.303
+      },
+      {
+        "sentence": "The sample receives a --path parameter from the command line, which specifies the directory to be encrypted.",
+        "score": 0.542
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.4174
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.536
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.4401
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.3548
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.6344
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.4194
+      },
+      {
+        "sentence": "The script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.6992
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.3589
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.3444
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.4111
+      }
+    ],
+    "T1497.003": [
+      {
+        "sentence": "The artifact has interesting features, including a large set of operations performed in memory with the help of the malloc, memmove and memcmp function calls.",
+        "score": 0.3743
+      },
+      {
+        "sentence": "After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner.",
+        "score": 0.3379
+      },
+      {
+        "sentence": "In this post, we provide a detailed analysis of the Ymir ransomware, as well the tactics, techniques and procedures (TTPs) employed by the attackers.",
+        "score": 0.3644
+      },
+      {
+        "sentence": "The binary also suspiciously imports functions, such as CryptAcquireContextA, CryptReleaseContext, CryptGenRandom, TerminateProcess and WinExec, from operating system libraries.",
+        "score": 0.5229
+      },
+      {
+        "sentence": "These API calls are typically found in various ransomware samples.",
+        "score": 0.4574
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.4505
+      },
+      {
+        "sentence": "The attacker used the MinGW compiler, a native Windows port of the GNU Compiler Collection (GCC).",
+        "score": 0.4129
+      },
+      {
+        "sentence": "PDFs are placed in various directories. | | String (date) | D:20240831154833-06’00’ | PDF creation date metadata. | | String | x64dbg | Debugger name. | One interesting fact is that the PDF creation date was August 31, 2024, which matches the binary compilation timestamp (2024-08-31), as shown in the image below.",
+        "score": 0.5588
+      },
+      {
+        "sentence": "The information hardcoded in this kind of file is very useful for creating detection rules and indicators of compromise.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.5993
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.6324
+      },
+      {
+        "sentence": "While reverse-engineering the sample, we found that it borrowed code from functions related to CryptoPP, an open-source cryptographic library written in C++.",
+        "score": 0.3853
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.4584
+      },
+      {
+        "sentence": "File name extensions to ignore Dynamic analysis While running the ransomware, we spotted hundreds of calls to the memmove function.",
+        "score": 0.468
+      },
+      {
+        "sentence": "After analyzing the data, we found that it loaded small pieces of instructions into memory for performing malicious functions.",
+        "score": 0.3021
+      },
+      {
+        "sentence": "The following image shows a fragment of the malware loading environment variables after calling memmove.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.4738
+      },
+      {
+        "sentence": "It also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.",
+        "score": 0.4856
+      },
+      {
+        "sentence": "During the malware execution, some additional libraries are loaded, such as CRYPTSP.dll, rsaenh.dll, bcrypt.dll and kernelbase.dll.",
+        "score": 0.4266
+      },
+      {
+        "sentence": "The artifact uses the stream cipher ChaCha20 algorithm to encrypt files, appending the extension .6C5oy2dVr6 to each encrypted file.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "Additionally, it copies the PDF contents from the .data section and uses the _write and _fsopen functions to generate a ransom note in PDF format within every directory in the affected system.",
+        "score": 0.3445
+      },
+      {
+        "sentence": "The ransom note informs the victim about what happened to the affected system and instructs them to contact the attackers for a deal.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "We spotted one odd string, a comment written in the Lingala language.",
+        "score": 0.3512
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.3581
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.3834
+      },
+      {
+        "sentence": "Subsequently, PowerShell calls conhost.exe, which is used for running services in the background.",
+        "score": 0.3367
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.3835
+      },
+      {
+        "sentence": "YARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time.",
+        "score": 0.3994
+      },
+      {
+        "sentence": "The artifact we discovered looks like a test binary sent by the attacker to check if it would be detected by security vendors.",
+        "score": 0.3445
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.337
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.396
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.3647
+      },
+      {
+        "sentence": "At the time of our research, 12 security vendors including Kaspersky detected the threat.",
+        "score": 0.347
+      },
+      {
+        "sentence": "The ransomware incident In addition to analyzing the malware, we managed to investigate an incident in Colombia where the Ymir sample was obtained.",
+        "score": 0.3149
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.3519
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.5407
+      },
+      {
+        "sentence": "This sample has obfuscated content for obstructing analysis and includes shared modules indicating that the artifact can invoke functions from APIs, such as native Windows DLLs.",
+        "score": 0.4689
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.3851
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.3662
+      },
+      {
+        "sentence": "The script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.",
+        "score": 0.3335
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.3949
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.3882
+      },
+      {
+        "sentence": "At the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems. - advanced_ip_scanner.exe; - processhacker-2.39-setup.exe.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.3654
+      },
+      {
+        "sentence": "This new ransomware family was configured in a secure scheme, making it impossible to decrypt the files from the targeted system.",
+        "score": 0.3484
+      },
+      {
+        "sentence": "Kaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.",
+        "score": 0.4023
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "After that, they installed multiple tools for malicious actions, such as Process Hacker and Advanced IP Scanner.",
+        "score": 0.5151
+      },
+      {
+        "sentence": "Analysis Static analysis Our analysis began with a basic inspection of the artifact.",
+        "score": 0.3084
+      },
+      {
+        "sentence": "Even though most of the sample information is unpacked in memory during runtime, we were able to find some useful indicators in the binary strings, including the ransom note filename and contents in a PDF file, encryption extension, PowerShell commands, and some hexadecimal integers used by the encryption algorithms, as shown in the following images.",
+        "score": 0.3655
+      },
+      {
+        "sentence": "After reaching the main function, the malware executes another function with calls to other functions to get system information.",
+        "score": 0.428
+      },
+      {
+        "sentence": "To streamline our analysis, we renamed this function to Get_System_Information: The malware also contains some execution restrictions which are activated when certain parameters are set.",
+        "score": 0.4324
+      },
+      {
+        "sentence": "The malware also has a hardcoded list of file name extensions to exclude from encryption.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "The malware constantly uses the memmove function while enumerating subdirectories and files inside the affected system, so they can be encrypted later.",
+        "score": 0.406
+      },
+      {
+        "sentence": "It also uses memmove to load strings that contain locations in the victim’s filesystem and are used for comparing with common directory names during runtime.",
+        "score": 0.3181
+      },
+      {
+        "sentence": "Another interesting fact is that the sample searches for PowerShell in each subdirectory.",
+        "score": 0.3621
+      },
+      {
+        "sentence": "Once PowerShell is located, the malware uses it for deleting itself.",
+        "score": 0.3213
+      },
+      {
+        "sentence": "The following diagram shows a summary of the sample’s execution.",
+        "score": 0.395
+      },
+      {
+        "sentence": "Note that the only child process created was powershell.exe — the malware creates a PowerShell instance even if it finds one in the system.",
+        "score": 0.449
+      },
+      {
+        "sentence": "Subsequently, PowerShell calls conhost.exe, which is used for running services in the background.",
+        "score": 0.3923
+      },
+      {
+        "sentence": "The malware calls PowerShell with the cmdlet Start-Sleep to wait 5 seconds, and finally, uses the Remove-Item command to delete itself from the machine, as shown in the image below.",
+        "score": 0.349
+      },
+      {
+        "sentence": "YARA rule Based on our analysis of the sample, we developed the following YARA rule for detecting the threat in real time.",
+        "score": 0.3213
+      },
+      {
+        "sentence": "The artifact we discovered looks like a test binary sent by the attacker to check if it would be detected by security vendors.",
+        "score": 0.3127
+      },
+      {
+        "sentence": "However, it neither encrypts the files nor generates a ransom note.",
+        "score": 0.3572
+      },
+      {
+        "sentence": "What caught our attention was that this test version of the executable, similarly to the full-featured sample, did not delete itself when executed with the --path parameter, which made sense, since the adversary might want to select certain directories during the attack.",
+        "score": 0.3199
+      },
+      {
+        "sentence": "By comparing the two detections, we concluded that the final sample with the fully enabled encryption features, unlike the test variant, had extended functionality implemented in additional strings.",
+        "score": 0.3195
+      },
+      {
+        "sentence": "These included the extension appended to the name of the encrypted files ( .6C5oy2dVr6) and the information present in the PDF file generated as a ransom note.",
+        "score": 0.3405
+      },
+      {
+        "sentence": "At the time of our research, 12 security vendors including Kaspersky detected the threat.",
+        "score": 0.3243
+      },
+      {
+        "sentence": "We at Kaspersky GERT were able to identify that two days before the ransomware deployment, a new RustyStealer threat was detected on multiple systems, allowing the attackers to control the machines, send commands, and gather information from compromised infrastructure.",
+        "score": 0.385
+      },
+      {
+        "sentence": "The initial RustyStealer sample was a PE file compiled with Rust and deployed to Windows\\Temp under the name AudioDriver2.0.exe. | Filename | AudioDriver2.0.exe | | Size | 3334144 bytes (3.2 MB) | | MD5 | 5ee1befc69d120976a60a97d3254e9eb | | SHA-1 | e6c4d3e360a705e272ae0b505e58e3d928fb1387 | This sample, named Trojan.Win32.Sheller.ey by Kaspersky, has the ability of gathering information about the file system.",
+        "score": 0.4334
+      },
+      {
+        "sentence": "Dnoper.posh | | b087e1309f3eab6302d7503079af1ad6af06d70a9 32f7a6ae1421b942048e28a | 2024-08-17 02:43:55 UTC | Ukraine | 85.239.61[.]60 | Trojan.MSIL.Dnoper.sb | One of these scripts was spotted in multiple systems, collected as a script block for PowerShell that included a different approach and a different C2 system (5.255.117[.]134 on port 80).",
+        "score": 0.3594
+      },
+      {
+        "sentence": "It was probably used to exfiltrate information from the infrastructure according to the following hardcoded functions and their instructions. - GetServerByFilename, - SendFile, - SearchRoot.",
+        "score": 0.3465
+      },
+      {
+        "sentence": "The script establishes communication with the C2 server and sends information, including a specific key that allows the attacker to identify the affected company.",
+        "score": 0.3957
+      },
+      {
+        "sentence": "The SearchRoot function contains a loop that searches for all files that are included in the requested folder and checks for a specific filter: the malware only uploads files with a size greater than 40 KB that were created after a specified date.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "The script is Base64 encoded and passed to the following command for execution. | 1 | $selfpath\\powershell.exe -Version 5.1 -s -NoLogo -NoProfile -EncodedCommand <B64CMD> | According to our GERT analysis, at the time of the research, there was a service configured at this IP address (5.255.117[.]134) for uploading files that were collected with the SystemBC scripts.",
+        "score": 0.3628
+      },
+      {
+        "sentence": "At the same time, multiple creations and executions of the well-known programs Advanced IP Scanner and Process Hacker were alerted on several systems. - advanced_ip_scanner.exe; - processhacker-2.39-setup.exe.",
+        "score": 0.5424
+      },
+      {
+        "sentence": "Some traces of the execution were detected, in particular those associated with the PowerShell self-destruct script.",
+        "score": 0.3115
+      },
+      {
+        "sentence": "Also, a part of the ransom note was configured in the registry key field legalnoticecaption, located in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System, which invites the user to look for additional details in the ransom note, named “INCIDENT_REPORT.pdf”: Conclusion A link between malware stealer botnets acting as access brokers and the ransomware execution is evident.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "The group behind this threat has not presented a dedicated leak site or any additional information yet, but we will continue monitoring their activity.",
+        "score": 0.3111
+      },
+      {
+        "sentence": "Kaspersky products detect this new threat as Trojan-Ransom.Win64.Ymir.gen.",
+        "score": 0.3266
+      }
+    ]
+  }
+}

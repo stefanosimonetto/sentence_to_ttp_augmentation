@@ -1,0 +1,1662 @@
+{
+  "original_txt": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit. Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated. Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.\nThese kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit. In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests. One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.\nTable 2. Debugging locations found in Spicy Hot Pot malware\nTo a normal user, the kernel drivers dropped to disk are completely invisible. This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk. This extends to making the executables dropped to disk invisible. We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file\nBriefing over other components of this malware:\nThis particular piece of malware is primarily focused on Chinese users. This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China. Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.\nThe Initial Detection\nIn June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment. This had the below SHA256 hash:498ed725195b5ee52e406de237afa9ef268cabc4ef604c363aee2e78b3b13193\n%localappdata%\\Microsoft\\Event Viewer\\wccenter.exe\n%localappdata%\\Microsoft\\Event Viewer\\wdlogin.exe\n%localappdata%\\Microsoft\\Event Viewer\\wrme.exe\n%localappdata%\\Microsoft\\Event Viewer\\wuhost.exe\n%localappdata%\\Microsoft\\WindowsApps\\DvLayout.exe\n%localappdata%\\Temp\\_J861.exe\n%localappdata%\\Temp\\baofeng15.0.exe\n%localappdata%\\Microsoft\\WindowsApps\\KMDF_LOOK.sys\n%localappdata%\\Microsoft\\WindowsApps\\KMDF_Protect.sys\nSoftware\\Microsoft\\Helicarrier\\st\\stemp\nSoftware\\Microsoft\\Helicarrier\\Channel\nSoftware\\Microsoft\\DirectX\\DvVersion\nSoftware\\Microsoft\\DirectX\\PvVersion\nSoftware\\Microsoft\\DirectX\\RvVersion\nSoftware\\Microsoft\\Helicarrier\\dp\nSoftware\\Microsoft\\Helicarrier\\ca\nSoftware\\Microsoft\\Helicarrier\\dr\nSoftware\\Microsoft\\Helicarrier\\eu\nSoftware\\Microsoft\\Helicarrier\\fd\nSoftware\\Microsoft\\Helicarrier\\ap\n2016-01-13 13:19:34\n| File Name | Signing Certificate |\nDvLayout.exe | Valid From 12:00 AM 05/16/2014 Valid To\n11:59 PM 05/16/2015 |\nwccenter.exe | Valid From 12:00 AM 05/16/2014 Valid To\n11:59 PM 05/16/2015 |\nwrme.exe | Valid From 12:00 AM 02/08/2010 Valid To\n11:59 PM 02/07/2020 |\nwuhost.exe | Valid From 12:00 AM 02/08/2010 Valid To\n11:59 PM 02/07/2020 |\nwdlogin.exe | Valid From 04:23 AM 08/22/2020 Valid To\n04:23 AM 08/22/2020 |\n_J861.exe | Valid From 12:00 AM 02/08/2010 Valid To\n11:59 PM 02/07/2020 |\nbaofeng15.0.exe | Not Signed |\nKMDF_LOOK.sys | Valid From 02:21 AM 06/13/2020 Valid To\n02:21 AM 06/13/2020 |\nKMDF_Protect.sys | Valid From 12:00 AM 05/16/2014 Valid To\n11:59 PM 05/16/2015 |\nTable 1. Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity. Many pieces of malware signed by this entity contained similar debugging (pdb) locations in their debug strings.\n| Binary | PDB |\nKMDF_LOOK.sys | G:\\SVN\\源码\\驱动\\LookFile\\KMDF_LOOK\\Release\\KMDF_LOOK_64.pdb |\nKMDF_Protect.sys | G:\\SVN\\源码\\驱动\\protect\\KMDF_Protect\\Release\\KMDF_Protect_64.pdb |\nwdlogin.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wdlogin.pdb |\nwrme.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wrme.pdb |\nwccenter.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wccenter.pdb |\n_J861.exe | E:\\work\\Icon_Report\\Release\\_service.pdb |\nwuhost.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wuhost.pdb |\nKMDF_Protect.sys.\nIn addition to this, KMDF_Protect.sys\nchecks for any executables running with known binary names from Qihoo 360 software.\nThis also adds a shutdown callback for persistence. At shutdown, the driver attempts to write back the location of wccenter.exe\nto the system’s “RunOnce” key so that it runs again on boot. As this is performed by the kernel-mode driver, this modification isn’t shown by common registry monitoring tools.\nIf we compare this to KMDF_LOOK.sys\n, we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.\nIt should be noted that both drivers masquerade as legitimate service names to remain stealthy:\n| Driver | Malicious Service Name | Masqueraded Legitimate Service Name |\nKMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver |\nKMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort)\n|\nDVLayout.exe\nis used to install the rootkit. This creates the Mutex “DVLayout.”_J861.exe\nis used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware. This temporarily creates a service called “R.”wccenter.exe\ncommunicates withKMDF_Protect.sys\nusing a named device created called\\\\Device\\\\iaLPSS1z\nand is used to runwdlogin.exe\n,wuhost.exe\nandwrme.exe\n.\nwuhost.exe\nis used to update the rootkit drivers and modules as required. It creates the Mutex “Update” and contacts one of the following domains to fetch this update:\n- https<:>//du<.>testjj<.>com\n- https<:>//da<.>testiu<.>com\n- https<:>//db<.>testyk<.>com\nwrme.exe\nis used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system. It creates the Mutex “DLreport.”\nwdlogin.exe\nis used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump. This is likely for troubleshooting any blue screen errors that may be caused by the rootkit. It creates the Mutex “dumping.”\nInvestigation with Endpoint Detection and Response Data\nUsing CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled. This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys\n, and their associated driver loads.\nBy checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location. This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.\nFigure 13. Rootkit service as seen through Real Time Response (RTR)\nThe Remediation\nSpicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user. These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection. Due to this, removing Spicy Hot Pot malware remotely can be quite challenging. Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup. Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on. If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected. After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load. At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more. The services and registry keys associated with the rootkit can also be removed now.\nConclusion\nThis post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products. It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present. By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.\nIndicators\n| Type | Name/Purpose | Indicator |\n| SHA256 | baofeng15.0 | 498ed725195b5ee52e406de237afa9ef268cabc4ef604c363aee2e78b3b13193 |\n| SHA256 | DvLayout.exe | 551c4564d5ff537572fd356fe96df7c45bf62de9351fae5bb4e6f81dcbe34ae5 |\n| SHA256 | wccenter.exe | 17095beda4afeabb7f41ff07cf866ddc42e49da1a4ed64b9c279072caab354f6 |\n| SHA256 | wrme.exe | 7e489f1f72cac9f1c88bdc6be554c78b5a14197d63d1bae7e41de638e903af21 |\n| SHA256 | wuhost.exe | eb54cd2d61507b9e98712de99834437224b1cef31a81544a47d93e470b8613fc |\n| SHA256 | wdlogin.exe | 7c0fdee3670cc53a22844d691307570a21ae3be3ce4b66e46bb6d9baad1774b8 |\n| SHA256 | _J861.exe | c83e6b96ee3aa1a580157547eae88d112d2202d710218f2ed496f7fe3d861abc |\n| SHA256 | baofeng15.0.exe | c5802c7fbad5cdf257bcc0f71e8b1c8853e06da411133b5dc78bd6c891f27500 |\n| SHA256 | KMDF_LOOK.sys | 39764e887fd0b461d86c1be96018a4c2a670b1de90d05f86ed0acb357a683318 |\n| SHA256 | KMDF_Protect.sys | ab0418eb1863c8a2211d06c764f45884c9b7dbd6d1943137fc010b8f3b8d14ae |\n| Domain | Update/C2 | du<.>testjj<.>com |\n| Domain | Update/C2 | da<.>testiu<.>com |\n| Domain | Update/C2 | db<.>testyk<.>com |\n| Domain | Hijacking Domain | gndh333<.>top |\n| Mutex | wrme.exe | DLreport |\n| Mutex | wdlogin | dumping |\n| Mutex | wuhost | Update |\n| Mutex | DVLayout | DVLayout |\nMITRE ATT&CK® Mapping\n| Tactic | Technique | Sub-Technique | ID |\n| Reconnaissance | Search Open Websites/Domains | Search Engines | T1593.002 |\n| Resource Development | Acquire Infrastructure | Domains | T1583.001 |\n| Resource Development | Obtain Capabilities | Digital Certificates | T1588.004 |\n| Initial Access | Supply Chain Compromise | Compromise Software Supply Chain | T1195.002 |\n| Persistence | Boot or Logon Autostart Execution | Registry Run Keys / Startup Folder | T1547.001 |\n| Persistence | Create or Modify System Process | Windows Service | T1543.003 |\n| Defense Evasion | Rootkit | - | T1014 |\n| Defense Evasion | Impair Defenses | Disable or Modify Tools | T1562.001 |\n| Defense Evasion | Masquerading | Invalid Code Signature | T1036.001 |\n| Defense Evasion | Masquerading | Masquerade Task or Service | T1036.004 |\n| Defense Evasion | Masquerading | Match Legitimate Name or Location | T1036.005 |\n| Collection | Automated Collection | - | T1119 |\n| Command and Control | Encrypted Channel | Asymmetric Cryptography | T1573.002 |\n| Exfiltration | Automated Exfiltration | - | T1020 |\n| Exfiltration | Exfiltration Over C2 Channel | - | T1041 |\n| Impact | Defacement | Internal Defacement | T1491.001 |\n| Impact | Service Stop | - | T1489 |\nYara Rules\n| /*\nYARA Rule Set\nAuthor: jai-minton\nDate: 2020-11-01\nIdentifier: SpicyHotPot\nReference: /content/crowdstrike-www/language-masters/global/en/blog/author.jai-minton/\ncopyright = \"(c) 2020 CrowdStrike Inc.\" *//* Rule Set ----------------------------------------------------------------- */ rule SpicyHotPot_wdlogin {\nmeta:\ndescription = \"SpicyHotPot - wdlogin.exe: Used to identify memory dump uploading component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"7c0fdee3670cc53a22844d691307570a21ae3be3ce4b66e46bb6d9baad1774b8\"\nstrings:\n$x1 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wdlogin.pdb\" fullword ascii\n$x2 = \"kmdf_protect.sys\" fullword ascii\n$x3 = \"kmdf_look.sys\" fullword ascii\n$x4 = \"/api/v1/post_dump\" fullword ascii\n$s1 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii\n$s2 = \"https://db.testyk.com\" fullword ascii\n$s3 = \"https://da.testiu.com\" fullword ascii\n$s4 = \"https://du.testjj.com\" fullword ascii\n$s5 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii\n$s6 = \"No more connections allowed to host %s: %zu\" fullword ascii\n$s7 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii\n$s8 = \"Content-Disposition: %s%s%s%s%s%s%s\" fullword ascii\n$s9 = \"dumping\" fullword wide\ncondition:\nuint16(0) == 0x5a4d and filesize < 2000KB and\n1 of ($x*) and 3 of ($s*)\n}\nrule SpicyHotPot__J861 {\nmeta:\ndescription = \"SpicyHotPot - _J861.exe: Used to identify system fingerprinting, enumeration and networking component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"c83e6b96ee3aa1a580157547eae88d112d2202d710218f2ed496f7fe3d861abc\"\nstrings:\n$x1 = \"E:\\\\work\\\\Icon_Report\\\\Release\\\\_service.pdb\" fullword ascii\n$x2 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii\n$x3 = \"https://du.testjj.com/api/v1/id\" fullword ascii\n$s1 = \"SEC_E_ILLEGAL_MESSAGE (0x%08X)\" ascii\n$s2 = \"Failed reading the chunked-encoded stream\" fullword ascii\n$s3 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii\n$s4 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii\n$s5 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii\n$s6 = \"failed to load WS2_32.DLL (%u)\" fullword ascii\n$s7 = \"/c ping -n 3 127.1 >nul & del /q %s\" fullword ascii\n$s8 = \"No more connections allowed to host %s: %zu\" fullword ascii\n$s9 = \"%d ReadPhysicalDriveInNTUsingSmart ERROR DeviceIoControl(%d, SMART_GET_VERSION) returned 0, error is %d\" fullword ascii\n$s10 = \"%d ReadPhysicalDriveInNTWithAdminRights ERROR DeviceIoControl() %d, DFP_GET_VERSION) returned 0, error is %d\" fullword ascii\n$s11 = \"Content-Disposition: %s%s%s%s%s%s%s\" fullword ascii\n$s12 = \"Content-Type: %s%s%s\" fullword ascii\n$s13 = \"SOCKS4%s: connecting to HTTP proxy %s port %d\" fullword ascii\n$s14 = \"No valid port number in connect to host string (%s)\" fullword ascii\n$s15 = \"Excess found in a read: excess = %zu, size = %I64d, maxdownload = %I64d, bytecount = %I64d\" fullword ascii\ncondition:\nuint16(0) == 0x5a4d and filesize < 3000KB and\n2 of ($x*) and 8 of ($s*)\n}\nrule SpicyHotPot_wuhost {\nmeta:\ndescription = \"SpicyHotPot - wuhost.exe: Used to identify rootkit and module updating component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"eb54cd2d61507b9e98712de99834437224b1cef31a81544a47d93e470b8613fc\"\nstrings:\n$x1 = \"wdlogin.exe\" fullword ascii\n$x2 = \"UpdateTemp.exe\" fullword ascii\n$x3 = \"UpdateSelf.exe\" fullword ascii\n$x4 = \"wrme.exe\" fullword ascii\n$x5 = \"wccenter.exe\" fullword ascii\n$x6 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wuhost.pdb\" fullword ascii\n$x7 = \"wuhost.exe\" fullword ascii\n$s1 = \"SEC_E_ILLEGAL_MESSAGE (0x%08X) - This error usually occurs when a fatal SSL/TLS alert is received (e.g. handshake failed). More \" ascii\n$s2 = \"Failed reading the chunked-encoded stream\" fullword ascii\n$s3 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii\n$s4 = \"https://db.testyk.com\" fullword ascii\n$s5 = \"https://da.testiu.com\" fullword ascii\n$s6 = \"https://du.testjj.com\" fullword ascii\n$s7 = \"dump_temp\" fullword ascii\n$s8 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii\n$s9 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii\n$s10 = \"failed to load WS2_32.DLL (%u)\" fullword ascii\n$s11 = \"No more connections allowed to host %s: %zu\" fullword ascii\n$s12 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii\ncondition:\nuint16(0) == 0x5a4d and filesize < 2000KB and\n2 of ($x*) and 4 of them\n}\nrule SpicyHotPot_wrme {\nmeta:\ndescription = \"SpicyHotPot - wrme.exe: Used to identify module starting and reporting component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"7e489f1f72cac9f1c88bdc6be554c78b5a14197d63d1bae7e41de638e903af21\"\nstrings:\n$x1 = \"DvUpdate.exe\" fullword ascii\n$x2 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wrme.pdb\" fullword ascii\n$x3 = \"No more connections allowed to host %s: %zu\" fullword ascii\n$s1 = \"SEC_E_ILLEGAL_MESSAGE (0x%08X) - This error usually occurs when a fatal SSL/TLS alert is received (e.g. handshake failed). More \" ascii\n$s2 = \"Failed reading the chunked-encoded stream\" fullword ascii\n$s3 = \"Content-Type: %s%s%s\" fullword ascii\n$s4 = \"Excess found in a read: excess = %zu, size = %I64d, maxdownload = %I64d, bytecount = %I64d\" fullword ascii\n$s5 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii\n$s6 = \"https://db.testyk.com\" fullword ascii\n$s7 = \"https://da.testiu.com\" fullword ascii\n$s8 = \"https://du.testjj.com\" fullword ascii\n$s9 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii\n$s10 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii\n$s11 = \"failed to load WS2_32.DLL (%u)\" fullword ascii\n$s12 = \"Content-Disposition: %s%s%s%s%s%s%s\" fullword ascii\n$s13 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii\ncondition:\nuint16(0) == 0x5a4d and filesize < 2000KB and\n2 of ($x*) and 7 of ($s*)\n}\nrule SpicyHotPot_DvLayout {\nmeta:\ndescription = \"SpicyHotPot - DvLayout.exe: Used to identify rootkit installation component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"551c4564d5ff537572fd356fe96df7c45bf62de9351fae5bb4e6f81dcbe34ae5\"\nstrings:\n$x1 = \"KMDF_LOOK.sys\" fullword ascii\n$x2 = \"KMDF_Protect.sys\" fullword ascii\n$x3 = \"StartService Error, errorode is : %d .\" fullword ascii\n$x4 = \"Software\\\\Microsoft\\\\%s\\\\st\" fullword wide\n$s1 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii\n$s2 = \"@api-ms-win-core-synch-l1-2-0.dll\" fullword wide\n$s3 = \"Genealogy.ini\" fullword wide\n$s4 = \"powercfg /h off\" fullword ascii\n$s5 = \" Type Descriptor'\" fullword ascii\n$s6 = \"find %s failed , errorcode : %d\" fullword ascii\n$s7 = \"find %s failed , errorcode : %d\" fullword ascii\n$s8 = \"Delete %s failed , errorcode : %d\" fullword wide\n$s9 = \"Delete %s failed , errorcode : %d\" fullword wide\n$s10 = \"OpenService failed , errorcode : %d\" fullword wide\n$s11 = \"&Beijing JoinHope Image Technology Ltd.1/0-\" fullword ascii\n$s12 = \"/c del /q %s\" fullword ascii\ncondition:\nuint16(0) == 0x5a4d and filesize < 800KB and\n1 of ($x*) and 5 of ($s*)\n}\nrule SpicyHotPot_wccenter {\nmeta:\ndescription = \"SpicyHotPot - wccenter.exe: Used to identify malware that communicates with the rootkit component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"17095beda4afeabb7f41ff07cf866ddc42e49da1a4ed64b9c279072caab354f6\"\nstrings:\n$x1 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wccenter.pdb\" fullword ascii\n$x2 = \"wdlogin.exe\" fullword wide\n$x3 = \"wuhost.exe\" fullword wide\n$x4 = \"wrme.exe\" fullword wide\n$s1 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii\n$s2 = \" Type Descriptor'\" fullword ascii\n$s3 = \"&Beijing JoinHope Image Technology Ltd.1/0-\" fullword ascii\n$s4 = \"operator co_await\" fullword ascii\n$s5 = \"&Beijing JoinHope Image Technology Ltd.0\" fullword ascii\n$s6 = \"RvVersion\" fullword wide\n$s7 = \" Class Hierarchy Descriptor'\" fullword ascii\n$s8 = \"Base Class Descriptor\" ascii\n$s9 = \"Beijing1\" fullword ascii\n$s10 = \" Complete Object Locator'\" fullword ascii\ncondition:\nuint16(0) == 0x5a4d and filesize < 400KB and\n2 of ($x*) and 4 of ($s*)\n}\nrule SpicyHotPot_KMDF_LOOK {\nmeta:\ndescription = \"SpicyHotPot - KMDF_LOOK.sys: Used to identify browser hijacking component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"39764e887fd0b461d86c1be96018a4c2a670b1de90d05f86ed0acb357a683318\"\nstrings:\n$x1 = \"G:\\\\SVN\\\\\" ascii\n$s1 = \"TSWebDownLoadProtect.dll\" fullword wide\n$s2 = \"ShellIco.dll\" fullword wide\n$s3 = \"QMLogEx.dll\" fullword wide\n$s4 = \"SSOCommon.dll\" fullword wide\n$s5 = \"TsService.exe\" fullword ascii\n$s6 = \"Hookport.sys\" fullword wide\n$s7 = \"SafeWrapper32.dll\" fullword wide\n$s8 = \"safemon.dll\" fullword wide\n$s9 = \"iNetSafe.dll\" fullword wide\n$s10 = \"ieplus.dll\" fullword wide\n$s11 = \"wdui2.dll\" fullword wide\n$s12 = \"ExtBhoIEToSe.dll\" fullword wide\n$s13 = \"360NetBase.dll\" fullword wide\n$s14 = \"urlproc.dll\" fullword wide\n$s15 = \"360sdbho.dll\" fullword wide\n$s16 = \"360base.dll\" fullword wide\n$s17 = \"360UDiskGuard.dll\" fullword wide\n$s18 = \"TSClinicWebFix.dll\" fullword wide\n$s19 = \"QMEmKit.dll\" fullword wide\n$s20 = \"WdHPFileSafe.dll\" fullword wide\ncondition:\nuint16(0) == 0x5a4d and filesize < 1000KB and\n8 of them\n}\nrule SpicyHotPot_KMDF_Protect {\nmeta:\ndescription = \"SpicyHotPot - KMDF_Protect.sys: Used to identify driver protection and filtering component\"\nauthor = \"jai-minton\"\nreference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\"\ncopyright = \"(c) 2020 CrowdStrike Inc.\"\ndate = \"2020-11-01\"\nhash1 = \"ab0418eb1863c8a2211d06c764f45884c9b7dbd6d1943137fc010b8f3b8d14ae\"\nstrings:\n$x1 = \"wdlogin.exe\" fullword wide\n$x2 = \"\\\\Windows\\\\System32\\\\cmd.exe\" fullword wide\n$x3 = \"wuhost.exe\" fullword wide\n$x4 = \"wrme.exe\" fullword wide\n$x5 = \"UpdateSelf.exe\" fullword ascii\n$x6 = \"wccenter.exe\" fullword wide\n$s1 = \"jCloudScan.dll\" fullword wide\n$s2 = \"DSFScan.dll\" fullword wide\n$s3 = \"avescan.dll\" fullword wide\n$s4 = \"\\\\Cloudcom2.dll\" fullword wide\n$s5 = \"\\\\Cloudcom264.dll\" fullword wide\n$s6 = \"AVEIEngine.dll\" fullword wide\n$s7 = \"AVEI.dll\" fullword wide\n$s8 = \"BAPI.dll\" fullword wide\n$s9 = \"BAPI64.dll\" fullword wide\n$s10 = \"360Tray.exe\" fullword ascii\n$s11 = \"360Safe.exe\" fullword ascii\n$s12 = \"\\\\jCloudScan.dll\" fullword wide\n$s13 = \"\\\\deepscan64.dll\" fullword wide\n$s14 = \"\\\\deepscan.dll\" fullword wide\ncondition:\nuint16(0) == 0x5a4d and filesize < 1000KB and\n2 of ($x*) and 6 of ($s*)\n} |\nAdditional Resources\n- Learn more by visiting the Falcon Complete product webpage.\n- Read a white paper: CrowdStrike Falcon® Complete: Instant Cybersecurity Maturity for Organizations of All Sizes.\n- Test CrowdStrike next-gen AV for yourself: Start your free trial of Falcon Prevent™.",
+  "sanitized_txt": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit. Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated. Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.\nThese kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit. In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests. One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.\nTable 2. Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible. This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk. This extends to making the executables dropped to disk invisible. We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware:\nThis particular piece of malware is primarily focused on Chinese users. This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China. Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.\nThe Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment. This had the below SHA256 hash:498ed725195b5ee52e406de237afa9ef268cabc4ef604c363aee2e78b3b13193 %localappdata%\\Microsoft\\Event Viewer\\wccenter.exe %localappdata%\\Microsoft\\Event Viewer\\wdlogin.exe %localappdata%\\Microsoft\\Event Viewer\\wrme.exe %localappdata%\\Microsoft\\Event Viewer\\wuhost.exe %localappdata%\\Microsoft\\WindowsApps\\DvLayout.exe %localappdata%\\Temp\\_J861.exe %localappdata%\\Temp\\baofeng15.0.exe %localappdata%\\Microsoft\\WindowsApps\\KMDF_LOOK.sys %localappdata%\\Microsoft\\WindowsApps\\KMDF_Protect.sys Software\\Microsoft\\Helicarrier\\st\\stemp Software\\Microsoft\\Helicarrier\\Channel Software\\Microsoft\\DirectX\\DvVersion Software\\Microsoft\\DirectX\\PvVersion Software\\Microsoft\\DirectX\\RvVersion Software\\Microsoft\\Helicarrier\\dp Software\\Microsoft\\Helicarrier\\ca Software\\Microsoft\\Helicarrier\\dr Software\\Microsoft\\Helicarrier\\eu Software\\Microsoft\\Helicarrier\\fd Software\\Microsoft\\Helicarrier\\ap 2016-01-13 13:19:34 | File Name | Signing Certificate | DvLayout.exe | Valid From 12:00 AM 05/16/2014 Valid To 11:59 PM 05/16/2015 | wccenter.exe | Valid From 12:00 AM 05/16/2014 Valid To 11:59 PM 05/16/2015 | wrme.exe | Valid From 12:00 AM 02/08/2010 Valid To 11:59 PM 02/07/2020 | wuhost.exe | Valid From 12:00 AM 02/08/2010 Valid To 11:59 PM 02/07/2020 | wdlogin.exe | Valid From 04:23 AM 08/22/2020 Valid To 04:23 AM 08/22/2020 | _J861.exe | Valid From 12:00 AM 02/08/2010 Valid To 11:59 PM 02/07/2020 | baofeng15.0.exe | Not Signed | KMDF_LOOK.sys | Valid From 02:21 AM 06/13/2020 Valid To 02:21 AM 06/13/2020 | KMDF_Protect.sys | Valid From 12:00 AM 05/16/2014 Valid To 11:59 PM 05/16/2015 | Table 1. Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity. Many pieces of malware signed by this entity contained similar debugging (pdb) locations in their debug strings.\n| Binary | PDB | KMDF_LOOK.sys | G:\\SVN\\源码\\驱动\\LookFile\\KMDF_LOOK\\Release\\KMDF_LOOK_64.pdb | KMDF_Protect.sys | G:\\SVN\\源码\\驱动\\protect\\KMDF_Protect\\Release\\KMDF_Protect_64.pdb | wdlogin.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wdlogin.pdb | wrme.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wrme.pdb | wccenter.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wccenter.pdb | _J861.exe | E:\\work\\Icon_Report\\Release\\_service.pdb | wuhost.exe | D:\\Work\\Install_Driver\\Driver_helper\\Release\\wuhost.pdb | KMDF_Protect.sys.\nIn addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.\nThis also adds a shutdown callback for persistence. At shutdown, the driver attempts to write back the location of wccenter.exe to the system’s “RunOnce” key so that it runs again on boot. As this is performed by the kernel-mode driver, this modification isn’t shown by common registry monitoring tools.\nIf we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.\nIt should be noted that both drivers masquerade as legitimate service names to remain stealthy:\n| Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit. This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware. This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe .\nwuhost.exe is used to update the rootkit drivers and modules as required. It creates the Mutex “Update” and contacts one of the following domains to fetch this update:\n- https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system. It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump. This is likely for troubleshooting any blue screen errors that may be caused by the rootkit. It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled. This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.\nBy checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location. This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.\nFigure 13. Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user. These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection. Due to this, removing Spicy Hot Pot malware remotely can be quite challenging. Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup. Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on. If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected. After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load. At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more. The services and registry keys associated with the rootkit can also be removed now.\nConclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products. It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present. By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.\ndescription = \"SpicyHotPot - wdlogin.exe: Used to identify memory dump uploading component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"7c0fdee3670cc53a22844d691307570a21ae3be3ce4b66e46bb6d9baad1774b8\" strings:\n$x1 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wdlogin.pdb\" fullword ascii $x2 = \"kmdf_protect.sys\" fullword ascii $x3 = \"kmdf_look.sys\" fullword ascii $x4 = \"/api/v1/post_dump\" fullword ascii $s1 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii $s2 = \"https://db.testyk.com\" fullword ascii $s3 = \"https://da.testiu.com\" fullword ascii $s4 = \"https://du.testjj.com\" fullword ascii $s5 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii $s6 = \"No more connections allowed to host %s: %zu\" fullword ascii $s7 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii $s8 = \"Content-Disposition: %s%s%s%s%s%s%s\" fullword ascii $s9 = \"dumping\" fullword wide condition:\nuint16(0) == 0x5a4d and filesize < 2000KB and 1 of ($x*) and 3 of ($s*) } rule SpicyHotPot__J861 { meta:\ndescription = \"SpicyHotPot - _J861.exe: Used to identify system fingerprinting, enumeration and networking component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"c83e6b96ee3aa1a580157547eae88d112d2202d710218f2ed496f7fe3d861abc\" strings:\n$x1 = \"E:\\\\work\\\\Icon_Report\\\\Release\\\\_service.pdb\" fullword ascii $x2 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii $x3 = \"https://du.testjj.com/api/v1/id\" fullword ascii $s1 = \"SEC_E_ILLEGAL_MESSAGE (0x%08X)\" ascii $s2 = \"Failed reading the chunked-encoded stream\" fullword ascii $s3 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii $s4 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii $s5 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii $s6 = \"failed to load WS2_32.DLL (%u)\" fullword ascii $s7 = \"/c ping -n 3 127.1 >nul & del /q %s\" fullword ascii $s8 = \"No more connections allowed to host %s: %zu\" fullword ascii $s9 = \"%d ReadPhysicalDriveInNTUsingSmart ERROR DeviceIoControl(%d, SMART_GET_VERSION) returned 0, error is %d\" fullword ascii $s10 = \"%d ReadPhysicalDriveInNTWithAdminRights ERROR DeviceIoControl() %d, DFP_GET_VERSION) returned 0, error is %d\" fullword ascii $s11 = \"Content-Disposition: %s%s%s%s%s%s%s\" fullword ascii $s12 = \"Content-Type: %s%s%s\" fullword ascii $s13 = \"SOCKS4%s: connecting to HTTP proxy %s port %d\" fullword ascii $s14 = \"No valid port number in connect to host string (%s)\" fullword ascii $s15 = \"Excess found in a read: excess = %zu, size = %I64d, maxdownload = %I64d, bytecount = %I64d\" fullword ascii condition:\nuint16(0) == 0x5a4d and filesize < 3000KB and 2 of ($x*) and 8 of ($s*) } rule SpicyHotPot_wuhost { meta:\ndescription = \"SpicyHotPot - wuhost.exe: Used to identify rootkit and module updating component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"eb54cd2d61507b9e98712de99834437224b1cef31a81544a47d93e470b8613fc\" strings:\n$x1 = \"wdlogin.exe\" fullword ascii $x2 = \"UpdateTemp.exe\" fullword ascii $x3 = \"UpdateSelf.exe\" fullword ascii $x4 = \"wrme.exe\" fullword ascii $x5 = \"wccenter.exe\" fullword ascii $x6 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wuhost.pdb\" fullword ascii $x7 = \"wuhost.exe\" fullword ascii $s1 = \"SEC_E_ILLEGAL_MESSAGE (0x%08X) - This error usually occurs when a fatal SSL/TLS alert is received (e.g. handshake failed). More \" ascii $s2 = \"Failed reading the chunked-encoded stream\" fullword ascii $s3 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii $s4 = \"https://db.testyk.com\" fullword ascii $s5 = \"https://da.testiu.com\" fullword ascii $s6 = \"https://du.testjj.com\" fullword ascii $s7 = \"dump_temp\" fullword ascii $s8 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii $s9 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii $s10 = \"failed to load WS2_32.DLL (%u)\" fullword ascii $s11 = \"No more connections allowed to host %s: %zu\" fullword ascii $s12 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii condition:\nuint16(0) == 0x5a4d and filesize < 2000KB and 2 of ($x*) and 4 of them } rule SpicyHotPot_wrme { meta:\ndescription = \"SpicyHotPot - wrme.exe: Used to identify module starting and reporting component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"7e489f1f72cac9f1c88bdc6be554c78b5a14197d63d1bae7e41de638e903af21\" strings:\n$x1 = \"DvUpdate.exe\" fullword ascii $x2 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wrme.pdb\" fullword ascii $x3 = \"No more connections allowed to host %s: %zu\" fullword ascii $s1 = \"SEC_E_ILLEGAL_MESSAGE (0x%08X) - This error usually occurs when a fatal SSL/TLS alert is received (e.g. handshake failed). More \" ascii $s2 = \"Failed reading the chunked-encoded stream\" fullword ascii $s3 = \"Content-Type: %s%s%s\" fullword ascii $s4 = \"Excess found in a read: excess = %zu, size = %I64d, maxdownload = %I64d, bytecount = %I64d\" fullword ascii $s5 = \"Negotiate: noauthpersist -> %d, header part: %s\" fullword ascii $s6 = \"https://db.testyk.com\" fullword ascii $s7 = \"https://da.testiu.com\" fullword ascii $s8 = \"https://du.testjj.com\" fullword ascii $s9 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii $s10 = \"schannel: CertGetNameString() failed to match connection hostname (%s) against server certificate names\" fullword ascii $s11 = \"failed to load WS2_32.DLL (%u)\" fullword ascii $s12 = \"Content-Disposition: %s%s%s%s%s%s%s\" fullword ascii $s13 = \"RESOLVE %s:%d is - old addresses discarded!\" fullword ascii condition:\nuint16(0) == 0x5a4d and filesize < 2000KB and 2 of ($x*) and 7 of ($s*) } rule SpicyHotPot_DvLayout { meta:\ndescription = \"SpicyHotPot - DvLayout.exe: Used to identify rootkit installation component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"551c4564d5ff537572fd356fe96df7c45bf62de9351fae5bb4e6f81dcbe34ae5\" strings:\n$x1 = \"KMDF_LOOK.sys\" fullword ascii $x2 = \"KMDF_Protect.sys\" fullword ascii $x3 = \"StartService Error, errorode is : %d .\" fullword ascii $x4 = \"Software\\\\Microsoft\\\\%s\\\\st\" fullword wide $s1 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii $s2 = \"@api-ms-win-core-synch-l1-2-0.dll\" fullword wide $s3 = \"Genealogy.ini\" fullword wide $s4 = \"powercfg /h off\" fullword ascii $s5 = \" Type Descriptor'\" fullword ascii $s6 = \"find %s failed , errorcode : %d\" fullword ascii $s7 = \"find %s failed , errorcode : %d\" fullword ascii $s8 = \"Delete %s failed , errorcode : %d\" fullword wide $s9 = \"Delete %s failed , errorcode : %d\" fullword wide $s10 = \"OpenService failed , errorcode : %d\" fullword wide $s11 = \"&Beijing JoinHope Image Technology Ltd.1/0-\" fullword ascii $s12 = \"/c del /q %s\" fullword ascii condition:\nuint16(0) == 0x5a4d and filesize < 800KB and 1 of ($x*) and 5 of ($s*) } rule SpicyHotPot_wccenter { meta:\ndescription = \"SpicyHotPot - wccenter.exe: Used to identify malware that communicates with the rootkit component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"17095beda4afeabb7f41ff07cf866ddc42e49da1a4ed64b9c279072caab354f6\" strings:\n$x1 = \"D:\\\\Work\\\\Install_Driver\\\\Driver_helper\\\\Release\\\\wccenter.pdb\" fullword ascii $x2 = \"wdlogin.exe\" fullword wide $x3 = \"wuhost.exe\" fullword wide $x4 = \"wrme.exe\" fullword wide $s1 = \"AppPolicyGetProcessTerminationMethod\" fullword ascii $s2 = \" Type Descriptor'\" fullword ascii $s3 = \"&Beijing JoinHope Image Technology Ltd.1/0-\" fullword ascii $s4 = \"operator co_await\" fullword ascii $s5 = \"&Beijing JoinHope Image Technology Ltd.0\" fullword ascii $s6 = \"RvVersion\" fullword wide $s7 = \" Class Hierarchy Descriptor'\" fullword ascii $s8 = \"Base Class Descriptor\" ascii $s9 = \"Beijing1\" fullword ascii $s10 = \" Complete Object Locator'\" fullword ascii condition:\nuint16(0) == 0x5a4d and filesize < 400KB and 2 of ($x*) and 4 of ($s*) } rule SpicyHotPot_KMDF_LOOK { meta:\ndescription = \"SpicyHotPot - KMDF_LOOK.sys: Used to identify browser hijacking component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"39764e887fd0b461d86c1be96018a4c2a670b1de90d05f86ed0acb357a683318\" strings:\n$x1 = \"G:\\\\SVN\\\\\" ascii $s1 = \"TSWebDownLoadProtect.dll\" fullword wide $s2 = \"ShellIco.dll\" fullword wide $s3 = \"QMLogEx.dll\" fullword wide $s4 = \"SSOCommon.dll\" fullword wide $s5 = \"TsService.exe\" fullword ascii $s6 = \"Hookport.sys\" fullword wide $s7 = \"SafeWrapper32.dll\" fullword wide $s8 = \"safemon.dll\" fullword wide $s9 = \"iNetSafe.dll\" fullword wide $s10 = \"ieplus.dll\" fullword wide $s11 = \"wdui2.dll\" fullword wide $s12 = \"ExtBhoIEToSe.dll\" fullword wide $s13 = \"360NetBase.dll\" fullword wide $s14 = \"urlproc.dll\" fullword wide $s15 = \"360sdbho.dll\" fullword wide $s16 = \"360base.dll\" fullword wide $s17 = \"360UDiskGuard.dll\" fullword wide $s18 = \"TSClinicWebFix.dll\" fullword wide $s19 = \"QMEmKit.dll\" fullword wide $s20 = \"WdHPFileSafe.dll\" fullword wide condition:\nuint16(0) == 0x5a4d and filesize < 1000KB and 8 of them } rule SpicyHotPot_KMDF_Protect { meta:\ndescription = \"SpicyHotPot - KMDF_Protect.sys: Used to identify driver protection and filtering component\" author = \"jai-minton\" reference = \"/content/crowdstrike-www/locale-sites/us/en-us/blog/author.jai-minton.html\" copyright = \"(c) 2020 CrowdStrike Inc.\" date = \"2020-11-01\" hash1 = \"ab0418eb1863c8a2211d06c764f45884c9b7dbd6d1943137fc010b8f3b8d14ae\" strings:\n$x1 = \"wdlogin.exe\" fullword wide $x2 = \"\\\\Windows\\\\System32\\\\cmd.exe\" fullword wide $x3 = \"wuhost.exe\" fullword wide $x4 = \"wrme.exe\" fullword wide $x5 = \"UpdateSelf.exe\" fullword ascii $x6 = \"wccenter.exe\" fullword wide $s1 = \"jCloudScan.dll\" fullword wide $s2 = \"DSFScan.dll\" fullword wide $s3 = \"avescan.dll\" fullword wide $s4 = \"\\\\Cloudcom2.dll\" fullword wide $s5 = \"\\\\Cloudcom264.dll\" fullword wide $s6 = \"AVEIEngine.dll\" fullword wide $s7 = \"AVEI.dll\" fullword wide $s8 = \"BAPI.dll\" fullword wide $s9 = \"BAPI64.dll\" fullword wide $s10 = \"360Tray.exe\" fullword ascii $s11 = \"360Safe.exe\" fullword ascii $s12 = \"\\\\jCloudScan.dll\" fullword wide $s13 = \"\\\\deepscan64.dll\" fullword wide $s14 = \"\\\\deepscan.dll\" fullword wide condition:\nuint16(0) == 0x5a4d and filesize < 1000KB and 2 of ($x*) and 6 of ($s*) } | Additional Resources - Learn more by visiting the Falcon Complete product webpage.\n- Read a white paper: CrowdStrike Falcon® Complete: Instant Cybersecurity Maturity for Organizations of All Sizes.\n- Test CrowdStrike next-gen AV for yourself: Start your free trial of Falcon Prevent™.",
+  "ID_list": [
+    "T1014",
+    "T1020",
+    "T1036.001",
+    "T1036.004",
+    "T1036.005",
+    "T1041",
+    "T1119",
+    "T1195.002",
+    "T1489",
+    "T1491.001",
+    "T1543.003",
+    "T1547.001",
+    "T1562.001",
+    "T1573.002",
+    "T1583.001",
+    "T1588.004",
+    "T1593.002"
+  ],
+  "Name_list": [
+    "Discovery",
+    "Persistence",
+    "Proxy",
+    "Rootkit",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1014": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.5922
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4521
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.6045
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.6013
+      },
+      {
+        "sentence": "In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests.",
+        "score": 0.4802
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.5073
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.6817
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.7453
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.499
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.5135
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.4843
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.347
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3845
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.4853
+      },
+      {
+        "sentence": "In addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "This also adds a shutdown callback for persistence.",
+        "score": 0.405
+      },
+      {
+        "sentence": "At shutdown, the driver attempts to write back the location of wccenter.exe to the system’s “RunOnce” key so that it runs again on boot.",
+        "score": 0.3683
+      },
+      {
+        "sentence": "As this is performed by the kernel-mode driver, this modification isn’t shown by common registry monitoring tools.",
+        "score": 0.4733
+      },
+      {
+        "sentence": "If we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.",
+        "score": 0.5771
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.6634
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.5637
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.661
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.4833
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.3905
+      },
+      {
+        "sentence": "This is likely for troubleshooting any blue screen errors that may be caused by the rootkit.",
+        "score": 0.5255
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.4963
+      },
+      {
+        "sentence": "This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.",
+        "score": 0.5345
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.5712
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.4425
+      },
+      {
+        "sentence": "Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user.",
+        "score": 0.6063
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.557
+      },
+      {
+        "sentence": "Due to this, removing Spicy Hot Pot malware remotely can be quite challenging.",
+        "score": 0.3305
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.697
+      },
+      {
+        "sentence": "Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on.",
+        "score": 0.5156
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.5581
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.5474
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.5351
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.4525
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3983
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.504
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.4272
+      }
+    ],
+    "T1036.001": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.4272
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.3329
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.3116
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.4604
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.5246
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.4961
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.4906
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.4886
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.5856
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.3682
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.5455
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.7312
+      },
+      {
+        "sentence": "In addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.",
+        "score": 0.4702
+      },
+      {
+        "sentence": "If we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.5206
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.4125
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.3223
+      },
+      {
+        "sentence": "This is likely for troubleshooting any blue screen errors that may be caused by the rootkit.",
+        "score": 0.3788
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.3725
+      },
+      {
+        "sentence": "This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.",
+        "score": 0.4698
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user.",
+        "score": 0.307
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.4079
+      },
+      {
+        "sentence": "Due to this, removing Spicy Hot Pot malware remotely can be quite challenging.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.4469
+      },
+      {
+        "sentence": "Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on.",
+        "score": 0.3531
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.4697
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.4392
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.586
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.3127
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.4448
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.4949
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.3776
+      }
+    ],
+    "T1036.004": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.3503
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.428
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.4135
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.5233
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.4005
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.3096
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3631
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.4684
+      },
+      {
+        "sentence": "In addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.",
+        "score": 0.4282
+      },
+      {
+        "sentence": "If we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.",
+        "score": 0.3503
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.6688
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.5432
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.4168
+      },
+      {
+        "sentence": "This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.",
+        "score": 0.3493
+      },
+      {
+        "sentence": "Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user.",
+        "score": 0.32
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.3092
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.3291
+      },
+      {
+        "sentence": "Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on.",
+        "score": 0.3446
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.5265
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.5527
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.57
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3037
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.3272
+      }
+    ],
+    "T1036.005": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.4024
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.5451
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.3821
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.4951
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.5509
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.4228
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.3027
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.4182
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.4124
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.5301
+      },
+      {
+        "sentence": "In addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.",
+        "score": 0.435
+      },
+      {
+        "sentence": "If we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.",
+        "score": 0.4316
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.6152
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.4911
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.3711
+      },
+      {
+        "sentence": "This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.",
+        "score": 0.4017
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.301
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.3046
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.3019
+      },
+      {
+        "sentence": "Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on.",
+        "score": 0.4754
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.5159
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.5429
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.6544
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.359
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.4442
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.3138
+      }
+    ],
+    "T1195.002": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.4122
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4102
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.3869
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.365
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.4138
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.3343
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.4214
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.4219
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.4669
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.4938
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.5461
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.3532
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.3385
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.3457
+      },
+      {
+        "sentence": "This is likely for troubleshooting any blue screen errors that may be caused by the rootkit.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.3648
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.3741
+      },
+      {
+        "sentence": "Due to this, removing Spicy Hot Pot malware remotely can be quite challenging.",
+        "score": 0.4664
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.4434
+      },
+      {
+        "sentence": "Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on.",
+        "score": 0.3731
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.3146
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.3322
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.4505
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.4246
+      }
+    ],
+    "T1489": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.3256
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.3856
+      },
+      {
+        "sentence": "In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests.",
+        "score": 0.3017
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.3527
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.3462
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.4051
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.4751
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.367
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.3508
+      },
+      {
+        "sentence": "In addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.",
+        "score": 0.3171
+      },
+      {
+        "sentence": "This also adds a shutdown callback for persistence.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "If we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.",
+        "score": 0.45
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.3517
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.3274
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.4688
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.4085
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.4453
+      },
+      {
+        "sentence": "This is likely for troubleshooting any blue screen errors that may be caused by the rootkit.",
+        "score": 0.3395
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.4691
+      },
+      {
+        "sentence": "This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.",
+        "score": 0.3356
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.3999
+      },
+      {
+        "sentence": "Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user.",
+        "score": 0.4631
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.5599
+      },
+      {
+        "sentence": "Due to this, removing Spicy Hot Pot malware remotely can be quite challenging.",
+        "score": 0.5044
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.524
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.4244
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.4556
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.4181
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.441
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.3426
+      }
+    ],
+    "T1491.001": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.4398
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4565
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.4377
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.4001
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.3678
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.4206
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.3243
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.3684
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3157
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.4148
+      },
+      {
+        "sentence": "If we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.3344
+      },
+      {
+        "sentence": "This is likely for troubleshooting any blue screen errors that may be caused by the rootkit.",
+        "score": 0.3829
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.3039
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.3483
+      },
+      {
+        "sentence": "Figure 13.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.3297
+      },
+      {
+        "sentence": "Due to this, removing Spicy Hot Pot malware remotely can be quite challenging.",
+        "score": 0.3117
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.3703
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.4004
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.3792
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3063
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.3353
+      }
+    ],
+    "T1543.003": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.3217
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.5241
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.3576
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.3703
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.4194
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.3894
+      },
+      {
+        "sentence": "This also adds a shutdown callback for persistence.",
+        "score": 0.5056
+      },
+      {
+        "sentence": "At shutdown, the driver attempts to write back the location of wccenter.exe to the system’s “RunOnce” key so that it runs again on boot.",
+        "score": 0.4382
+      },
+      {
+        "sentence": "As this is performed by the kernel-mode driver, this modification isn’t shown by common registry monitoring tools.",
+        "score": 0.3508
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.6441
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.4362
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.7342
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.5146
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.4016
+      },
+      {
+        "sentence": "This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.3644
+      },
+      {
+        "sentence": "Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user.",
+        "score": 0.4635
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.3892
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.4379
+      },
+      {
+        "sentence": "Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on.",
+        "score": 0.329
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.3577
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.4681
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.4579
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.4707
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3567
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.3862
+      }
+    ],
+    "T1562.001": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.337
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.4117
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.5585
+      },
+      {
+        "sentence": "In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests.",
+        "score": 0.4246
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.531
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.3827
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.418
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.3623
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.4764
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.5805
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.395
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3491
+      },
+      {
+        "sentence": "In addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.",
+        "score": 0.3428
+      },
+      {
+        "sentence": "As this is performed by the kernel-mode driver, this modification isn’t shown by common registry monitoring tools.",
+        "score": 0.3794
+      },
+      {
+        "sentence": "If we compare this to KMDF_LOOK.sys , we can see that its primary function is to hijack the user’s homepage and delete process callbacks to security software.",
+        "score": 0.7579
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.3454
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.5463
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.4003
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.3757
+      },
+      {
+        "sentence": "This is likely for troubleshooting any blue screen errors that may be caused by the rootkit.",
+        "score": 0.4627
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.5249
+      },
+      {
+        "sentence": "This includes file writes of_J861.exe, KMDF_Protect.sys, KMDF_LOOK.sys , and their associated driver loads.",
+        "score": 0.4018
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.3391
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.4271
+      },
+      {
+        "sentence": "Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user.",
+        "score": 0.4947
+      },
+      {
+        "sentence": "These filter drivers prevent removal of registry keys, services or the kernel drivers themselves that are associated with the infection.",
+        "score": 0.6666
+      },
+      {
+        "sentence": "Due to this, removing Spicy Hot Pot malware remotely can be quite challenging.",
+        "score": 0.4552
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.57
+      },
+      {
+        "sentence": "Spicy Hot Pot places the malicious filter drivers within the “WindowsApps” folder, which, in addition to the “Event Viewer” or “Media Player” folder, is what is being filtered on.",
+        "score": 0.3716
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.5637
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.5036
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.3604
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.4586
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.479
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.4697
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.328
+      }
+    ],
+    "T1583.001": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.4038
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4612
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.4204
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.3131
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.3479
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.3666
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.3911
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.5059
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.3948
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.3715
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.4819
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "If you rename the folder, the filter drivers immediately become visible.This can be done even when the kernel filters are running, but the filter drivers cannot be removed by a user as they’re still running and protected.",
+        "score": 0.336
+      },
+      {
+        "sentence": "After renaming the folder, if you restart an infected system, the path that is referenced by the kernel filter driver services no longer exists, and the drivers will fail to load.",
+        "score": 0.3924
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.4323
+      }
+    ],
+    "T1588.004": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.4516
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.3851
+      },
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.3522
+      },
+      {
+        "sentence": "In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests.",
+        "score": 0.3099
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.3065
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.3095
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.3775
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.359
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3624
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.6878
+      },
+      {
+        "sentence": "It should be noted that both drivers masquerade as legitimate service names to remain stealthy: | Driver | Malicious Service Name | Masqueraded Legitimate Service Name | KMDF_Protect.sys | iaLPSS1z | iaLPSSi*: Intel Serial IO Driver | KMDF_LOOK.sys | LSI_SAS2l | LSI_SAS2: LSI SAS GEN 2 Driver (StorPort) | DVLayout.exe is used to install the rootkit.",
+        "score": 0.3749
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.3778
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.3152
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.3787
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.3218
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.3468
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.334
+      },
+      {
+        "sentence": "Figure 13.",
+        "score": 0.3245
+      },
+      {
+        "sentence": "Rootkit service as seen through Real Time Response (RTR) The Remediation Spicy Hot Pot, like many other rootkits, utilizes kernel filter drivers that once started cannot be stopped by a user.",
+        "score": 0.3611
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.3581
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3145
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.3278
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.3487
+      }
+    ],
+    "T1593.002": [
+      {
+        "sentence": "In this blog, we take a look at a recent incident that involved a persistent browser hijacking rootkit dubbed “Spicy Hot Pot.” The name comes from Huorong (Tinder) Security, which first publicly reported on its discovery of this rootkit.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4369
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.4726
+      },
+      {
+        "sentence": "Debugging locations found in Spicy Hot Pot malware To a normal user, the kernel drivers dropped to disk are completely invisible.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.4505
+      },
+      {
+        "sentence": "This is inferred based on 1) it was found dropped from a number of keygen/activation tools used to “crack” or illegitimately activate Microsoft products that are developed with Chinese language packs, and 2) this malware is specifically targeting common antivirus software used in China.",
+        "score": 0.409
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.3468
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.3674
+      },
+      {
+        "sentence": "In addition to this, KMDF_Protect.sys checks for any executables running with known binary names from Qihoo 360 software.",
+        "score": 0.3922
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.5447
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.5168
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.5861
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.399
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.4297
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.423
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.3493
+      },
+      {
+        "sentence": "It highlights some of the concerns associated with running “cracking” tools on a machine, and why it’s important to monitor and prevent not only unknown executables that are running, but also drivers that are loaded by an operating system and any minifilters present.",
+        "score": 0.4429
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.3802
+      }
+    ],
+    "T1020": [
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4876
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.4488
+      },
+      {
+        "sentence": "In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests.",
+        "score": 0.3334
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.3271
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.3645
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3226
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.4798
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.5382
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.4677
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.4039
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.3857
+      }
+    ],
+    "T1041": [
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4586
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.3335
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.4348
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.326
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.4699
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.3251
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.3375
+      }
+    ],
+    "T1119": [
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.4254
+      },
+      {
+        "sentence": "These kernel drivers have a number of functions, such as hindering security software by intercepting their callback functions, collecting any memory dumps created on the system from a specific directory, and giving the malware operator the ability to update the malware as they see fit.",
+        "score": 0.5485
+      },
+      {
+        "sentence": "In addition, one of the kernel drivers acts as a minifilter, which gives it the ability to intercept and modify any user input or output requests.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "We can see the different filtering capabilities of this driver from analyzing pseudo-code of the file Briefing over other components of this malware: This particular piece of malware is primarily focused on Chinese users.",
+        "score": 0.3345
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3379
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.3351
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.5831
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.5366
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.6196
+      },
+      {
+        "sentence": "It creates the Mutex “dumping.” Investigation with Endpoint Detection and Response Data Using CrowdStrike Falcon®’s telemetry via our Endpoint Activity Monitoring (EAM) application, we’re able to see the infection actions taking place when protections are disabled.",
+        "score": 0.4572
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.4225
+      },
+      {
+        "sentence": "This works even though Spicy Hot Pot filters user input and output requests to make the files invisible to a normal user of Windows.",
+        "score": 0.3489
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.3833
+      }
+    ],
+    "T1573.002": [
+      {
+        "sentence": "Spicy Hot Pot is a browser hijacking rootkit that changes a user’s homepage to point to a page controlled by the malware operator, in addition to uploading memory dumps from a machine to a predefined server and incorporating a local update feature to ensure it can remain updated.",
+        "score": 0.3187
+      },
+      {
+        "sentence": "One of the functions of this driver is to intercept any attempts by a user to display the malicious files, effectively making them invisible.",
+        "score": 0.3077
+      },
+      {
+        "sentence": "This is because not only are they renamed and installed on infection, but through their installation they begin to act as a rootkit — and one of the drivers hides the malware files from being shown on disk.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "This extends to making the executables dropped to disk invisible.",
+        "score": 0.3491
+      },
+      {
+        "sentence": "Although more can be said about this piece of malware, this blog post aims to give a quick overview of Spicy Hot Pot, its capabilities and how it can be manually removed from a host without the need for third-party software.",
+        "score": 0.3248
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3177
+      },
+      {
+        "sentence": "Validity timeframes for the files dropped by Spicy Hot Pot Comparing this signing certificate to a public repository of malware samples reveals hundreds of unique malware samples, indicating that the creator of this malware (or someone with access to these signing certificates) is in no rush to stop using certificates issued to this entity.",
+        "score": 0.4315
+      },
+      {
+        "sentence": "At shutdown, the driver attempts to write back the location of wccenter.exe to the system’s “RunOnce” key so that it runs again on boot.",
+        "score": 0.3308
+      },
+      {
+        "sentence": "This creates the Mutex “DVLayout.”_J861.exe is used to gather system information of the infected client, including serial number, and has a number of networking functions that support the operation of this malware.",
+        "score": 0.3751
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.3382
+      },
+      {
+        "sentence": "It creates the Mutex “DLreport.” wdlogin.exe is used to find any dump file ending with dmp in the %SystemRoot%\\minidump directory, compress it, and upload it to one of the above servers at the endpoint /api/v1/post_dump.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.3505
+      },
+      {
+        "sentence": "By fusing CrowdStrike Falcon®’s detection and prevention capabilities, enriched endpointtelemetry, Real Time Response capability and the expertise of the CrowdStrike Falcon® Complete team, you’re uniquely positioned with the capability to detect, investigate, understand and respond to unknown threats within your environment 24/7, 365 days of the year.",
+        "score": 0.3296
+      }
+    ],
+    "T1547.001": [
+      {
+        "sentence": "Usually a browser hijacker would do this through malicious executables or registry keys that change the user’s homepage; however, Spicy Hot Pot takes this one step further by using two kernel-mode drivers that are dropped to disk and installed during the infection process to remain stealthy.",
+        "score": 0.5459
+      },
+      {
+        "sentence": "The Initial Detection In June 2020, the CrowdStrike Falcon® Complete™ team received a machine learning (ML) alert that a suspicious binary called “baofeng15.0” attempted to run in a customer's environment.",
+        "score": 0.3549
+      },
+      {
+        "sentence": "This also adds a shutdown callback for persistence.",
+        "score": 0.3765
+      },
+      {
+        "sentence": "At shutdown, the driver attempts to write back the location of wccenter.exe to the system’s “RunOnce” key so that it runs again on boot.",
+        "score": 0.7481
+      },
+      {
+        "sentence": "As this is performed by the kernel-mode driver, this modification isn’t shown by common registry monitoring tools.",
+        "score": 0.3576
+      },
+      {
+        "sentence": "This temporarily creates a service called “R.”wccenter.exe communicates withKMDF_Protect.sys using a named device created called\\\\Device\\\\iaLPSS1z and is used to runwdlogin.exe ,wuhost.exe andwrme.exe . wuhost.exe is used to update the rootkit drivers and modules as required.",
+        "score": 0.3722
+      },
+      {
+        "sentence": "It creates the Mutex “Update” and contacts one of the following domains to fetch this update: - https<:>//du<.>testjj<.>com - https<:>//da<.>testiu<.>com - https<:>//db<.>testyk<.>com wrme.exe is used to download and start or install modules such as wuhost.exe and wdlogin.exe in addition to gathering information about the operating system.",
+        "score": 0.3135
+      },
+      {
+        "sentence": "By checking the registry and filter drivers on this host through CrowdStrike Falcon®’s Real Time Response (RTR) capability, we can locate the kernel drivers running and the dropped binaries to prove they reside on disk, given that we know their name and location.",
+        "score": 0.344
+      },
+      {
+        "sentence": "Remediating a rootkit often requires doing so from a machine that is powered off or booted into safe mode; however, we can remove a rootkit such as Spicy Hot Pot without going to these extremes by making sure it cannot run at startup.",
+        "score": 0.3492
+      },
+      {
+        "sentence": "At this point, the drivers and associated malicious executables can be removed, and the folder renamed to “WindowsApps” once more.",
+        "score": 0.3378
+      },
+      {
+        "sentence": "The services and registry keys associated with the rootkit can also be removed now.",
+        "score": 0.3944
+      },
+      {
+        "sentence": "Conclusion This post touched on a common browser hijacker being distributed with tools designed to illegitimately activate Microsoft products.",
+        "score": 0.3041
+      }
+    ]
+  }
+}

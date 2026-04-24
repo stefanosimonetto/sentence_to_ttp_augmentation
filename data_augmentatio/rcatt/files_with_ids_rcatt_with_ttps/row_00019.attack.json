@@ -1,0 +1,767 @@
+{
+  "original_txt": "Analysis of Malicious Security Support Provider DLLs - PDF Log in Registration Search for Analysis of Malicious Security Support Provider DLLs SHARE HTML DOWNLOAD Save this PDF as: \\xc2 WORD \\xc2 PNG \\xc2 TXT \\xc2 JPG Size: px Start display at page: Download \"Analysis of Malicious Security Support Provider DLLs\" Error: Download Document Horatio Patrick 3 years ago Views: Transcription 1 Analysis of Malicious Security Support Provider DLLs Matt Graeber October 7, 2014 Introduction Matt Graeber FireEye Labs Advanced Reverse Engineering (FLARE) Team Malware Analyst Instructor Past Researcher US Army Red Team \\xe4\\xb8\\xad \\xe6\\x96\\x87 \\xe7\\xbf\\xbb \\xe8\\xaf\\x91 Reformed certification hoarder For fun PowerShell! PowerSploit Twitter 2 2 Goals What are security support providers (SSP) Local security authority (LSA)/SSP architecture SSPs from an attacker s perspective Legitimate SSPs SSP internals Installation Detection Mitigation Obligatory IDA screenshot Obligatory PowerShell screenshot 3 Background A malicious security support provider (SSP) DLL was found recently during a recent IR engagement. Searching for SpLsaModeInitialize a required SSP DLL export, yielded only two unique hits in our internal malware database. The uniqueness of this type of malware warranted additional investigation 4 3 Definitions A security support provider (SSP) a.k.a security package: A user-mode security extension used to perform authentication during a client/server exchange. e.g. schannel (SSL) An authentication package (AP) Used to extend interactive logon authentication e.g. Enable RSA token authentication SSP/AP Can serve the tasks of SSPs and APs. Loaded in lsass. e.g. kerberos and msv1_0 (NTLM) 5 LSA Extensible Architecture The Local Security Authority (LSA) is responsible for nearly all aspects of local security on a system Authenticate and log on users Manage credentials SAM/NTDS/etc. Built-in support for message privacy and integrity LSA is extensible SSP/APs are loaded into LSA (lsass.exe) at boot Custom SSP/APs can either replace or proxy existing providers. 6 4 SSPI Architecture - Legitimate Client App Secur32.dll InitSecurityInterface QuerySecurityPackageInfo AcquireCredentialsHandle InitializeSecurityContext DecryptMessage EncryptMessage LSA kerberos msv1_0 wdigest 7 SSPI Architecture - Malicious Malicious Client App Secur32.dll Named Pipe Shared Memory LSA InitSecurityInterface QuerySecurityPackageInfo AcquireCredentialsHandle InitializeSecurityContext DecryptMessage EncryptMessage kerberos msv1_0 wdigest maliciousssp 8 5 SSP Benefits from an Attacker s Perspective Once installed, your DLL is loaded into lsass.exe! i.e. no need to inject into lsass.exe Not a well-known persistence mechanism Once loaded into lsass, you are handed an officially supported credential capture API. i.e. officially supported, Mimikatz-like functionality without needing Mimikatz 9 Common Legitimate SSPs Microsoft msv1_0.dll kerberos.dll negoexts.dll wsauth.dll 3 rd Party wsauth.dll VMWare Horizon View CTXAUTH.dll Citrix schannel.dll TSpkg.dll msoidssp.dll pku2u.dll etc. phonefactorlsa.dll PhoneFactor 10 6 LSA SSP Initialization Procedure 1. Inform LSA of SSP implemented functions 2. Inform SSP of available LSA support functions 11 SSP Development - Requirements Minimum required functions* 1. SpInitialize 2. SpShutDown 3. SpGetInfo Required Export 12 7 SSP Development - Implementation NTSTATUS NTAPI SpLsaModeInitialize( _In_ ULONG LsaVersion, _Out_ PULONG PackageVersion, _Out_ PSECPKG_FUNCTION_TABLE *pptables, _Out_ PULONG pctables ); Called by LSA when your SSP DLL is loaded. Only required export function Informs LSA of the functions your SSP DLL implements via PSECPKG_FUNCTION_TABLE LSA expects at a minimum, the following in PSECPKG_FUNCTION_TABLE: SpInitialize typedef struct SECPKG_FUNCTION_TABLE {... SpShutDown SpInitializeFn *Initialize; SpGetInfo SpShutdownFn *Shutdown; SpGetInfoFn SpAcceptCredentialsFn SpGetCredentialsFn SpGetUserInfoFn SpAddCredentialsFn SpSetExtendedInformationFn... } SECPKG_FUNCTION_TABLE, *PSECPKG_FUNCTION_TABLE; *GetInfo; *AcceptCredentials; *GetCredentials; *GetUserInfo; *AddCredentials; *SpChangeAccountPasswordFn; 13 SSP Development - Implementation NTSTATUS SpInitialize( _In_ ULONG_PTR PackageId, _In_ PSECPKG_PARAMETERS Parameters, _In_ PLSA_SECPKG_FUNCTION_TABLE FunctionTable ); Called by LSA after SpLsaInitialize Informs your SSP DLL the available LSA functions via PLSA_SECPKG_FUNCTION_TABLE typedef struct _LSA_SECPKG_FUNCTION_TABLE {... PLSA_GET_CREDENTIALS GetCredentials; PLSA_OPEN_SAM_USER OpenSamUser; PLSA_GET_USER_CREDENTIALS GetUserCredentials; PLSA_GET_USER_AUTH_DATA GetUserAuthData; PLSA_UPDATE_PRIMARY_CREDENTIALS UpdateCredentials; PLSA_GET_AUTH_DATA_FOR_USER GetAuthDataForUser; CredReadDomainCredentialsFn *CrediReadDomainCredentials; PLSA_PROTECT_MEMORY LsaProtectMemory; PLSA_PROTECT_MEMORY LsaUnprotectMemory; PLSA_GET_SERVICE_ACCOUNT_PASSWORD GetServiceAccountPassword;... } LSA_SECPKG_FUNCTION_TABLE, *PLSA_SECPKG_FUNCTION_TABLE; 14 8 SSP Development - Implementation NTSTATUS SpShutDown(void); Called at system shutdown Can simply return NULL lsass.exe will crash if this if not implemented 15 SSP Development - Implementation NTSTATUS SpGetInfo(_Out_ PSecPkgInfo PackageInfo); Provides general information about a security package Can return the following info: Name Description Capabilities etc. Must be implemented but it doesn t need to do anything. 16 9 SSP Installation 1.Copy the SSP DLL to %windir%\\\\system32 Note: Because the DLL is loaded into lsass, it must be compiled for the same architecture as lsass.exe 2.Add the file name (without extension) to: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\Security Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\OSConfig\\\\Security Packages 3. Optional: Load it into lsass immediately by calling secur32!addsecuritypackage 4. Reboot 17 Malicious SSP PoC mimilib SSP Benjamin Delpy recently added SSP functionality to mimilib.dll. He has yet to document or heavily advertise this functionality. Once installed and loaded into lsass.exe, it captures passwords in plaintext. This is achieved with the SpAcceptCredential callback function. 18 10 Malicious SSP PoC mimilib SSP 19 Malicious SSP PoC mimilib SSP %windir%\\\\system32\\\\kiwissp.log [ :000003e7] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (SYSTEM) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e7] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (SYSTEM) [ :000003e7] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (SYSTEM) [ :000527ee] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ : ] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ :00065d64] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ :00065d7a] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ :000003e5] [ ] \\\\ (LOCAL SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e5] [ ] \\\\ (LOCAL SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) 20 11 Malicious SSP Mitigations Prevention Windows 8.1/Server 2012 R2 running Secure Boot with UEFI: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa \\\\RunAsPPL (DWORD) = 1 Makes lsass a protected process. Forces SSP DLLs to be co-signed by Microsoft. With Secure Boot (w/ UEFI) enabled, RunAsPPL is set as a UEFI secure variable and cannot be deleted. 21 Malicious SSP Detection Windows 8.1/Server 2012 R2 only Generate event logs upon loading of an unsigned lsass module: HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\LSASS.exe AuditLevel = 8 (REG_DWORD) Reboot When an unsigned SSP is loaded, either of the following events will trigger: 12 Malicious SSP Detection Detection Whitelist legitimate SSP DLLs. Alert when HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Security Packages or HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSConfig\\\\S ecurity Packages is modified to contain an SSP not in the whitelist. Alert on any DLLs that export SpLsaModeInitialize that are not in the whitelist. MIGHT be present under LSA Providers in Sysinternals Autoruns 23 Malicious SSP Mitigations Removal Remove the SSP from the following reg keys: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Sec urity Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSC onfig\\\\security Packages Delete the DLL from %windir%\\\\system32 Call secur32!deletesecuritypackage? Oops! MS forgot to implement that function. Reboot 24 13 Malicious SSP Mitigations 25 References Registering SSP/AP DLLs Configuring Additional LSA Protection LSA Mode Initialization Mimikatz PoC SSP 26 14 Merci!!! Thank you Benjamin Delpy for the following: 1. Performing all the original research on malicious SSPs 2. Writing a PoC malicious SSP 3. Writing Mimikatz! <3 4. Patiently and enthusiastically answering all my dumb questions. 27 QUESTIONS? 28 Similar documents Who DIT It? Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Who DIT It? Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Mike Middleton Justin Prosco Mandiant, A FireEye Company Mike Middleton Principal Consultant Joined More information give me the password and I'll rule the world dpapi, what else? give me the password and I'll rule the world dpapi, what else? who am I? A question I often ask to myself let socials do the job. Francesco Picasso Reality Net System Solutions @dfirfpi blog.digital-forensics.it More information mimikatz 2.0 Benjamin DELPY `gentilkiwi` mimikatz 2.0 Benjamin DELPY `gentilkiwi` Our little story `whoami`, why am I doing this? mimikatz 2.0 & sekurlsa Focus on Windows 8.1 et 2012r2 Kerberos & strong authentication Questions / Answers And More information Configuring Authentication for Microsoft Windows Chapter 4 Configuring Authentication for Microsoft Windows In this chapter: Storing and Transmitting Credentials..............................69 Storing Secrets in Windows......................................83 More information Pass-the-Hash II: Admin s Revenge. Skip Duckwall & Chris Campbell Pass-the-Hash II: Admin s Revenge Skip Duckwall & Chris Campbell Do you know who I am? Skip Co-presented PTH talk last year at BH, Derbycon http://passing-the-hash.blogspot.com @passingthehash on twitter More information Michael Mayer-Gishyan NSA IT Consulting e.u. @mike_srv02 mmg@nsa.co.at http://nsa.co.at. From Zero to Hero. Domain Admin in einem Tag Michael Mayer-Gishyan NSA IT Consulting e.u. @mike_srv02 mmg@nsa.co.at http://nsa.co.at From Zero to Hero Domain Admin in einem Tag Agenda Vita Introduction to NTLM and Kerberos Pass-the-Hash Techniques More information Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Sean Metcalf (@PyroTek3) CTO, DAn Solutions sean [@] dansolutions _._com DAnSolutions.com ADSecurity.org ABOUT Chief Technology Officer More information Windows security for n00bs part 1 Security architecture & Access Control Grenoble INP Ensimag _ (in)security we trust _!! SecurIMAG 2011-05-12 Windows security for n00bs part 1 Security architecture & Access Control Description: whether you are in favor or against it, the Windows More information Persistence Mechanisms as Indicators of Compromise Persistence Persistence Mechanisms as Indicators of Compromise An automated technology for identifying cyber attacks designed to survive indefinitely the reboot process on PCs White Paper Date: October More information Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Sean Metcalf (@PyroTek3) CTO, DAn Solutions sean [@] dansolutions _._com http://dansolutions.com http://www.adsecurity.org ABOUT Chief More information MS-55096: Securing Data on Microsoft SQL Server 2012 MS-55096: Securing Data on Microsoft SQL Server 2012 Description The goal of this two-day instructor-led course is to provide students with the database and SQL server security knowledge and skills necessary More information STARTER KIT. Infoblox DNS Firewall for FireEye STARTER KIT Introduction Infoblox DNS Firewall integration with FireEye Malware Protection System delivers a unique and powerful defense against Advanced Persistent Threats (APT) for business networks. More information Hacker s Perspective on your Windows Infrastructure: Windows 10 Mandatory Check List Hacker s Perspective on your Windows Infrastructure: Windows 10 Mandatory Check List Paula Januszkiewicz CQURE: CEO, Penetration Tester CQURE Offices: New York, Dubai, Warsaw MVP: Enterprise Security, More information VMware Horizon View for SMS PASSCODE SMS PASSCODE 2014 VMware Horizon View for SMS PASSCODE SMS PASSCODE 2014 VMware View Radius authentication configuration for SMS PASSCODE With the introduction of RADIUS authentication support in VMware View it is possible More information Windows 2000 Security Architecture. Peter Brundrett Program Manager Windows 2000 Security Microsoft Corporation Windows 2000 Security Architecture Peter Brundrett Program Manager Windows 2000 Security Microsoft Corporation Topics Single Sign-on Kerberos v5 integration Active Directory security Delegation of authentication More information Securing Data on Microsoft SQL Server 2012 Securing Data on Microsoft SQL Server 2012 Course 55096 The goal of this two-day instructor-led course is to provide students with the database and SQL server security knowledge and skills necessary to More information 70 299 Implementing and Administering Security in a Microsoft Windows Server 2003 Network 70 299 Implementing and Administering Security in a Microsoft Windows Server 2003 Network Course Number: 70 299 Length: 1 Day(s) Course Overview This course is part of the MCSA training.. Prerequisites More information Detecting Malware With Memory Forensics. Hal Pomeranz SANS Institute Detecting Malware With Memory Forensics Hal Pomeranz SANS Institute Why Memory Forensics? Everything in the OS traverses RAM Processes and threads Malware (including rootkit technologies) Network sockets, More information Locking down a Hitachi ID Suite server Locking down a Hitachi ID Suite server 2016 Hitachi ID Systems, Inc. All rights reserved. Organizations deploying Hitachi ID Identity and Access Management Suite need to understand how to secure its runtime More information Creating a User Profile for Outlook 2013 Creating a User Profile for Outlook 2013 This document tells you how to create a user profile for Outlook 2013 on your computer (also known as the Outlook client). This is necessary, for example, when More information Administering a SQL Database Infrastructure (MS- 20764) Administering a SQL Database Infrastructure (MS- 20764) Length: 5 days Overview About this course This five-day instructor-led course provides students who administer and maintain SQL Server databases More information Session 17 Windows 7 Professional DNS & Active Directory(Part 2) Session 17 Windows 7 Professional DNS & Active Directory(Part 2) Fall 2011 ITE153 Operating Systems 1 Session 17 Windows 7 Professional Operating in Microsoft Networks Fall 2011 ITE153 Operating Systems More information Windows XP Exchange Client Installation Instructions WINDOWS XP with Outlook 2003 or Outlook 2007 1. Click the Start button and select Control Panel: 2. If your control panel looks like this: Click Switch to Classic View. 3. Double click Mail. 4. Click show More information Pass-the-Hash: How Attackers Spread and How to Stop Them Pass-the-Hash: How Attackers Spread and How to Stop Them SESSION ID: HTA-W03 Mark Russinovich Technical Fellow Microsoft Corporation Nathan Ide Principal Development Lead Microsoft Corporation Pass-the-Hash: More information This report is a detailed analysis of the dropper and the payload of the HIMAN malware. PAGE 5 Check Point Malware Research Group HIMAN Malware Analysis December 12, 2013 Researcher: Overview This report is a detailed analysis of the dropper and the payload of the HIMAN malware. This malware More information K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS. v.109 K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS v.109 1 The Exchange environment is an important entry point by which a threat or security risk can enter into a network. K7 Mail Security is a complete More information Entrust Managed Services PKI Entrust Managed Services PKI Entrust Managed Services PKI Windows Smart Card Logon Configuration Guide Using Web-based applications Document issue: 1.0 Date of Issue: June 2009 Copyright 2009 Entrust. More information Security in the Sauce Labs Cloud. Practices and protocols used in Sauce s infrastructure and Sauce Connect Security in the Sauce Labs Cloud Practices and protocols used in Sauce s infrastructure and Sauce Connect Table of Contents page 2 page 4 page 6 page 8 page 9 page 10 page 11 Overview I. Sauce Labs Data More information Windows Attack - Gain Enterprise Admin Privileges in 5 Minutes Windows Attack - Gain Enterprise Admin Privileges in 5 Minutes Compass Security AG, Daniel Stirnimann Compass Security AG Gl\\xc3\\xa4rnischstrasse 7 Postfach 1628 CH-8640 Rapperswil Tel +41 55-214 41 60 Fax +41 More information Managing Local Administrator Passwords with LAPS 10/14/2015 PENN STATE SECURITY CONFERENCE Managing Local Administrator Passwords with LAPS 2015 PENN STATE SECURITY CONFERENCE DAN BARR DRB45@PSU.EDU SYSTEMS ADMINISTRATOR, APPLIED RESEARCH LABORATORY The Shared Password Threat Shared passwords More information Online Payments Threats July 3, 2012 Introduction...2 Tested Products...2 Used Configuration...3 Real Malware Inspiration...3 Total Scores Chart...4 Conclusion...4 About matousec.com...4 Detailed Descriptions of Tests...5 Detailed More information Sophos Mobile Control Technical guide Sophos Mobile Control Technical guide Product version: 2 Document date: December 2011 Contents 1. About Sophos Mobile Control... 3 2. Integration... 4 3. Architecture... 6 4. Workflow... 12 5. Directory More information Training module 2 Installing VMware View Training module 2 Installing VMware View In this second module we ll install VMware View for an End User Computing environment. We ll install all necessary parts such as VMware View Connection Server and More information Security. Ausgew\\xc3\\xa4hlte Betriebssysteme Institut Betriebssysteme Fakult\\xc3\\xa4t Informatik. Copyright 2001-2004 Hermann H\\xc3\\xa4rtig, Ronald Aigner Ausgew\\xc3\\xa4hlte Betriebssysteme Institut Betriebssysteme Fakult\\xc3\\xa4t Informatik Outline Ratings System Components Logon Object (File) Access Impersonation Auditing 2 Ratings National Computer Center (NCSC) part More information Exchange 2013 mailbox setup guide Fasthosts Customer Support Exchange 2013 mailbox setup guide This article covers the setup of Exchange 2013 mailboxes in Microsoft Outlook 2013, 2010 and Outlook 2011 for Mac. Contents Exchange 2013 Mailbox More information ViPNet ThinClient 3.3. Quick Start ViPNet ThinClient 3.3 Quick Start 1991 2014 Infotecs Americas. All rights reserved. Version: 00060-07 34 02 ENU This document is included in the software distribution kit and is subject to the same terms More information Hosts HARDENING WINDOWS NETWORKS TRAINING BROADVIEW NETWORKS Hosts HARDENING WINDOWS NETWORKS TRAINING COURSE OVERVIEW A hands-on security course that teaches students how to harden, monitor and protect Microsoft Windows based networks. A hardening More information CMB 207 1I Citrix XenApp and XenDesktop Fast Track CMB 207 1I Citrix XenApp and XenDesktop Fast Track This fast paced course provides the foundation necessary for students to effectively centralize and manage desktops and applications in the datacenter More information Agenda. How to configure dlaw@esri.com Agenda Strongly Recommend: Knowledge of ArcGIS Server and Portal for ArcGIS Security in the context of ArcGIS Server/Portal for ArcGIS Access Authentication Authorization: securing web services More information How to Efficiently Protect Active Directory from Credential Theft & Large Scale Compromise How to Efficiently Protect Active Directory from Credential Theft & Large Scale Compromise An Approach Based on Real-World Expertise Friedwart Kuhn, fkuhn@ernw.de Digital unterschrieben von Friedwart Kuhn More information Computer Security: Principles and Practice Computer Security: Principles and Practice Chapter 24 Windows and Windows Vista Security First Edition by William Stallings and Lawrie Brown Lecture slides by Lawrie Brown Windows and Windows Vista Security More information WINDOWS REGISTRY AUDITING CHEAT SHEET - Win 7/Win 2008 or later This Windows Registry Auditing Cheat Sheet is intended to help you get started with basic and necessary Registry Auditing. This cheat sheet includes some very common items that should have auditing enabled, More information TZWorks Windows Event Log Viewer (evtx_view) Users Guide TZWorks Windows Event Log Viewer (evtx_view) Users Guide Abstract evtx_view is a standalone, GUI tool used to extract and parse Event Logs and display their internals. The tool allows one to export all More information Speedy Organizer. SQL Server 2008 R2 RTM Express - Installation Guide Introduction Speedy Organizer SQL Server 2008 R2 RTM Express - Installation Guide Introduction Contents Revision table... 1 1 Introduction... 2 2 SQL Server 2008 Express installation... 2 2.1 Installation... 2 3 Post More information Use Enterprise SSO as the Credential Server for Protected Sites Webthority HOW TO Use Enterprise SSO as the Credential Server for Protected Sites This document describes how to integrate Webthority with Enterprise SSO version 8.0.2 or 8.0.3. Webthority can be configured More information SharePoint 2013 Logical Architecture SharePoint 2013 Logical Architecture This document is provided \"as-is\". Information and views expressed in this document, including URL and other Internet Web site references, may change without notice. More information Securing ArcGIS Server Services: First Steps Federal GIS Conference February 9 10, 2015 Washington, DC Securing ArcGIS Server Services: First Steps Michael Sarhan Esri msarhan@esri.com Agenda Review Basic Security Workflow ArcGIS Server Roles and More information MCTS Guide to Microsoft Windows 7. Chapter 7 Windows 7 Security Features MCTS Guide to Microsoft Windows 7 Chapter 7 Windows 7 Security Features Objectives Describe Windows 7 Security Improvements Use the local security policy to secure Windows 7 Enable auditing to record security More information 7.0 Self Service Guide 7.0 Self Service Guide Copyright 2010 Sage Technologies Limited, publisher of this work. All rights reserved. No part of this documentation may be copied, photocopied, reproduced, translated, microfilmed, More information 304 - APM TECHNOLOGY SPECIALIST ABOUT THE 304-APM TECHNOLOGY SPECIALIST EXAM. The 304-APM Technology Specialist exam is the required to achieve Certified F5 Technology Specialist, APM status. Successful completion of the APM Technology More information CXD-202-1 Citrix XenDesktop 5 Administration CXD-202-1 Citrix XenDesktop 5 Administration This course provides the foundation necessary for administrators to effectively centralize and manage desktops in the datacenter and deliver them as a service More information Information Assurance Directorate National Security Agency/Central Security Service Information Assurance Directorate Reducing the Effectiveness of Pass-the-Hash November 19, 2013 Revision 1 A product of the Network Components and Applications More information New Zealand National Cyber Security Centre Unclassified New Zealand National Cyber Security Centre Application Whitelisting With Microsoft Applocker June 2012 V1.0.5 Application Whitelisting with Microsoft Applocker Cyber Security Plan As outlined More information Check list for web developers Check list for web developers Requirement Yes No Remarks 1. Input Validation 1.1) Have you done input validation for all the user inputs using white listing and/or sanitization? 1.2) Does the input validation More information Security in the Sauce Labs Cloud SAUCE LABS REPORT Security in the Sauce Labs Cloud Practices and protocols used in Sauce s infrastructure and Sauce Connect Overview It s impossible to deny that in this day and age internet security should More information Hi and welcome to the Microsoft Virtual Academy and Hi and welcome to the Microsoft Virtual Academy and 2012 Microsoft Corporation 1 the start of the Windows 8 Security Insights training. My name is Milad Aslaner I m part of the Premier Field Engineering More information Overview Windows NT 4.0 Security Cryptography SSL CryptoAPI SSPI, Certificate Server, Authenticode Firewall & Proxy Server IIS Security IE Security Overview Windows NT 4.0 Security Cryptography SSL CryptoAPI SSPI, Certificate Server, Authenticode Firewall & Proxy Server IIS Security IE Security Ch 7 - Security 1 Confidentiality and privacy: Protect More information End User Devices Security Guidance: Apple OS X 10.10 GOV.UK Guidance End User Devices Security Guidance: Apple OS X 10.10 Published Contents 1. Changes since previous guidance 2. Usage scenario 3. Summary of platform security 4. How the platform can best More information Introductions. Christopher Cognetta Practice Manager Client Field Engineering Microsoft Dynamics CRM MVP chris.cognetta@tribridge. Hosted by Introductions Christopher Cognetta Practice Manager Client Field Engineering Microsoft Dynamics CRM MVP chris.cognetta@tribridge.com CRMUG Chairperson Miami & Tampa Co Chair 250+ Dynamics CRM More information Windows Server 2008/2012 Server Hardening Account Policies Enforce password history 24 Maximum Password Age - 42 days Minimum Password Age 2 days Minimum password length - 8 characters Password Complexity - Enable Store Password using Reversible More information SQL Server 2008 Express - Installation Guide SQL Server 2008 Express - Installation Guide SQL Server 2008 Express - Installation Guide Page 2 Introduction Contents Revision table... 2 1 Introduction... 3 2 SQL Server 2008 Express installation... More information Table of Contents. Headquarters Cary, NC USA US 1-866-538-3588. Fax 1-919-380-5121 International 1-919-380-5000 Desktop Automation Table of Contents Easy Automation for the Contact Center and Back Office... 3 Use Cases... 3 Activity Intelligence + Automation... 4 Cicero Discovery Automation Architecture... 5 Cicero More information Course Description. Course Audience. Course Outline. Course Page - Page 1 of 12 Course Page - Page 1 of 12 Windows 7 Enterprise Desktop Support Technician M-50331 Length: 5 days Price: $2,795.00 Course Description This five-day instructor-led course provides students with the knowledge More information Securing Administrator Access to Internal Windows Servers Securing Administrator Access to Internal Windows Servers Contents 1. Introduction... 3 2. PKI implementation... 3 Require two-factor authentication for computers... 3 Require two-factor authentication More information DRIVE-BY DOWNLOAD WHAT IS DRIVE-BY DOWNLOAD? A Typical Attack Scenario DRIVE-BY DOWNLOAD WHAT IS DRIVE-BY DOWNLOAD? Drive-by Downloads are a common technique used by attackers to silently install malware on a victim s computer. Once a target website has been weaponized with More information By Skip Duckwall and Chris Campbell By Skip Duckwall and Chris Campbell for Blackhat USA 2013 Introduction User credentials are one of the most powerful items an attacker can obtain. Single-factor, or passwordbased credentials are dangerous More information TLP: GREEN FBI. FBI Liaison Alert System # A-000049-MW Liaison Alert System # A-000049-MW The following information was obtained through investigation and is provided in conjunction with the s statutory requirement to conduct victim notification as outlined More information GRAVITYZONE HERE. Deployment Guide VLE Environment GRAVITYZONE HERE Deployment Guide VLE Environment LEGAL NOTICE All rights reserved. No part of this document may be reproduced or transmitted in any form or by any means, electronic or mechanical, including More information PowerShell for Penetration Testers Training: PowerShell for Penetration Testers Dates of the training: March 14-15,2016 in Heidelberg, Germany Book Now using the code: TR16HMTRAINING and save an additional 10% of the current valid rate! More information NNT CIS Microsoft Windows Server 2008 R2 Benchmark Level 1 Member Server v2-1-0-2 NNT CIS Microsoft Windows Server 2008 R2 Benchmark Level 1 Member Server v2-1-0-2: NNTDC01 On NNTDC01 - By admin for time period 5/23/2014 8:49:51 AM to 5/23/2014 8:49:51 AM NNT CIS Microsoft Windows Server More information Citrix Netscaler Advanced guide for SMS PASSCODE SMS PASSCODE 2014 Citrix Netscaler Advanced guide for SMS PASSCODE SMS PASSCODE 2014 Citrix Netscaler Advanced guide for SMS PASSCODE. This document outlines configuration scenarios with SMS PASSCODE and Citrix Netscaler. More information Integrating Web Application Security into the IT Curriculum Integrating Web Application Security into the IT Curriculum James Walden Northern Kentucky University Topics 1. 2. 3. 4. Why should we teach web application security? What material do we need to cover? More information BUILDING SECURITY IN. Analyzing Mobile Single Sign-On Implementations BUILDING SECURITY IN Analyzing Mobile Single Sign-On Implementations Analyzing Mobile Single Sign-On Implementations 1 Introduction Single sign-on, (SSO) is a common requirement for business-to-employee More information BYOD Guidance: BlackBerry Secure Work Space GOV.UK Guidance BYOD Guidance: BlackBerry Secure Work Space Published 17 February 2015 Contents 1. About this guidance 2. Summary of key risks 3. Secure Work Space components 4. Technical assessment 5. More information Professional Mailbox Email Software Setup Guide Professional Mailbox Email Software Setup Guide Table of contents Download and Install Microsoft Outlook 2010 or 2011... 2 Enabling access from email software... 4 Setting up Outlook 2010... 6 Before you More information Security IIS Service Lesson 6 Security IIS Service Lesson 6 Skills Matrix Technology Skill Objective Domain Objective # Configuring Certificates Configure SSL security 3.6 Assigning Standard and Special NTFS Permissions Enabling and More information Sage Accpac CRM 5.8. Self Service Guide Sage Accpac CRM 5.8 Self Service Guide Copyright 2005 Sage Technologies Limited, publisher of this work. All rights reserved. No part of this documentation may be copied, photocopied, reproduced, translated, More information Folder Proxy + OWA + ECP/EAC Guide. Version 2.0 April 2016 Version 2.0 April 2016 Folder Proxy + OWA + ECP/EAC Guide Copyright 2016 iwebgate. All Rights Reserved. No part of this publication may be reproduced, transmitted, transcribed, stored in a retrieval system, More information Five Steps to Improve Internal Network Security. Chattanooga Information security Professionals Five Steps to Improve Internal Network Security Chattanooga Information security Professionals Who Am I? Security Analyst: Sword & Shield Blogger: averagesecurityguy.info Developer: github.com/averagesecurityguy More information White Paper. Deploying EUM. SurfControl Web Filter for MS Windows. rev. 1.1, January 2005. Enterprise Threat Protection White Paper Deploying EUM SurfControl Web Filter for MS Windows rev. 1.1, January 2005 Enterprise Threat Protection ..... ACKNOWLEDGEMENTS SurfControl wishes to acknowledge the following people for their More information Implementation Guide SAP NetWeaver Identity Management Identity Provider Implementation Guide SAP NetWeaver Identity Management Identity Provider Target Audience Technology Consultants System Administrators PUBLIC Document version: 1.10 2011-07-18 Document History CAUTION Before More information Security Options... 1 Effective Server Security Options Period: Last 20 week(s) Generated: For: Brian Bartlett bbartlett@ecora.com By: Ecora Auditor Professional 4.5 - Windows Module 4.5.8010.20310 Using: Customized FFR Definition More information Administering a SQL Database Infrastructure Administering a SQL Database Infrastructure 20764A 5 Days Instructor-led, Hands on Course Information This five-day instructor-led course provides students who administer and maintain SQL Server databases More information Oracle Database 11g: Security Release 2 Oracle University Contact Us: 1.800.529.0165 Oracle Database 11g: Security Release 2 Duration: 5 Days What you will learn In this course, you'll learn how to use Oracle Database features to meet the security, More information Administering a SQL Database Infrastructure 20764; 5 Days; Instructor-led Administering a SQL Database Infrastructure 20764; 5 Days; Instructor-led Course Description This five-day instructor-led course provides students who administer and maintain SQL Server databases with More information Microsoft 20764 - Administering a SQL Database Infrastructure 1800 ULEARN (853 276) www.ddls.com.au Microsoft 20764 - Administering a SQL Database Infrastructure Length 5 days Price $4169.00 (inc GST) Version A Overview This five-day instructor-led course provides More information WHITE PAPER AUGUST 2014 THE DEFINITIVE GUIDE TO CLOUD ACCESS SECURITY BROKERS WHITE PAPER AUGUST 2014 For many enterprises, security and compliance concerns hamper adoption of cloud applications. Furthermore, cloud applications More information BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios 2 OpenTopic TOC Contents What is BIG-IP Edge Client app for ios?... 3 About supported authentication types... 3 About establishing More information Cloud Security Through Threat Modeling. Robert M. Zigweid Director of Services for IOActive Cloud Security Through Threat Modeling Robert M. Zigweid Director of Services for IOActive 1 Key Points Introduction Threat Model Primer Assessing Threats Mitigating Threats Sample Threat Model Exercise More information Guidance End User Devices Security Guidance: Apple OS X 10.9 GOV.UK Guidance End User Devices Security Guidance: Apple OS X 10.9 Published 23 January 2014 Contents 1. Changes since previous guidance 2. Usage Scenario 3. Summary of Platform Security 4. How the Platform More information Guidance End User Devices Security Guidance: Apple ios 7 GOV.UK Guidance End User Devices Security Guidance: Apple ios 7 Updated 10 June 2014 Contents 1. Changes since previous guidance 2. Usage Scenario 3. Summary of Platform Security 4. How the Platform Can More information MS-10775: Administering Microsoft SQL Server 2012 Databases. Course Objectives. Required Exam(s) Price. Duration. Methods of Delivery. MS-10775: Administering Microsoft SQL Server 2012 Databases This five-day instructor led course provides students with the knowledge and skills to maintain a Microsoft SQL Server 2012 database. The course More information User Identification (User-ID) Tips and Best Practices User Identification (User-ID) Tips and Best Practices Nick Piagentini Palo Alto Networks www.paloaltonetworks.com Table of Contents PAN-OS 4.0 User ID Functions... 3 User / Group Enumeration... 3 Using More information Five Steps to Improve Internal Network Security. Chattanooga ISSA Five Steps to Improve Internal Network Security Chattanooga ISSA 1 Find Me AverageSecurityGuy.info @averagesecguy stephen@averagesecurityguy.info github.com/averagesecurityguy ChattSec.org 2 Why? The methodical More information Commercially Proven Trusted Computing Solutions RSA 2010 Commercially Proven Trusted Computing Solutions RSA 2010 Hardware Self-Encrypting Drives (SEDs) Unique Security Features Encryption below the file system Hardware root-of-trust for encryption Tamper resistant More information ArcGIS Server Security Threats & Best Practices 2014. David Cordes Michael Young ArcGIS Server Security Threats & Best Practices 2014 David Cordes Michael Young Agenda Introduction Threats Best practice - ArcGIS Server settings - Infrastructure settings - Processes Summary Introduction More information Windows Security Environment Motivation Popularity, widespread use of Windows Big surface, big impact Protection via user/kernel architecture and CPU modes Multiple-users environment, same physical resources Easy to install < security More information EASTERN ARIZONA COLLEGE Web Server Administration EASTERN ARIZONA COLLEGE Web Server Administration Course Design 2010-2011 Course Information Division Business Course Number CMP 256 Title Web Server Administration Credits 3 Developed by Michael Rose More information \"Charting the Course... Implementing Citrix NetScaler 11 for App and Desktop Solutions CNS-207 Course Summary Course Summary Description The objective of this course is to provide the foundational concepts and teach the skills necessary to implement, configure, secure and monitor a Citrix NetScaler system with More information PowerShell Configuration Guide PowerShell Configuration Guide Table of Contents Windows PowerShell 2 Prerequisites... 3 IIS Settings... 3 ActiveSync Server PowerShell Connection Settings... 8 NotifyMDM Version 3.x Windows PowerShell More information 2019 \\xc2\\xa9 DocPlayer.net Privacy Policy | Terms of Service | Feedback To make this website work, we log user data and share it with processors. To use this website, you must agree to our Privacy Policy, including cookie policy. I agree.\\xc2 \\xc2 \\xc2 \\xc2",
+  "sanitized_txt": "Analysis of Malicious Security Support Provider DLLs - PDF Log in Registration Search for Analysis of Malicious Security Support Provider DLLs SHARE HTML DOWNLOAD Save this PDF as: \\xc2 WORD \\xc2 PNG \\xc2 TXT \\xc2 JPG Size: px Start display at page: Download \"Analysis of Malicious Security Support Provider DLLs\" Error: Download Document Horatio Patrick 3 years ago Views: Transcription 1 Analysis of Malicious Security Support Provider DLLs Matt Graeber October 7, 2014 Introduction Matt Graeber FireEye Labs Advanced Reverse Engineering (FLARE) Team Malware Analyst Instructor Past Researcher US Army Red Team \\xe4\\xb8\\xad \\xe6\\x96\\x87 \\xe7\\xbf\\xbb \\xe8\\xaf\\x91 Reformed certification hoarder For fun PowerShell! PowerSploit Twitter 2 2 Goals What are security support providers (SSP) Local security authority (LSA)/SSP architecture SSPs from an attacker s perspective Legitimate SSPs SSP internals Installation Detection Mitigation Obligatory IDA screenshot Obligatory PowerShell screenshot 3 Background A malicious security support provider (SSP) DLL was found recently during a recent IR engagement. Searching for SpLsaModeInitialize a required SSP DLL export, yielded only two unique hits in our internal malware database. The uniqueness of this type of malware warranted additional investigation 4 3 Definitions A security support provider (SSP) a.k.a security package: A user-mode security extension used to perform authentication during a client/server exchange. e.g. schannel (SSL) An authentication package (AP) Used to extend interactive logon authentication e.g. Enable RSA token authentication SSP/AP Can serve the tasks of SSPs and APs. Loaded in lsass. e.g. kerberos and msv1_0 (NTLM) 5 LSA Extensible Architecture The Local Security Authority (LSA) is responsible for nearly all aspects of local security on a system Authenticate and log on users Manage credentials SAM/NTDS/etc. Built-in support for message privacy and integrity LSA is extensible SSP/APs are loaded into LSA (lsass.exe) at boot Custom SSP/APs can either replace or proxy existing providers. 6 4 SSPI Architecture - Legitimate Client App Secur32.dll InitSecurityInterface QuerySecurityPackageInfo AcquireCredentialsHandle InitializeSecurityContext DecryptMessage EncryptMessage LSA kerberos msv1_0 wdigest 7 SSPI Architecture - Malicious Malicious Client App Secur32.dll Named Pipe Shared Memory LSA InitSecurityInterface QuerySecurityPackageInfo AcquireCredentialsHandle InitializeSecurityContext DecryptMessage EncryptMessage kerberos msv1_0 wdigest maliciousssp 8 5 SSP Benefits from an Attacker s Perspective Once installed, your DLL is loaded into lsass.exe! i.e. no need to inject into lsass.exe Not a well-known persistence mechanism Once loaded into lsass, you are handed an officially supported credential capture API. i.e. officially supported, Mimikatz-like functionality without needing Mimikatz 9 Common Legitimate SSPs Microsoft msv1_0.dll kerberos.dll negoexts.dll wsauth.dll 3 rd Party wsauth.dll VMWare Horizon View CTXAUTH.dll Citrix schannel.dll TSpkg.dll msoidssp.dll pku2u.dll etc. phonefactorlsa.dll PhoneFactor 10 6 LSA SSP Initialization Procedure 1. Inform LSA of SSP implemented functions 2. Inform SSP of available LSA support functions 11 SSP Development - Requirements Minimum required functions* 1. SpInitialize 2. SpShutDown 3. SpGetInfo Required Export 12 7 SSP Development - Implementation NTSTATUS NTAPI SpLsaModeInitialize( _In_ ULONG LsaVersion, _Out_ PULONG PackageVersion, _Out_ PSECPKG_FUNCTION_TABLE *pptables, _Out_ PULONG pctables ); Called by LSA when your SSP DLL is loaded. Only required export function Informs LSA of the functions your SSP DLL implements via PSECPKG_FUNCTION_TABLE LSA expects at a minimum, the following in PSECPKG_FUNCTION_TABLE: SpInitialize typedef struct SECPKG_FUNCTION_TABLE {... SpShutDown SpInitializeFn *Initialize; SpGetInfo SpShutdownFn *Shutdown; SpGetInfoFn SpAcceptCredentialsFn SpGetCredentialsFn SpGetUserInfoFn SpAddCredentialsFn SpSetExtendedInformationFn... } SECPKG_FUNCTION_TABLE, *PSECPKG_FUNCTION_TABLE; *GetInfo; *AcceptCredentials; *GetCredentials; *GetUserInfo; *AddCredentials; *SpChangeAccountPasswordFn; 13 SSP Development - Implementation NTSTATUS SpInitialize( _In_ ULONG_PTR PackageId, _In_ PSECPKG_PARAMETERS Parameters, _In_ PLSA_SECPKG_FUNCTION_TABLE FunctionTable ); Called by LSA after SpLsaInitialize Informs your SSP DLL the available LSA functions via PLSA_SECPKG_FUNCTION_TABLE typedef struct _LSA_SECPKG_FUNCTION_TABLE {... PLSA_GET_CREDENTIALS GetCredentials; PLSA_OPEN_SAM_USER OpenSamUser; PLSA_GET_USER_CREDENTIALS GetUserCredentials; PLSA_GET_USER_AUTH_DATA GetUserAuthData; PLSA_UPDATE_PRIMARY_CREDENTIALS UpdateCredentials; PLSA_GET_AUTH_DATA_FOR_USER GetAuthDataForUser; CredReadDomainCredentialsFn *CrediReadDomainCredentials; PLSA_PROTECT_MEMORY LsaProtectMemory; PLSA_PROTECT_MEMORY LsaUnprotectMemory; PLSA_GET_SERVICE_ACCOUNT_PASSWORD GetServiceAccountPassword;... } LSA_SECPKG_FUNCTION_TABLE, *PLSA_SECPKG_FUNCTION_TABLE; 14 8 SSP Development - Implementation NTSTATUS SpShutDown(void); Called at system shutdown Can simply return NULL lsass.exe will crash if this if not implemented 15 SSP Development - Implementation NTSTATUS SpGetInfo(_Out_ PSecPkgInfo PackageInfo); Provides general information about a security package Can return the following info: Name Description Capabilities etc. Must be implemented but it doesn t need to do anything. 16 9 SSP Installation 1.Copy the SSP DLL to %windir%\\\\system32 Note: Because the DLL is loaded into lsass, it must be compiled for the same architecture as lsass.exe 2.Add the file name (without extension) to: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\Security Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\OSConfig\\\\Security Packages 3. Optional: Load it into lsass immediately by calling secur32!addsecuritypackage 4. Reboot 17 Malicious SSP PoC mimilib SSP Benjamin Delpy recently added SSP functionality to mimilib.dll. He has yet to document or heavily advertise this functionality. Once installed and loaded into lsass.exe, it captures passwords in plaintext. This is achieved with the SpAcceptCredential callback function. 18 10 Malicious SSP PoC mimilib SSP 19 Malicious SSP PoC mimilib SSP %windir%\\\\system32\\\\kiwissp.log [ :000003e7] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (SYSTEM) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e7] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (SYSTEM) [ :000003e7] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (SYSTEM) [ :000527ee] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ : ] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ :00065d64] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ :00065d7a] [ ] WIN-LOI4CUIDKP1\\\\anonymous (anonymous) badpassword [ :000003e5] [ ] \\\\ (LOCAL SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e5] [ ] \\\\ (LOCAL SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) [ :000003e4] [ ] WORKGROUP\\\\WIN-LOI4CUIDKP1$ (NETWORK SERVICE) 20 11 Malicious SSP Mitigations Prevention Windows 8.1/Server 2012 R2 running Secure Boot with UEFI: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa \\\\RunAsPPL (DWORD) = 1 Makes lsass a protected process. Forces SSP DLLs to be co-signed by Microsoft. With Secure Boot (w/ UEFI) enabled, RunAsPPL is set as a UEFI secure variable and cannot be deleted. 21 Malicious SSP Detection Windows 8.1/Server 2012 R2 only Generate event logs upon loading of an unsigned lsass module: HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\LSASS.exe AuditLevel = 8 (REG_DWORD) Reboot When an unsigned SSP is loaded, either of the following events will trigger: 12 Malicious SSP Detection Detection Whitelist legitimate SSP DLLs. Alert when HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Security Packages or HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSConfig\\\\S ecurity Packages is modified to contain an SSP not in the whitelist. Alert on any DLLs that export SpLsaModeInitialize that are not in the whitelist. MIGHT be present under LSA Providers in Sysinternals Autoruns 23 Malicious SSP Mitigations Removal Remove the SSP from the following reg keys: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Sec urity Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSC onfig\\\\security Packages Delete the DLL from %windir%\\\\system32 Call secur32!deletesecuritypackage? Oops! MS forgot to implement that function. Reboot 24 13 Malicious SSP Mitigations 25 References Registering SSP/AP DLLs Configuring Additional LSA Protection LSA Mode Initialization Mimikatz PoC SSP 26 14 Merci!!! Thank you Benjamin Delpy for the following: 1. Performing all the original research on malicious SSPs 2. Writing a PoC malicious SSP 3. Writing Mimikatz! <3 4. Patiently and enthusiastically answering all my dumb questions. 27 QUESTIONS? 28 Similar documents Who DIT It? Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Who DIT It? Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Mike Middleton Justin Prosco Mandiant, A FireEye Company Mike Middleton Principal Consultant Joined More information give me the password and I'll rule the world dpapi, what else? give me the password and I'll rule the world dpapi, what else? who am I? A question I often ask to myself let socials do the job. Francesco Picasso Reality Net System Solutions @dfirfpi blog.digital-forensics.it More information mimikatz 2.0 Benjamin DELPY `gentilkiwi` mimikatz 2.0 Benjamin DELPY `gentilkiwi` Our little story `whoami`, why am I doing this? mimikatz 2.0 & sekurlsa Focus on Windows 8.1 et 2012r2 Kerberos & strong authentication Questions / Answers And More information Configuring Authentication for Microsoft Windows Chapter 4 Configuring Authentication for Microsoft Windows In this chapter: Storing and Transmitting Credentials..............................69 Storing Secrets in Windows......................................83 More information Pass-the-Hash II: Admin s Revenge. Skip Duckwall & Chris Campbell Pass-the-Hash II: Admin s Revenge Skip Duckwall & Chris Campbell Do you know who I am? Skip Co-presented PTH talk last year at BH, Derbycon http://passing-the-hash.blogspot.com @passingthehash on twitter More information Michael Mayer-Gishyan NSA IT Consulting e.u. @mike_srv02 mmg@nsa.co.at http://nsa.co.at. From Zero to Hero. Domain Admin in einem Tag Michael Mayer-Gishyan NSA IT Consulting e.u. @mike_srv02 mmg@nsa.co.at http://nsa.co.at From Zero to Hero Domain Admin in einem Tag Agenda Vita Introduction to NTLM and Kerberos Pass-the-Hash Techniques More information Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Sean Metcalf (@PyroTek3) CTO, DAn Solutions sean [@] dansolutions _._com DAnSolutions.com ADSecurity.org ABOUT Chief Technology Officer More information Windows security for n00bs part 1 Security architecture & Access Control Grenoble INP Ensimag _ (in)security we trust _!! SecurIMAG 2011-05-12 Windows security for n00bs part 1 Security architecture & Access Control Description: whether you are in favor or against it, the Windows More information Persistence Mechanisms as Indicators of Compromise Persistence Persistence Mechanisms as Indicators of Compromise An automated technology for identifying cyber attacks designed to survive indefinitely the reboot process on PCs White Paper Date: October More information Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Red vs. Blue: Modern Active Directory Attacks, Detection, & Protection Sean Metcalf (@PyroTek3) CTO, DAn Solutions sean [@] dansolutions _._com http://dansolutions.com http://www.adsecurity.org ABOUT Chief More information MS-55096: Securing Data on Microsoft SQL Server 2012 MS-55096: Securing Data on Microsoft SQL Server 2012 Description The goal of this two-day instructor-led course is to provide students with the database and SQL server security knowledge and skills necessary More information STARTER KIT. Infoblox DNS Firewall for FireEye STARTER KIT Introduction Infoblox DNS Firewall integration with FireEye Malware Protection System delivers a unique and powerful defense against Advanced Persistent Threats (APT) for business networks. More information Hacker s Perspective on your Windows Infrastructure: Windows 10 Mandatory Check List Hacker s Perspective on your Windows Infrastructure: Windows 10 Mandatory Check List Paula Januszkiewicz CQURE: CEO, Penetration Tester CQURE Offices: New York, Dubai, Warsaw MVP: Enterprise Security, More information VMware Horizon View for SMS PASSCODE SMS PASSCODE 2014 VMware Horizon View for SMS PASSCODE SMS PASSCODE 2014 VMware View Radius authentication configuration for SMS PASSCODE With the introduction of RADIUS authentication support in VMware View it is possible More information Windows 2000 Security Architecture. Peter Brundrett Program Manager Windows 2000 Security Microsoft Corporation Windows 2000 Security Architecture Peter Brundrett Program Manager Windows 2000 Security Microsoft Corporation Topics Single Sign-on Kerberos v5 integration Active Directory security Delegation of authentication More information Securing Data on Microsoft SQL Server 2012 Securing Data on Microsoft SQL Server 2012 Course 55096 The goal of this two-day instructor-led course is to provide students with the database and SQL server security knowledge and skills necessary to More information 70 299 Implementing and Administering Security in a Microsoft Windows Server 2003 Network 70 299 Implementing and Administering Security in a Microsoft Windows Server 2003 Network Course Number: 70 299 Length: 1 Day(s) Course Overview This course is part of the MCSA training.. Prerequisites More information Detecting Malware With Memory Forensics. Hal Pomeranz SANS Institute Detecting Malware With Memory Forensics Hal Pomeranz SANS Institute Why Memory Forensics? Everything in the OS traverses RAM Processes and threads Malware (including rootkit technologies) Network sockets, More information Locking down a Hitachi ID Suite server Locking down a Hitachi ID Suite server 2016 Hitachi ID Systems, Inc. All rights reserved. Organizations deploying Hitachi ID Identity and Access Management Suite need to understand how to secure its runtime More information Creating a User Profile for Outlook 2013 Creating a User Profile for Outlook 2013 This document tells you how to create a user profile for Outlook 2013 on your computer (also known as the Outlook client). This is necessary, for example, when More information Administering a SQL Database Infrastructure (MS- 20764) Administering a SQL Database Infrastructure (MS- 20764) Length: 5 days Overview About this course This five-day instructor-led course provides students who administer and maintain SQL Server databases More information Session 17 Windows 7 Professional DNS & Active Directory(Part 2) Session 17 Windows 7 Professional DNS & Active Directory(Part 2) Fall 2011 ITE153 Operating Systems 1 Session 17 Windows 7 Professional Operating in Microsoft Networks Fall 2011 ITE153 Operating Systems More information Windows XP Exchange Client Installation Instructions WINDOWS XP with Outlook 2003 or Outlook 2007 1. Click the Start button and select Control Panel: 2. If your control panel looks like this: Click Switch to Classic View. 3. Double click Mail. 4. Click show More information Pass-the-Hash: How Attackers Spread and How to Stop Them Pass-the-Hash: How Attackers Spread and How to Stop Them SESSION ID: HTA-W03 Mark Russinovich Technical Fellow Microsoft Corporation Nathan Ide Principal Development Lead Microsoft Corporation Pass-the-Hash: More information This report is a detailed analysis of the dropper and the payload of the HIMAN malware. PAGE 5 Check Point Malware Research Group HIMAN Malware Analysis December 12, 2013 Researcher: Overview This report is a detailed analysis of the dropper and the payload of the HIMAN malware. This malware More information K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS. v.109 K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS v.109 1 The Exchange environment is an important entry point by which a threat or security risk can enter into a network. K7 Mail Security is a complete More information Entrust Managed Services PKI Entrust Managed Services PKI Entrust Managed Services PKI Windows Smart Card Logon Configuration Guide Using Web-based applications Document issue: 1.0 Date of Issue: June 2009 Copyright 2009 Entrust. More information Security in the Sauce Labs Cloud. Practices and protocols used in Sauce s infrastructure and Sauce Connect Security in the Sauce Labs Cloud Practices and protocols used in Sauce s infrastructure and Sauce Connect Table of Contents page 2 page 4 page 6 page 8 page 9 page 10 page 11 Overview I. Sauce Labs Data More information Windows Attack - Gain Enterprise Admin Privileges in 5 Minutes Windows Attack - Gain Enterprise Admin Privileges in 5 Minutes Compass Security AG, Daniel Stirnimann Compass Security AG Gl\\xc3\\xa4rnischstrasse 7 Postfach 1628 CH-8640 Rapperswil Tel +41 55-214 41 60 Fax +41 More information Managing Local Administrator Passwords with LAPS 10/14/2015 PENN STATE SECURITY CONFERENCE Managing Local Administrator Passwords with LAPS 2015 PENN STATE SECURITY CONFERENCE DAN BARR DRB45@PSU.EDU SYSTEMS ADMINISTRATOR, APPLIED RESEARCH LABORATORY The Shared Password Threat Shared passwords More information Online Payments Threats July 3, 2012 Introduction...2 Tested Products...2 Used Configuration...3 Real Malware Inspiration...3 Total Scores Chart...4 Conclusion...4 About matousec.com...4 Detailed Descriptions of Tests...5 Detailed More information Sophos Mobile Control Technical guide Sophos Mobile Control Technical guide Product version: 2 Document date: December 2011 Contents 1. About Sophos Mobile Control... 3 2. Integration... 4 3. Architecture... 6 4. Workflow... 12 5. Directory More information Training module 2 Installing VMware View Training module 2 Installing VMware View In this second module we ll install VMware View for an End User Computing environment. We ll install all necessary parts such as VMware View Connection Server and More information Security. Ausgew\\xc3\\xa4hlte Betriebssysteme Institut Betriebssysteme Fakult\\xc3\\xa4t Informatik. Copyright 2001-2004 Hermann H\\xc3\\xa4rtig, Ronald Aigner Ausgew\\xc3\\xa4hlte Betriebssysteme Institut Betriebssysteme Fakult\\xc3\\xa4t Informatik Outline Ratings System Components Logon Object (File) Access Impersonation Auditing 2 Ratings National Computer Center (NCSC) part More information Exchange 2013 mailbox setup guide Fasthosts Customer Support Exchange 2013 mailbox setup guide This article covers the setup of Exchange 2013 mailboxes in Microsoft Outlook 2013, 2010 and Outlook 2011 for Mac. Contents Exchange 2013 Mailbox More information ViPNet ThinClient 3.3. Quick Start ViPNet ThinClient 3.3 Quick Start 1991 2014 Infotecs Americas. All rights reserved. Version: 00060-07 34 02 ENU This document is included in the software distribution kit and is subject to the same terms More information Hosts HARDENING WINDOWS NETWORKS TRAINING BROADVIEW NETWORKS Hosts HARDENING WINDOWS NETWORKS TRAINING COURSE OVERVIEW A hands-on security course that teaches students how to harden, monitor and protect Microsoft Windows based networks. A hardening More information CMB 207 1I Citrix XenApp and XenDesktop Fast Track CMB 207 1I Citrix XenApp and XenDesktop Fast Track This fast paced course provides the foundation necessary for students to effectively centralize and manage desktops and applications in the datacenter More information Agenda. How to configure dlaw@esri.com Agenda Strongly Recommend: Knowledge of ArcGIS Server and Portal for ArcGIS Security in the context of ArcGIS Server/Portal for ArcGIS Access Authentication Authorization: securing web services More information How to Efficiently Protect Active Directory from Credential Theft & Large Scale Compromise How to Efficiently Protect Active Directory from Credential Theft & Large Scale Compromise An Approach Based on Real-World Expertise Friedwart Kuhn, fkuhn@ernw.de Digital unterschrieben von Friedwart Kuhn More information Computer Security: Principles and Practice Computer Security: Principles and Practice Chapter 24 Windows and Windows Vista Security First Edition by William Stallings and Lawrie Brown Lecture slides by Lawrie Brown Windows and Windows Vista Security More information WINDOWS REGISTRY AUDITING CHEAT SHEET - Win 7/Win 2008 or later This Windows Registry Auditing Cheat Sheet is intended to help you get started with basic and necessary Registry Auditing. This cheat sheet includes some very common items that should have auditing enabled, More information TZWorks Windows Event Log Viewer (evtx_view) Users Guide TZWorks Windows Event Log Viewer (evtx_view) Users Guide Abstract evtx_view is a standalone, GUI tool used to extract and parse Event Logs and display their internals. The tool allows one to export all More information Speedy Organizer. SQL Server 2008 R2 RTM Express - Installation Guide Introduction Speedy Organizer SQL Server 2008 R2 RTM Express - Installation Guide Introduction Contents Revision table... 1 1 Introduction... 2 2 SQL Server 2008 Express installation... 2 2.1 Installation... 2 3 Post More information Use Enterprise SSO as the Credential Server for Protected Sites Webthority HOW TO Use Enterprise SSO as the Credential Server for Protected Sites This document describes how to integrate Webthority with Enterprise SSO version 8.0.2 or 8.0.3. Webthority can be configured More information SharePoint 2013 Logical Architecture SharePoint 2013 Logical Architecture This document is provided \"as-is\". Information and views expressed in this document, including URL and other Internet Web site references, may change without notice. More information Securing ArcGIS Server Services: First Steps Federal GIS Conference February 9 10, 2015 Washington, DC Securing ArcGIS Server Services: First Steps Michael Sarhan Esri msarhan@esri.com Agenda Review Basic Security Workflow ArcGIS Server Roles and More information MCTS Guide to Microsoft Windows 7. Chapter 7 Windows 7 Security Features MCTS Guide to Microsoft Windows 7 Chapter 7 Windows 7 Security Features Objectives Describe Windows 7 Security Improvements Use the local security policy to secure Windows 7 Enable auditing to record security More information 7.0 Self Service Guide 7.0 Self Service Guide Copyright 2010 Sage Technologies Limited, publisher of this work. All rights reserved. No part of this documentation may be copied, photocopied, reproduced, translated, microfilmed, More information 304 - APM TECHNOLOGY SPECIALIST ABOUT THE 304-APM TECHNOLOGY SPECIALIST EXAM. The 304-APM Technology Specialist exam is the required to achieve Certified F5 Technology Specialist, APM status. Successful completion of the APM Technology More information CXD-202-1 Citrix XenDesktop 5 Administration CXD-202-1 Citrix XenDesktop 5 Administration This course provides the foundation necessary for administrators to effectively centralize and manage desktops in the datacenter and deliver them as a service More information Information Assurance Directorate National Security Agency/Central Security Service Information Assurance Directorate Reducing the Effectiveness of Pass-the-Hash November 19, 2013 Revision 1 A product of the Network Components and Applications More information New Zealand National Cyber Security Centre Unclassified New Zealand National Cyber Security Centre Application Whitelisting With Microsoft Applocker June 2012 V1.0.5 Application Whitelisting with Microsoft Applocker Cyber Security Plan As outlined More information Check list for web developers Check list for web developers Requirement Yes No Remarks 1. Input Validation 1.1) Have you done input validation for all the user inputs using white listing and/or sanitization? 1.2) Does the input validation More information Security in the Sauce Labs Cloud SAUCE LABS REPORT Security in the Sauce Labs Cloud Practices and protocols used in Sauce s infrastructure and Sauce Connect Overview It s impossible to deny that in this day and age internet security should More information Hi and welcome to the Microsoft Virtual Academy and Hi and welcome to the Microsoft Virtual Academy and 2012 Microsoft Corporation 1 the start of the Windows 8 Security Insights training. My name is Milad Aslaner I m part of the Premier Field Engineering More information Overview Windows NT 4.0 Security Cryptography SSL CryptoAPI SSPI, Certificate Server, Authenticode Firewall & Proxy Server IIS Security IE Security Overview Windows NT 4.0 Security Cryptography SSL CryptoAPI SSPI, Certificate Server, Authenticode Firewall & Proxy Server IIS Security IE Security Ch 7 - Security 1 Confidentiality and privacy: Protect More information End User Devices Security Guidance: Apple OS X 10.10 GOV.UK Guidance End User Devices Security Guidance: Apple OS X 10.10 Published Contents 1. Changes since previous guidance 2. Usage scenario 3. Summary of platform security 4. How the platform can best More information Introductions. Christopher Cognetta Practice Manager Client Field Engineering Microsoft Dynamics CRM MVP chris.cognetta@tribridge. Hosted by Introductions Christopher Cognetta Practice Manager Client Field Engineering Microsoft Dynamics CRM MVP chris.cognetta@tribridge.com CRMUG Chairperson Miami & Tampa Co Chair 250+ Dynamics CRM More information Windows Server 2008/2012 Server Hardening Account Policies Enforce password history 24 Maximum Password Age - 42 days Minimum Password Age 2 days Minimum password length - 8 characters Password Complexity - Enable Store Password using Reversible More information SQL Server 2008 Express - Installation Guide SQL Server 2008 Express - Installation Guide SQL Server 2008 Express - Installation Guide Page 2 Introduction Contents Revision table... 2 1 Introduction... 3 2 SQL Server 2008 Express installation... More information Table of Contents. Headquarters Cary, NC USA US 1-866-538-3588. Fax 1-919-380-5121 International 1-919-380-5000 Desktop Automation Table of Contents Easy Automation for the Contact Center and Back Office... 3 Use Cases... 3 Activity Intelligence + Automation... 4 Cicero Discovery Automation Architecture... 5 Cicero More information Course Description. Course Audience. Course Outline. Course Page - Page 1 of 12 Course Page - Page 1 of 12 Windows 7 Enterprise Desktop Support Technician M-50331 Length: 5 days Price: $2,795.00 Course Description This five-day instructor-led course provides students with the knowledge More information Securing Administrator Access to Internal Windows Servers Securing Administrator Access to Internal Windows Servers Contents 1. Introduction... 3 2. PKI implementation... 3 Require two-factor authentication for computers... 3 Require two-factor authentication More information DRIVE-BY DOWNLOAD WHAT IS DRIVE-BY DOWNLOAD? A Typical Attack Scenario DRIVE-BY DOWNLOAD WHAT IS DRIVE-BY DOWNLOAD? Drive-by Downloads are a common technique used by attackers to silently install malware on a victim s computer. Once a target website has been weaponized with More information By Skip Duckwall and Chris Campbell By Skip Duckwall and Chris Campbell for Blackhat USA 2013 Introduction User credentials are one of the most powerful items an attacker can obtain. Single-factor, or passwordbased credentials are dangerous More information TLP: GREEN FBI. FBI Liaison Alert System # A-000049-MW Liaison Alert System # A-000049-MW The following information was obtained through investigation and is provided in conjunction with the s statutory requirement to conduct victim notification as outlined More information GRAVITYZONE HERE. Deployment Guide VLE Environment GRAVITYZONE HERE Deployment Guide VLE Environment LEGAL NOTICE All rights reserved. No part of this document may be reproduced or transmitted in any form or by any means, electronic or mechanical, including More information PowerShell for Penetration Testers Training: PowerShell for Penetration Testers Dates of the training: March 14-15,2016 in Heidelberg, Germany Book Now using the code: TR16HMTRAINING and save an additional 10% of the current valid rate! More information NNT CIS Microsoft Windows Server 2008 R2 Benchmark Level 1 Member Server v2-1-0-2 NNT CIS Microsoft Windows Server 2008 R2 Benchmark Level 1 Member Server v2-1-0-2: NNTDC01 On NNTDC01 - By admin for time period 5/23/2014 8:49:51 AM to 5/23/2014 8:49:51 AM NNT CIS Microsoft Windows Server More information Citrix Netscaler Advanced guide for SMS PASSCODE SMS PASSCODE 2014 Citrix Netscaler Advanced guide for SMS PASSCODE SMS PASSCODE 2014 Citrix Netscaler Advanced guide for SMS PASSCODE. This document outlines configuration scenarios with SMS PASSCODE and Citrix Netscaler. More information Integrating Web Application Security into the IT Curriculum Integrating Web Application Security into the IT Curriculum James Walden Northern Kentucky University Topics 1. 2. 3. 4. Why should we teach web application security? What material do we need to cover? More information BUILDING SECURITY IN. Analyzing Mobile Single Sign-On Implementations BUILDING SECURITY IN Analyzing Mobile Single Sign-On Implementations Analyzing Mobile Single Sign-On Implementations 1 Introduction Single sign-on, (SSO) is a common requirement for business-to-employee More information BYOD Guidance: BlackBerry Secure Work Space GOV.UK Guidance BYOD Guidance: BlackBerry Secure Work Space Published 17 February 2015 Contents 1. About this guidance 2. Summary of key risks 3. Secure Work Space components 4. Technical assessment 5. More information Professional Mailbox Email Software Setup Guide Professional Mailbox Email Software Setup Guide Table of contents Download and Install Microsoft Outlook 2010 or 2011... 2 Enabling access from email software... 4 Setting up Outlook 2010... 6 Before you More information Security IIS Service Lesson 6 Security IIS Service Lesson 6 Skills Matrix Technology Skill Objective Domain Objective # Configuring Certificates Configure SSL security 3.6 Assigning Standard and Special NTFS Permissions Enabling and More information Sage Accpac CRM 5.8. Self Service Guide Sage Accpac CRM 5.8 Self Service Guide Copyright 2005 Sage Technologies Limited, publisher of this work. All rights reserved. No part of this documentation may be copied, photocopied, reproduced, translated, More information Folder Proxy + OWA + ECP/EAC Guide. Version 2.0 April 2016 Version 2.0 April 2016 Folder Proxy + OWA + ECP/EAC Guide Copyright 2016 iwebgate. All Rights Reserved. No part of this publication may be reproduced, transmitted, transcribed, stored in a retrieval system, More information Five Steps to Improve Internal Network Security. Chattanooga Information security Professionals Five Steps to Improve Internal Network Security Chattanooga Information security Professionals Who Am I? Security Analyst: Sword & Shield Blogger: averagesecurityguy.info Developer: github.com/averagesecurityguy More information White Paper. Deploying EUM. SurfControl Web Filter for MS Windows. rev. 1.1, January 2005. Enterprise Threat Protection White Paper Deploying EUM SurfControl Web Filter for MS Windows rev. 1.1, January 2005 Enterprise Threat Protection ..... ACKNOWLEDGEMENTS SurfControl wishes to acknowledge the following people for their More information Implementation Guide SAP NetWeaver Identity Management Identity Provider Implementation Guide SAP NetWeaver Identity Management Identity Provider Target Audience Technology Consultants System Administrators PUBLIC Document version: 1.10 2011-07-18 Document History CAUTION Before More information Security Options... 1 Effective Server Security Options Period: Last 20 week(s) Generated: For: Brian Bartlett bbartlett@ecora.com By: Ecora Auditor Professional 4.5 - Windows Module 4.5.8010.20310 Using: Customized FFR Definition More information Administering a SQL Database Infrastructure Administering a SQL Database Infrastructure 20764A 5 Days Instructor-led, Hands on Course Information This five-day instructor-led course provides students who administer and maintain SQL Server databases More information Oracle Database 11g: Security Release 2 Oracle University Contact Us: 1.800.529.0165 Oracle Database 11g: Security Release 2 Duration: 5 Days What you will learn In this course, you'll learn how to use Oracle Database features to meet the security, More information Administering a SQL Database Infrastructure 20764; 5 Days; Instructor-led Administering a SQL Database Infrastructure 20764; 5 Days; Instructor-led Course Description This five-day instructor-led course provides students who administer and maintain SQL Server databases with More information Microsoft 20764 - Administering a SQL Database Infrastructure 1800 ULEARN (853 276) www.ddls.com.au Microsoft 20764 - Administering a SQL Database Infrastructure Length 5 days Price $4169.00 (inc GST) Version A Overview This five-day instructor-led course provides More information WHITE PAPER AUGUST 2014 THE DEFINITIVE GUIDE TO CLOUD ACCESS SECURITY BROKERS WHITE PAPER AUGUST 2014 For many enterprises, security and compliance concerns hamper adoption of cloud applications. Furthermore, cloud applications More information BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios 2 OpenTopic TOC Contents What is BIG-IP Edge Client app for ios?... 3 About supported authentication types... 3 About establishing More information Cloud Security Through Threat Modeling. Robert M. Zigweid Director of Services for IOActive Cloud Security Through Threat Modeling Robert M. Zigweid Director of Services for IOActive 1 Key Points Introduction Threat Model Primer Assessing Threats Mitigating Threats Sample Threat Model Exercise More information Guidance End User Devices Security Guidance: Apple OS X 10.9 GOV.UK Guidance End User Devices Security Guidance: Apple OS X 10.9 Published 23 January 2014 Contents 1. Changes since previous guidance 2. Usage Scenario 3. Summary of Platform Security 4. How the Platform More information Guidance End User Devices Security Guidance: Apple ios 7 GOV.UK Guidance End User Devices Security Guidance: Apple ios 7 Updated 10 June 2014 Contents 1. Changes since previous guidance 2. Usage Scenario 3. Summary of Platform Security 4. How the Platform Can More information MS-10775: Administering Microsoft SQL Server 2012 Databases. Course Objectives. Required Exam(s) Price. Duration. Methods of Delivery. MS-10775: Administering Microsoft SQL Server 2012 Databases This five-day instructor led course provides students with the knowledge and skills to maintain a Microsoft SQL Server 2012 database. The course More information User Identification (User-ID) Tips and Best Practices User Identification (User-ID) Tips and Best Practices Nick Piagentini Palo Alto Networks www.paloaltonetworks.com Table of Contents PAN-OS 4.0 User ID Functions... 3 User / Group Enumeration... 3 Using More information Five Steps to Improve Internal Network Security. Chattanooga ISSA Five Steps to Improve Internal Network Security Chattanooga ISSA 1 Find Me AverageSecurityGuy.info @averagesecguy stephen@averagesecurityguy.info github.com/averagesecurityguy ChattSec.org 2 Why? The methodical More information Commercially Proven Trusted Computing Solutions RSA 2010 Commercially Proven Trusted Computing Solutions RSA 2010 Hardware Self-Encrypting Drives (SEDs) Unique Security Features Encryption below the file system Hardware root-of-trust for encryption Tamper resistant More information ArcGIS Server Security Threats & Best Practices 2014. David Cordes Michael Young ArcGIS Server Security Threats & Best Practices 2014 David Cordes Michael Young Agenda Introduction Threats Best practice - ArcGIS Server settings - Infrastructure settings - Processes Summary Introduction More information Windows Security Environment Motivation Popularity, widespread use of Windows Big surface, big impact Protection via user/kernel architecture and CPU modes Multiple-users environment, same physical resources Easy to install < security More information EASTERN ARIZONA COLLEGE Web Server Administration EASTERN ARIZONA COLLEGE Web Server Administration Course Design 2010-2011 Course Information Division Business Course Number CMP 256 Title Web Server Administration Credits 3 Developed by Michael Rose More information \"Charting the Course... Implementing Citrix NetScaler 11 for App and Desktop Solutions CNS-207 Course Summary Course Summary Description The objective of this course is to provide the foundational concepts and teach the skills necessary to implement, configure, secure and monitor a Citrix NetScaler system with More information PowerShell Configuration Guide PowerShell Configuration Guide Table of Contents Windows PowerShell 2 Prerequisites... 3 IIS Settings... 3 ActiveSync Server PowerShell Connection Settings... 8 NotifyMDM Version 3.x Windows PowerShell More information 2019 \\xc2\\xa9 DocPlayer.net Privacy Policy | Terms of Service | Feedback To make this website work, we log user data and share it with processors. To use this website, you must agree to our Privacy Policy, including cookie policy. I agree.\\xc2 \\xc2 \\xc2 \\xc2",
+  "ID_list": [
+    "T1101",
+    "T1131",
+    "TA0003"
+  ],
+  "Name_list": [
+    "At",
+    "Authentication Package",
+    "Control Panel",
+    "Credentials",
+    "Malware",
+    "Proxy",
+    "Rootkit",
+    "Security Support Provider",
+    "Server",
+    "Software",
+    "Source",
+    "Tool",
+    "Web Service",
+    "Web Services"
+  ],
+  "TTP_sentences": {
+    "T1101": [
+      {
+        "sentence": "PowerSploit Twitter 2 2 Goals What are security support providers (SSP) Local security authority (LSA)/SSP architecture SSPs from an attacker s perspective Legitimate SSPs SSP internals Installation Detection Mitigation Obligatory IDA screenshot Obligatory PowerShell screenshot 3 Background A malicious security support provider (SSP) DLL was found recently during a recent IR engagement.",
+        "score": 0.5473
+      },
+      {
+        "sentence": "Searching for SpLsaModeInitialize a required SSP DLL export, yielded only two unique hits in our internal malware database.",
+        "score": 0.5544
+      },
+      {
+        "sentence": "The uniqueness of this type of malware warranted additional investigation 4 3 Definitions A security support provider (SSP) a.k.a security package: A user-mode security extension used to perform authentication during a client/server exchange. e.g. schannel (SSL) An authentication package (AP) Used to extend interactive logon authentication e.g.",
+        "score": 0.4937
+      },
+      {
+        "sentence": "Enable RSA token authentication SSP/AP Can serve the tasks of SSPs and APs.",
+        "score": 0.391
+      },
+      {
+        "sentence": "Loaded in lsass. e.g. kerberos and msv1_0 (NTLM) 5 LSA Extensible Architecture The Local Security Authority (LSA) is responsible for nearly all aspects of local security on a system Authenticate and log on users Manage credentials SAM/NTDS/etc.",
+        "score": 0.6356
+      },
+      {
+        "sentence": "Built-in support for message privacy and integrity LSA is extensible SSP/APs are loaded into LSA (lsass.exe) at boot Custom SSP/APs can either replace or proxy existing providers.",
+        "score": 0.6703
+      },
+      {
+        "sentence": "Inform LSA of SSP implemented functions 2.",
+        "score": 0.576
+      },
+      {
+        "sentence": "Inform SSP of available LSA support functions 11 SSP Development - Requirements Minimum required functions* 1.",
+        "score": 0.5756
+      },
+      {
+        "sentence": "SpGetInfo Required Export 12 7 SSP Development - Implementation NTSTATUS NTAPI SpLsaModeInitialize( _In_ ULONG LsaVersion, _Out_ PULONG PackageVersion, _Out_ PSECPKG_FUNCTION_TABLE *pptables, _Out_ PULONG pctables ); Called by LSA when your SSP DLL is loaded.",
+        "score": 0.69
+      },
+      {
+        "sentence": "Only required export function Informs LSA of the functions your SSP DLL implements via PSECPKG_FUNCTION_TABLE LSA expects at a minimum, the following in PSECPKG_FUNCTION_TABLE: SpInitialize typedef struct SECPKG_FUNCTION_TABLE {...",
+        "score": 0.6193
+      },
+      {
+        "sentence": "16 9 SSP Installation 1.Copy the SSP DLL to %windir%\\\\system32 Note: Because the DLL is loaded into lsass, it must be compiled for the same architecture as lsass.exe 2.Add the file name (without extension) to: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\Security Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\OSConfig\\\\Security Packages 3.",
+        "score": 0.6632
+      },
+      {
+        "sentence": "Optional: Load it into lsass immediately by calling secur32!addsecuritypackage 4.",
+        "score": 0.5814
+      },
+      {
+        "sentence": "Reboot 17 Malicious SSP PoC mimilib SSP Benjamin Delpy recently added SSP functionality to mimilib.dll.",
+        "score": 0.5457
+      },
+      {
+        "sentence": "Once installed and loaded into lsass.exe, it captures passwords in plaintext.",
+        "score": 0.5524
+      },
+      {
+        "sentence": "This is achieved with the SpAcceptCredential callback function.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "Forces SSP DLLs to be co-signed by Microsoft.",
+        "score": 0.4698
+      },
+      {
+        "sentence": "With Secure Boot (w/ UEFI) enabled, RunAsPPL is set as a UEFI secure variable and cannot be deleted.",
+        "score": 0.4984
+      },
+      {
+        "sentence": "21 Malicious SSP Detection Windows 8.1/Server 2012 R2 only Generate event logs upon loading of an unsigned lsass module: HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\LSASS.exe AuditLevel = 8 (REG_DWORD) Reboot When an unsigned SSP is loaded, either of the following events will trigger: 12 Malicious SSP Detection Detection Whitelist legitimate SSP DLLs.",
+        "score": 0.6541
+      },
+      {
+        "sentence": "Alert when HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Security Packages or HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSConfig\\\\S ecurity Packages is modified to contain an SSP not in the whitelist.",
+        "score": 0.6356
+      },
+      {
+        "sentence": "Alert on any DLLs that export SpLsaModeInitialize that are not in the whitelist.",
+        "score": 0.6306
+      },
+      {
+        "sentence": "MIGHT be present under LSA Providers in Sysinternals Autoruns 23 Malicious SSP Mitigations Removal Remove the SSP from the following reg keys: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Sec urity Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSC onfig\\\\security Packages Delete the DLL from %windir%\\\\system32 Call secur32!deletesecuritypackage?",
+        "score": 0.7201
+      },
+      {
+        "sentence": "MS forgot to implement that function.",
+        "score": 0.454
+      },
+      {
+        "sentence": "Reboot 24 13 Malicious SSP Mitigations 25 References Registering SSP/AP DLLs Configuring Additional LSA Protection LSA Mode Initialization Mimikatz PoC SSP 26 14 Merci!!!",
+        "score": 0.6657
+      },
+      {
+        "sentence": "Writing Mimikatz! <3 4.",
+        "score": 0.4023
+      },
+      {
+        "sentence": "Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Who DIT It?",
+        "score": 0.5126
+      },
+      {
+        "sentence": "Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Mike Middleton Justin Prosco Mandiant, A FireEye Company Mike Middleton Principal Consultant Joined More information give me the password and I'll rule the world dpapi, what else? give me the password and I'll rule the world dpapi, what else? who am I?",
+        "score": 0.5729
+      },
+      {
+        "sentence": "Skip Duckwall & Chris Campbell Pass-the-Hash II: Admin s Revenge Skip Duckwall & Chris Campbell Do you know who I am?",
+        "score": 0.3233
+      },
+      {
+        "sentence": "Domain Admin in einem Tag Michael Mayer-Gishyan NSA IT Consulting e.u. @mike_srv02 mmg@nsa.co.at http://nsa.co.at From Zero to Hero Domain Admin in einem Tag Agenda Vita Introduction to NTLM and Kerberos Pass-the-Hash Techniques More information Red vs.",
+        "score": 0.4483
+      },
+      {
+        "sentence": "Blue: Modern Active Directory Attacks, Detection, & Protection Red vs.",
+        "score": 0.3233
+      },
+      {
+        "sentence": "Blue: Modern Active Directory Attacks, Detection, & Protection Sean Metcalf (@PyroTek3) CTO, DAn Solutions sean [@] dansolutions _._com DAnSolutions.com ADSecurity.org ABOUT Chief Technology Officer More information Windows security for n00bs part 1 Security architecture & Access Control Grenoble INP Ensimag _ (in)security we trust _!!",
+        "score": 0.5359
+      },
+      {
+        "sentence": "SecurIMAG 2011-05-12 Windows security for n00bs part 1 Security architecture & Access Control Description: whether you are in favor or against it, the Windows More information Persistence Mechanisms as Indicators of Compromise Persistence Persistence Mechanisms as Indicators of Compromise An automated technology for identifying cyber attacks designed to survive indefinitely the reboot process on PCs White Paper Date: October More information Red vs.",
+        "score": 0.5024
+      },
+      {
+        "sentence": "Blue: Modern Active Directory Attacks, Detection, & Protection Red vs.",
+        "score": 0.3233
+      },
+      {
+        "sentence": "Infoblox DNS Firewall for FireEye STARTER KIT Introduction Infoblox DNS Firewall integration with FireEye Malware Protection System delivers a unique and powerful defense against Advanced Persistent Threats (APT) for business networks.",
+        "score": 0.3854
+      },
+      {
+        "sentence": "Prerequisites More information Detecting Malware With Memory Forensics.",
+        "score": 0.3408
+      },
+      {
+        "sentence": "Hal Pomeranz SANS Institute Detecting Malware With Memory Forensics Hal Pomeranz SANS Institute Why Memory Forensics?",
+        "score": 0.3652
+      },
+      {
+        "sentence": "Everything in the OS traverses RAM Processes and threads Malware (including rootkit technologies) Network sockets, More information Locking down a Hitachi ID Suite server Locking down a Hitachi ID Suite server 2016 Hitachi ID Systems, Inc.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "Organizations deploying Hitachi ID Identity and Access Management Suite need to understand how to secure its runtime More information Creating a User Profile for Outlook 2013 Creating a User Profile for Outlook 2013 This document tells you how to create a user profile for Outlook 2013 on your computer (also known as the Outlook client).",
+        "score": 0.4811
+      },
+      {
+        "sentence": "Click show More information Pass-the-Hash: How Attackers Spread and How to Stop Them Pass-the-Hash: How Attackers Spread and How to Stop Them SESSION ID: HTA-W03 Mark Russinovich Technical Fellow Microsoft Corporation Nathan Ide Principal Development Lead Microsoft Corporation Pass-the-Hash: More information This report is a detailed analysis of the dropper and the payload of the HIMAN malware.",
+        "score": 0.3969
+      },
+      {
+        "sentence": "PAGE 5 Check Point Malware Research Group HIMAN Malware Analysis December 12, 2013 Researcher: Overview This report is a detailed analysis of the dropper and the payload of the HIMAN malware.",
+        "score": 0.3911
+      },
+      {
+        "sentence": "This malware More information K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS. v.109 K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS v.109 1 The Exchange environment is an important entry point by which a threat or security risk can enter into a network.",
+        "score": 0.371
+      },
+      {
+        "sentence": "K7 Mail Security is a complete More information Entrust Managed Services PKI Entrust Managed Services PKI Entrust Managed Services PKI Windows Smart Card Logon Configuration Guide Using Web-based applications Document issue: 1.0 Date of Issue: June 2009 Copyright 2009 Entrust.",
+        "score": 0.3589
+      },
+      {
+        "sentence": "More information Security in the Sauce Labs Cloud.",
+        "score": 0.3456
+      },
+      {
+        "sentence": "Directory More information Training module 2 Installing VMware View Training module 2 Installing VMware View In this second module we ll install VMware View for an End User Computing environment.",
+        "score": 0.3334
+      },
+      {
+        "sentence": "We ll install all necessary parts such as VMware View Connection Server and More information Security.",
+        "score": 0.402
+      },
+      {
+        "sentence": "Version: 00060-07 34 02 ENU This document is included in the software distribution kit and is subject to the same terms More information Hosts HARDENING WINDOWS NETWORKS TRAINING BROADVIEW NETWORKS Hosts HARDENING WINDOWS NETWORKS TRAINING COURSE OVERVIEW A hands-on security course that teaches students how to harden, monitor and protect Microsoft Windows based networks.",
+        "score": 0.4154
+      },
+      {
+        "sentence": "This cheat sheet includes some very common items that should have auditing enabled, More information TZWorks Windows Event Log Viewer (evtx_view) Users Guide TZWorks Windows Event Log Viewer (evtx_view) Users Guide Abstract evtx_view is a standalone, GUI tool used to extract and parse Event Logs and display their internals.",
+        "score": 0.3635
+      },
+      {
+        "sentence": "SQL Server 2008 R2 RTM Express - Installation Guide Introduction Speedy Organizer SQL Server 2008 R2 RTM Express - Installation Guide Introduction Contents Revision table...",
+        "score": 0.358
+      },
+      {
+        "sentence": "2 2 SQL Server 2008 Express installation...",
+        "score": 0.302
+      },
+      {
+        "sentence": "2 3 Post More information Use Enterprise SSO as the Credential Server for Protected Sites Webthority HOW TO Use Enterprise SSO as the Credential Server for Protected Sites This document describes how to integrate Webthority with Enterprise SSO version 8.0.2 or 8.0.3.",
+        "score": 0.3691
+      },
+      {
+        "sentence": "Information and views expressed in this document, including URL and other Internet Web site references, may change without notice.",
+        "score": 0.317
+      },
+      {
+        "sentence": "More information Securing ArcGIS Server Services: First Steps Federal GIS Conference February 9 10, 2015 Washington, DC Securing ArcGIS Server Services: First Steps Michael Sarhan Esri msarhan@esri.com Agenda Review Basic Security Workflow ArcGIS Server Roles and More information MCTS Guide to Microsoft Windows 7.",
+        "score": 0.4079
+      },
+      {
+        "sentence": "Chapter 7 Windows 7 Security Features MCTS Guide to Microsoft Windows 7 Chapter 7 Windows 7 Security Features Objectives Describe Windows 7 Security Improvements Use the local security policy to secure Windows 7 Enable auditing to record security More information 7.0 Self Service Guide 7.0 Self Service Guide Copyright 2010 Sage Technologies Limited, publisher of this work.",
+        "score": 0.5546
+      },
+      {
+        "sentence": "1.2) Does the input validation More information Security in the Sauce Labs Cloud SAUCE LABS REPORT Security in the Sauce Labs Cloud Practices and protocols used in Sauce s infrastructure and Sauce Connect Overview It s impossible to deny that in this day and age internet security should More information Hi and welcome to the Microsoft Virtual Academy and Hi and welcome to the Microsoft Virtual Academy and 2012 Microsoft Corporation 1 the start of the Windows 8 Security Insights training.",
+        "score": 0.3641
+      },
+      {
+        "sentence": "Summary of platform security 4.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "Course Page - Page 1 of 12 Course Page - Page 1 of 12 Windows 7 Enterprise Desktop Support Technician M-50331 Length: 5 days Price: $2,795.00 Course Description This five-day instructor-led course provides students with the knowledge More information Securing Administrator Access to Internal Windows Servers Securing Administrator Access to Internal Windows Servers Contents 1.",
+        "score": 0.4649
+      },
+      {
+        "sentence": "3 Require two-factor authentication for computers...",
+        "score": 0.4493
+      },
+      {
+        "sentence": "Once a target website has been weaponized with More information By Skip Duckwall and Chris Campbell By Skip Duckwall and Chris Campbell for Blackhat USA 2013 Introduction User credentials are one of the most powerful items an attacker can obtain.",
+        "score": 0.3587
+      },
+      {
+        "sentence": "Single-factor, or passwordbased credentials are dangerous More information TLP: GREEN FBI.",
+        "score": 0.4471
+      },
+      {
+        "sentence": "FBI Liaison Alert System # A-000049-MW Liaison Alert System # A-000049-MW The following information was obtained through investigation and is provided in conjunction with the s statutory requirement to conduct victim notification as outlined More information GRAVITYZONE HERE.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "No part of this document may be reproduced or transmitted in any form or by any means, electronic or mechanical, including More information PowerShell for Penetration Testers Training: PowerShell for Penetration Testers Dates of the training: March 14-15,2016 in Heidelberg, Germany Book Now using the code: TR16HMTRAINING and save an additional 10% of the current valid rate!",
+        "score": 0.3372
+      },
+      {
+        "sentence": "More information Integrating Web Application Security into the IT Curriculum Integrating Web Application Security into the IT Curriculum James Walden Northern Kentucky University Topics 1.",
+        "score": 0.3395
+      },
+      {
+        "sentence": "More information BUILDING SECURITY IN.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "Analyzing Mobile Single Sign-On Implementations BUILDING SECURITY IN Analyzing Mobile Single Sign-On Implementations Analyzing Mobile Single Sign-On Implementations 1 Introduction Single sign-on, (SSO) is a common requirement for business-to-employee More information BYOD Guidance: BlackBerry Secure Work Space GOV.UK Guidance BYOD Guidance: BlackBerry Secure Work Space Published 17 February 2015 Contents 1.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "Summary of key risks 3.",
+        "score": 0.3211
+      },
+      {
+        "sentence": "Secure Work Space components 4.",
+        "score": 0.3328
+      },
+      {
+        "sentence": "More information Professional Mailbox Email Software Setup Guide Professional Mailbox Email Software Setup Guide Table of contents Download and Install Microsoft Outlook 2010 or 2011...",
+        "score": 0.3234
+      },
+      {
+        "sentence": "4 Setting up Outlook 2010...",
+        "score": 0.3378
+      },
+      {
+        "sentence": "6 Before you More information Security IIS Service Lesson 6 Security IIS Service Lesson 6 Skills Matrix Technology Skill Objective Domain Objective # Configuring Certificates Configure SSL security 3.6 Assigning Standard and Special NTFS Permissions Enabling and More information Sage Accpac CRM 5.8.",
+        "score": 0.4766
+      },
+      {
+        "sentence": "Self Service Guide Sage Accpac CRM 5.8 Self Service Guide Copyright 2005 Sage Technologies Limited, publisher of this work.",
+        "score": 0.3165
+      },
+      {
+        "sentence": "All Rights Reserved.",
+        "score": 0.3102
+      },
+      {
+        "sentence": "Chattanooga Information security Professionals Five Steps to Improve Internal Network Security Chattanooga Information security Professionals Who Am I?",
+        "score": 0.3042
+      },
+      {
+        "sentence": "Security Analyst: Sword & Shield Blogger: averagesecurityguy.info Developer: github.com/averagesecurityguy More information White Paper.",
+        "score": 0.3373
+      },
+      {
+        "sentence": "Deploying EUM.",
+        "score": 0.3567
+      },
+      {
+        "sentence": "SurfControl Web Filter for MS Windows. rev.",
+        "score": 0.4011
+      },
+      {
+        "sentence": "Enterprise Threat Protection White Paper Deploying EUM SurfControl Web Filter for MS Windows rev.",
+        "score": 0.4123
+      },
+      {
+        "sentence": "1.1, January 2005 Enterprise Threat Protection .....",
+        "score": 0.3351
+      },
+      {
+        "sentence": "ACKNOWLEDGEMENTS SurfControl wishes to acknowledge the following people for their More information Implementation Guide SAP NetWeaver Identity Management Identity Provider Implementation Guide SAP NetWeaver Identity Management Identity Provider Target Audience Technology Consultants System Administrators PUBLIC Document version: 1.10 2011-07-18 Document History CAUTION Before More information Security Options...",
+        "score": 0.4505
+      },
+      {
+        "sentence": "Furthermore, cloud applications More information BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios 2 OpenTopic TOC Contents What is BIG-IP Edge Client app for ios?...",
+        "score": 0.3318
+      },
+      {
+        "sentence": "3 About supported authentication types...",
+        "score": 0.3439
+      },
+      {
+        "sentence": "Zigweid Director of Services for IOActive 1 Key Points Introduction Threat Model Primer Assessing Threats Mitigating Threats Sample Threat Model Exercise More information Guidance End User Devices Security Guidance: Apple OS X 10.9 GOV.UK Guidance End User Devices Security Guidance: Apple OS X 10.9 Published 23 January 2014 Contents 1.",
+        "score": 0.3972
+      },
+      {
+        "sentence": "Summary of Platform Security 4.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "How the Platform More information Guidance End User Devices Security Guidance: Apple ios 7 GOV.UK Guidance End User Devices Security Guidance: Apple ios 7 Updated 10 June 2014 Contents 1.",
+        "score": 0.3971
+      },
+      {
+        "sentence": "Summary of Platform Security 4.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "How the Platform Can More information MS-10775: Administering Microsoft SQL Server 2012 Databases.",
+        "score": 0.3377
+      },
+      {
+        "sentence": "MS-10775: Administering Microsoft SQL Server 2012 Databases This five-day instructor led course provides students with the knowledge and skills to maintain a Microsoft SQL Server 2012 database.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "The course More information User Identification (User-ID) Tips and Best Practices User Identification (User-ID) Tips and Best Practices Nick Piagentini Palo Alto Networks www.paloaltonetworks.com Table of Contents PAN-OS 4.0 User ID Functions...",
+        "score": 0.352
+      },
+      {
+        "sentence": "3 User / Group Enumeration...",
+        "score": 0.3008
+      },
+      {
+        "sentence": "Chattanooga ISSA Five Steps to Improve Internal Network Security Chattanooga ISSA 1 Find Me AverageSecurityGuy.info @averagesecguy stephen@averagesecurityguy.info github.com/averagesecurityguy ChattSec.org 2 Why?",
+        "score": 0.3532
+      },
+      {
+        "sentence": "The methodical More information Commercially Proven Trusted Computing Solutions RSA 2010 Commercially Proven Trusted Computing Solutions RSA 2010 Hardware Self-Encrypting Drives (SEDs) Unique Security Features Encryption below the file system Hardware root-of-trust for encryption Tamper resistant More information ArcGIS Server Security Threats & Best Practices 2014.",
+        "score": 0.4427
+      },
+      {
+        "sentence": "Implementing Citrix NetScaler 11 for App and Desktop Solutions CNS-207 Course Summary Course Summary Description The objective of this course is to provide the foundational concepts and teach the skills necessary to implement, configure, secure and monitor a Citrix NetScaler system with More information PowerShell Configuration Guide PowerShell Configuration Guide Table of Contents Windows PowerShell 2 Prerequisites...",
+        "score": 0.3555
+      },
+      {
+        "sentence": "3 IIS Settings...",
+        "score": 0.3934
+      },
+      {
+        "sentence": "3 ActiveSync Server PowerShell Connection Settings...",
+        "score": 0.3265
+      }
+    ],
+    "T1131": [
+      {
+        "sentence": "PowerSploit Twitter 2 2 Goals What are security support providers (SSP) Local security authority (LSA)/SSP architecture SSPs from an attacker s perspective Legitimate SSPs SSP internals Installation Detection Mitigation Obligatory IDA screenshot Obligatory PowerShell screenshot 3 Background A malicious security support provider (SSP) DLL was found recently during a recent IR engagement.",
+        "score": 0.5061
+      },
+      {
+        "sentence": "Searching for SpLsaModeInitialize a required SSP DLL export, yielded only two unique hits in our internal malware database.",
+        "score": 0.4513
+      },
+      {
+        "sentence": "The uniqueness of this type of malware warranted additional investigation 4 3 Definitions A security support provider (SSP) a.k.a security package: A user-mode security extension used to perform authentication during a client/server exchange. e.g. schannel (SSL) An authentication package (AP) Used to extend interactive logon authentication e.g.",
+        "score": 0.5559
+      },
+      {
+        "sentence": "Enable RSA token authentication SSP/AP Can serve the tasks of SSPs and APs.",
+        "score": 0.4417
+      },
+      {
+        "sentence": "Loaded in lsass. e.g. kerberos and msv1_0 (NTLM) 5 LSA Extensible Architecture The Local Security Authority (LSA) is responsible for nearly all aspects of local security on a system Authenticate and log on users Manage credentials SAM/NTDS/etc.",
+        "score": 0.618
+      },
+      {
+        "sentence": "Built-in support for message privacy and integrity LSA is extensible SSP/APs are loaded into LSA (lsass.exe) at boot Custom SSP/APs can either replace or proxy existing providers.",
+        "score": 0.6513
+      },
+      {
+        "sentence": "Inform LSA of SSP implemented functions 2.",
+        "score": 0.5135
+      },
+      {
+        "sentence": "Inform SSP of available LSA support functions 11 SSP Development - Requirements Minimum required functions* 1.",
+        "score": 0.5105
+      },
+      {
+        "sentence": "SpGetInfo Required Export 12 7 SSP Development - Implementation NTSTATUS NTAPI SpLsaModeInitialize( _In_ ULONG LsaVersion, _Out_ PULONG PackageVersion, _Out_ PSECPKG_FUNCTION_TABLE *pptables, _Out_ PULONG pctables ); Called by LSA when your SSP DLL is loaded.",
+        "score": 0.646
+      },
+      {
+        "sentence": "Only required export function Informs LSA of the functions your SSP DLL implements via PSECPKG_FUNCTION_TABLE LSA expects at a minimum, the following in PSECPKG_FUNCTION_TABLE: SpInitialize typedef struct SECPKG_FUNCTION_TABLE {...",
+        "score": 0.5842
+      },
+      {
+        "sentence": "16 9 SSP Installation 1.Copy the SSP DLL to %windir%\\\\system32 Note: Because the DLL is loaded into lsass, it must be compiled for the same architecture as lsass.exe 2.Add the file name (without extension) to: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\Security Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control \\\\Lsa\\\\OSConfig\\\\Security Packages 3.",
+        "score": 0.6787
+      },
+      {
+        "sentence": "Optional: Load it into lsass immediately by calling secur32!addsecuritypackage 4.",
+        "score": 0.591
+      },
+      {
+        "sentence": "Reboot 17 Malicious SSP PoC mimilib SSP Benjamin Delpy recently added SSP functionality to mimilib.dll.",
+        "score": 0.4308
+      },
+      {
+        "sentence": "Once installed and loaded into lsass.exe, it captures passwords in plaintext.",
+        "score": 0.4017
+      },
+      {
+        "sentence": "Forces SSP DLLs to be co-signed by Microsoft.",
+        "score": 0.4864
+      },
+      {
+        "sentence": "With Secure Boot (w/ UEFI) enabled, RunAsPPL is set as a UEFI secure variable and cannot be deleted.",
+        "score": 0.4241
+      },
+      {
+        "sentence": "21 Malicious SSP Detection Windows 8.1/Server 2012 R2 only Generate event logs upon loading of an unsigned lsass module: HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\LSASS.exe AuditLevel = 8 (REG_DWORD) Reboot When an unsigned SSP is loaded, either of the following events will trigger: 12 Malicious SSP Detection Detection Whitelist legitimate SSP DLLs.",
+        "score": 0.7111
+      },
+      {
+        "sentence": "Alert when HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Security Packages or HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSConfig\\\\S ecurity Packages is modified to contain an SSP not in the whitelist.",
+        "score": 0.5968
+      },
+      {
+        "sentence": "Alert on any DLLs that export SpLsaModeInitialize that are not in the whitelist.",
+        "score": 0.5778
+      },
+      {
+        "sentence": "MIGHT be present under LSA Providers in Sysinternals Autoruns 23 Malicious SSP Mitigations Removal Remove the SSP from the following reg keys: HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\Sec urity Packages HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa\\\\OSC onfig\\\\security Packages Delete the DLL from %windir%\\\\system32 Call secur32!deletesecuritypackage?",
+        "score": 0.6953
+      },
+      {
+        "sentence": "MS forgot to implement that function.",
+        "score": 0.3761
+      },
+      {
+        "sentence": "Reboot 24 13 Malicious SSP Mitigations 25 References Registering SSP/AP DLLs Configuring Additional LSA Protection LSA Mode Initialization Mimikatz PoC SSP 26 14 Merci!!!",
+        "score": 0.6034
+      },
+      {
+        "sentence": "Writing Mimikatz! <3 4.",
+        "score": 0.3607
+      },
+      {
+        "sentence": "Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Who DIT It?",
+        "score": 0.4487
+      },
+      {
+        "sentence": "Detecting and Mitigating Privilege Escalation Attacks on the Active Directory Data Store Mike Middleton Justin Prosco Mandiant, A FireEye Company Mike Middleton Principal Consultant Joined More information give me the password and I'll rule the world dpapi, what else? give me the password and I'll rule the world dpapi, what else? who am I?",
+        "score": 0.4958
+      },
+      {
+        "sentence": "Skip Duckwall & Chris Campbell Pass-the-Hash II: Admin s Revenge Skip Duckwall & Chris Campbell Do you know who I am?",
+        "score": 0.3155
+      },
+      {
+        "sentence": "Skip Co-presented PTH talk last year at BH, Derbycon http://passing-the-hash.blogspot.com @passingthehash on twitter More information Michael Mayer-Gishyan NSA IT Consulting e.u. @mike_srv02 mmg@nsa.co.at http://nsa.co.at.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "Domain Admin in einem Tag Michael Mayer-Gishyan NSA IT Consulting e.u. @mike_srv02 mmg@nsa.co.at http://nsa.co.at From Zero to Hero Domain Admin in einem Tag Agenda Vita Introduction to NTLM and Kerberos Pass-the-Hash Techniques More information Red vs.",
+        "score": 0.4311
+      },
+      {
+        "sentence": "Blue: Modern Active Directory Attacks, Detection, & Protection Red vs.",
+        "score": 0.3309
+      },
+      {
+        "sentence": "Blue: Modern Active Directory Attacks, Detection, & Protection Sean Metcalf (@PyroTek3) CTO, DAn Solutions sean [@] dansolutions _._com DAnSolutions.com ADSecurity.org ABOUT Chief Technology Officer More information Windows security for n00bs part 1 Security architecture & Access Control Grenoble INP Ensimag _ (in)security we trust _!!",
+        "score": 0.5298
+      },
+      {
+        "sentence": "SecurIMAG 2011-05-12 Windows security for n00bs part 1 Security architecture & Access Control Description: whether you are in favor or against it, the Windows More information Persistence Mechanisms as Indicators of Compromise Persistence Persistence Mechanisms as Indicators of Compromise An automated technology for identifying cyber attacks designed to survive indefinitely the reboot process on PCs White Paper Date: October More information Red vs.",
+        "score": 0.5674
+      },
+      {
+        "sentence": "Blue: Modern Active Directory Attacks, Detection, & Protection Red vs.",
+        "score": 0.3309
+      },
+      {
+        "sentence": "Infoblox DNS Firewall for FireEye STARTER KIT Introduction Infoblox DNS Firewall integration with FireEye Malware Protection System delivers a unique and powerful defense against Advanced Persistent Threats (APT) for business networks.",
+        "score": 0.3513
+      },
+      {
+        "sentence": "Prerequisites More information Detecting Malware With Memory Forensics.",
+        "score": 0.3496
+      },
+      {
+        "sentence": "Hal Pomeranz SANS Institute Detecting Malware With Memory Forensics Hal Pomeranz SANS Institute Why Memory Forensics?",
+        "score": 0.3402
+      },
+      {
+        "sentence": "Everything in the OS traverses RAM Processes and threads Malware (including rootkit technologies) Network sockets, More information Locking down a Hitachi ID Suite server Locking down a Hitachi ID Suite server 2016 Hitachi ID Systems, Inc.",
+        "score": 0.3737
+      },
+      {
+        "sentence": "Organizations deploying Hitachi ID Identity and Access Management Suite need to understand how to secure its runtime More information Creating a User Profile for Outlook 2013 Creating a User Profile for Outlook 2013 This document tells you how to create a user profile for Outlook 2013 on your computer (also known as the Outlook client).",
+        "score": 0.4895
+      },
+      {
+        "sentence": "Click show More information Pass-the-Hash: How Attackers Spread and How to Stop Them Pass-the-Hash: How Attackers Spread and How to Stop Them SESSION ID: HTA-W03 Mark Russinovich Technical Fellow Microsoft Corporation Nathan Ide Principal Development Lead Microsoft Corporation Pass-the-Hash: More information This report is a detailed analysis of the dropper and the payload of the HIMAN malware.",
+        "score": 0.4118
+      },
+      {
+        "sentence": "PAGE 5 Check Point Malware Research Group HIMAN Malware Analysis December 12, 2013 Researcher: Overview This report is a detailed analysis of the dropper and the payload of the HIMAN malware.",
+        "score": 0.3943
+      },
+      {
+        "sentence": "This malware More information K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS. v.109 K7 Mail Security FOR MICROSOFT EXCHANGE SERVERS v.109 1 The Exchange environment is an important entry point by which a threat or security risk can enter into a network.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "K7 Mail Security is a complete More information Entrust Managed Services PKI Entrust Managed Services PKI Entrust Managed Services PKI Windows Smart Card Logon Configuration Guide Using Web-based applications Document issue: 1.0 Date of Issue: June 2009 Copyright 2009 Entrust.",
+        "score": 0.4517
+      },
+      {
+        "sentence": "More information Security in the Sauce Labs Cloud.",
+        "score": 0.3045
+      },
+      {
+        "sentence": "Directory More information Training module 2 Installing VMware View Training module 2 Installing VMware View In this second module we ll install VMware View for an End User Computing environment.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "We ll install all necessary parts such as VMware View Connection Server and More information Security.",
+        "score": 0.4052
+      },
+      {
+        "sentence": "Quick Start ViPNet ThinClient 3.3 Quick Start 1991 2014 Infotecs Americas.",
+        "score": 0.3141
+      },
+      {
+        "sentence": "Version: 00060-07 34 02 ENU This document is included in the software distribution kit and is subject to the same terms More information Hosts HARDENING WINDOWS NETWORKS TRAINING BROADVIEW NETWORKS Hosts HARDENING WINDOWS NETWORKS TRAINING COURSE OVERVIEW A hands-on security course that teaches students how to harden, monitor and protect Microsoft Windows based networks.",
+        "score": 0.4175
+      },
+      {
+        "sentence": "This cheat sheet includes some very common items that should have auditing enabled, More information TZWorks Windows Event Log Viewer (evtx_view) Users Guide TZWorks Windows Event Log Viewer (evtx_view) Users Guide Abstract evtx_view is a standalone, GUI tool used to extract and parse Event Logs and display their internals.",
+        "score": 0.3514
+      },
+      {
+        "sentence": "SQL Server 2008 R2 RTM Express - Installation Guide Introduction Speedy Organizer SQL Server 2008 R2 RTM Express - Installation Guide Introduction Contents Revision table...",
+        "score": 0.3479
+      },
+      {
+        "sentence": "2 2 SQL Server 2008 Express installation...",
+        "score": 0.3232
+      },
+      {
+        "sentence": "2 2.1 Installation...",
+        "score": 0.3227
+      },
+      {
+        "sentence": "2 3 Post More information Use Enterprise SSO as the Credential Server for Protected Sites Webthority HOW TO Use Enterprise SSO as the Credential Server for Protected Sites This document describes how to integrate Webthority with Enterprise SSO version 8.0.2 or 8.0.3.",
+        "score": 0.3901
+      },
+      {
+        "sentence": "More information Securing ArcGIS Server Services: First Steps Federal GIS Conference February 9 10, 2015 Washington, DC Securing ArcGIS Server Services: First Steps Michael Sarhan Esri msarhan@esri.com Agenda Review Basic Security Workflow ArcGIS Server Roles and More information MCTS Guide to Microsoft Windows 7.",
+        "score": 0.4225
+      },
+      {
+        "sentence": "Chapter 7 Windows 7 Security Features MCTS Guide to Microsoft Windows 7 Chapter 7 Windows 7 Security Features Objectives Describe Windows 7 Security Improvements Use the local security policy to secure Windows 7 Enable auditing to record security More information 7.0 Self Service Guide 7.0 Self Service Guide Copyright 2010 Sage Technologies Limited, publisher of this work.",
+        "score": 0.4855
+      },
+      {
+        "sentence": "1.2) Does the input validation More information Security in the Sauce Labs Cloud SAUCE LABS REPORT Security in the Sauce Labs Cloud Practices and protocols used in Sauce s infrastructure and Sauce Connect Overview It s impossible to deny that in this day and age internet security should More information Hi and welcome to the Microsoft Virtual Academy and Hi and welcome to the Microsoft Virtual Academy and 2012 Microsoft Corporation 1 the start of the Windows 8 Security Insights training.",
+        "score": 0.3436
+      },
+      {
+        "sentence": "Summary of platform security 4.",
+        "score": 0.3843
+      },
+      {
+        "sentence": "3 2 SQL Server 2008 Express installation...",
+        "score": 0.3243
+      },
+      {
+        "sentence": "Course Page - Page 1 of 12 Course Page - Page 1 of 12 Windows 7 Enterprise Desktop Support Technician M-50331 Length: 5 days Price: $2,795.00 Course Description This five-day instructor-led course provides students with the knowledge More information Securing Administrator Access to Internal Windows Servers Securing Administrator Access to Internal Windows Servers Contents 1.",
+        "score": 0.4464
+      },
+      {
+        "sentence": "PKI implementation...",
+        "score": 0.328
+      },
+      {
+        "sentence": "3 Require two-factor authentication for computers...",
+        "score": 0.4148
+      },
+      {
+        "sentence": "3 Require two-factor authentication More information DRIVE-BY DOWNLOAD WHAT IS DRIVE-BY DOWNLOAD?",
+        "score": 0.335
+      },
+      {
+        "sentence": "Once a target website has been weaponized with More information By Skip Duckwall and Chris Campbell By Skip Duckwall and Chris Campbell for Blackhat USA 2013 Introduction User credentials are one of the most powerful items an attacker can obtain.",
+        "score": 0.3357
+      },
+      {
+        "sentence": "Single-factor, or passwordbased credentials are dangerous More information TLP: GREEN FBI.",
+        "score": 0.371
+      },
+      {
+        "sentence": "FBI Liaison Alert System # A-000049-MW Liaison Alert System # A-000049-MW The following information was obtained through investigation and is provided in conjunction with the s statutory requirement to conduct victim notification as outlined More information GRAVITYZONE HERE.",
+        "score": 0.3556
+      },
+      {
+        "sentence": "No part of this document may be reproduced or transmitted in any form or by any means, electronic or mechanical, including More information PowerShell for Penetration Testers Training: PowerShell for Penetration Testers Dates of the training: March 14-15,2016 in Heidelberg, Germany Book Now using the code: TR16HMTRAINING and save an additional 10% of the current valid rate!",
+        "score": 0.3139
+      },
+      {
+        "sentence": "More information Integrating Web Application Security into the IT Curriculum Integrating Web Application Security into the IT Curriculum James Walden Northern Kentucky University Topics 1.",
+        "score": 0.3402
+      },
+      {
+        "sentence": "More information BUILDING SECURITY IN.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "Analyzing Mobile Single Sign-On Implementations BUILDING SECURITY IN Analyzing Mobile Single Sign-On Implementations Analyzing Mobile Single Sign-On Implementations 1 Introduction Single sign-on, (SSO) is a common requirement for business-to-employee More information BYOD Guidance: BlackBerry Secure Work Space GOV.UK Guidance BYOD Guidance: BlackBerry Secure Work Space Published 17 February 2015 Contents 1.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "Summary of key risks 3.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "Secure Work Space components 4.",
+        "score": 0.305
+      },
+      {
+        "sentence": "More information Professional Mailbox Email Software Setup Guide Professional Mailbox Email Software Setup Guide Table of contents Download and Install Microsoft Outlook 2010 or 2011...",
+        "score": 0.3345
+      },
+      {
+        "sentence": "4 Setting up Outlook 2010...",
+        "score": 0.3552
+      },
+      {
+        "sentence": "6 Before you More information Security IIS Service Lesson 6 Security IIS Service Lesson 6 Skills Matrix Technology Skill Objective Domain Objective # Configuring Certificates Configure SSL security 3.6 Assigning Standard and Special NTFS Permissions Enabling and More information Sage Accpac CRM 5.8.",
+        "score": 0.4882
+      },
+      {
+        "sentence": "Self Service Guide Sage Accpac CRM 5.8 Self Service Guide Copyright 2005 Sage Technologies Limited, publisher of this work.",
+        "score": 0.3425
+      },
+      {
+        "sentence": "Security Analyst: Sword & Shield Blogger: averagesecurityguy.info Developer: github.com/averagesecurityguy More information White Paper.",
+        "score": 0.3097
+      },
+      {
+        "sentence": "Deploying EUM.",
+        "score": 0.3115
+      },
+      {
+        "sentence": "SurfControl Web Filter for MS Windows. rev.",
+        "score": 0.3743
+      },
+      {
+        "sentence": "Enterprise Threat Protection White Paper Deploying EUM SurfControl Web Filter for MS Windows rev.",
+        "score": 0.3826
+      },
+      {
+        "sentence": "1.1, January 2005 Enterprise Threat Protection .....",
+        "score": 0.3612
+      },
+      {
+        "sentence": "ACKNOWLEDGEMENTS SurfControl wishes to acknowledge the following people for their More information Implementation Guide SAP NetWeaver Identity Management Identity Provider Implementation Guide SAP NetWeaver Identity Management Identity Provider Target Audience Technology Consultants System Administrators PUBLIC Document version: 1.10 2011-07-18 Document History CAUTION Before More information Security Options...",
+        "score": 0.4419
+      },
+      {
+        "sentence": "Furthermore, cloud applications More information BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios BIG-IP Access Policy Manager Tech Note for BIG-IP Edge Client App for ios 2 OpenTopic TOC Contents What is BIG-IP Edge Client app for ios?...",
+        "score": 0.3612
+      },
+      {
+        "sentence": "3 About supported authentication types...",
+        "score": 0.3884
+      },
+      {
+        "sentence": "Zigweid Director of Services for IOActive 1 Key Points Introduction Threat Model Primer Assessing Threats Mitigating Threats Sample Threat Model Exercise More information Guidance End User Devices Security Guidance: Apple OS X 10.9 GOV.UK Guidance End User Devices Security Guidance: Apple OS X 10.9 Published 23 January 2014 Contents 1.",
+        "score": 0.395
+      },
+      {
+        "sentence": "Summary of Platform Security 4.",
+        "score": 0.3898
+      },
+      {
+        "sentence": "How the Platform More information Guidance End User Devices Security Guidance: Apple ios 7 GOV.UK Guidance End User Devices Security Guidance: Apple ios 7 Updated 10 June 2014 Contents 1.",
+        "score": 0.3957
+      },
+      {
+        "sentence": "Summary of Platform Security 4.",
+        "score": 0.3898
+      },
+      {
+        "sentence": "How the Platform Can More information MS-10775: Administering Microsoft SQL Server 2012 Databases.",
+        "score": 0.315
+      },
+      {
+        "sentence": "MS-10775: Administering Microsoft SQL Server 2012 Databases This five-day instructor led course provides students with the knowledge and skills to maintain a Microsoft SQL Server 2012 database.",
+        "score": 0.3144
+      },
+      {
+        "sentence": "The course More information User Identification (User-ID) Tips and Best Practices User Identification (User-ID) Tips and Best Practices Nick Piagentini Palo Alto Networks www.paloaltonetworks.com Table of Contents PAN-OS 4.0 User ID Functions...",
+        "score": 0.4047
+      },
+      {
+        "sentence": "Chattanooga ISSA Five Steps to Improve Internal Network Security Chattanooga ISSA 1 Find Me AverageSecurityGuy.info @averagesecguy stephen@averagesecurityguy.info github.com/averagesecurityguy ChattSec.org 2 Why?",
+        "score": 0.3205
+      },
+      {
+        "sentence": "The methodical More information Commercially Proven Trusted Computing Solutions RSA 2010 Commercially Proven Trusted Computing Solutions RSA 2010 Hardware Self-Encrypting Drives (SEDs) Unique Security Features Encryption below the file system Hardware root-of-trust for encryption Tamper resistant More information ArcGIS Server Security Threats & Best Practices 2014.",
+        "score": 0.4249
+      },
+      {
+        "sentence": "Implementing Citrix NetScaler 11 for App and Desktop Solutions CNS-207 Course Summary Course Summary Description The objective of this course is to provide the foundational concepts and teach the skills necessary to implement, configure, secure and monitor a Citrix NetScaler system with More information PowerShell Configuration Guide PowerShell Configuration Guide Table of Contents Windows PowerShell 2 Prerequisites...",
+        "score": 0.3335
+      },
+      {
+        "sentence": "3 IIS Settings...",
+        "score": 0.393
+      }
+    ]
+  }
+}

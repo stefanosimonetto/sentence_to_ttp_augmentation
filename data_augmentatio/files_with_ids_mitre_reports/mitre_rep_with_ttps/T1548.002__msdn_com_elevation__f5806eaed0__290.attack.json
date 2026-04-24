@@ -1,0 +1,239 @@
+{
+  "original_txt": "Note\nAccess to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nThe COM elevation moniker allows applications that are running under user account control (UAC) to activate COM classes with elevated privileges. For more information, see Focus on Least Privilege.\nWhen to Use the Elevation Moniker\nThe elevation moniker is used to activate a COM class to accomplish a specific and limited function that requires elevated privileges, such as changing the system date and time.\nElevation requires participation from both a COM class and its client. The COM class must be configured to support elevation by annotating its registry entry, as described in the Requirements section. The COM client must request elevation by using the elevation moniker.\nThe elevation moniker is not intended to provide application compatibility. For example, if you want to run a legacy COM application such as WinWord as an elevated server, you should configure the COM client executable to require elevation, rather than activating the legacy application's class with the elevation moniker. When the elevated COM client calls CoCreateInstance using the legacy application's CLSID, the client's elevated state will flow to the server process.\nNot all COM functionality is compatible with elevation. The functionality that will not work includes:\n- Elevation does not flow from a client to a remote COM server. If a client activates a remote COM server with the elevation moniker, the server will not be elevated, even if it supports elevation.\n- If an elevated COM class uses impersonation during a COM call, it might lose its elevated privileges during the impersonation.\n- If an elevated COM server registers a class in the running object table (ROT), the class will not be available to non-elevated clients.\n- A process elevated by using the UAC mechanism does not load per-user classes during COM activations. For COM applications, this means that the application's COM classes must be installed in the HKEY_LOCAL_MACHINE registry hive if the application is to be used both by non-privileged and privileged accounts. The application's COM classes need only be installed in the HKEY_USERS hive if the application is never used by privileged accounts.\n- Drag and drop is not allowed from non-elevated to elevated applications.\nRequirements\nIn order to use the elevation moniker to activate a COM class, the class must be configured to run as the launching user or the 'Activate as Activator' application identity. If the class is configured to run under any other identity, the activation returns the error CO_E_RUNAS_VALUE_MUST_BE_AAA.\nThe class must also be annotated with a \"friendly\" display name that is multilingual user interface (MUI) compatible. This requires the following registry entry:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\n{CLSID}\nLocalizedString = displayName\nIf this entry is missing, the activation returns the error CO_E_MISSING_DISPLAYNAME. If the MUI file is missing, the error code from the RegLoadMUIStringW function is returned.\nOptionally, to specify an application icon to be displayed by the UAC user interface, add the following registry key:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\n{CLSID}\nElevation\nIconReference = applicationIcon\nIconReference uses the same format as LocalizedString:\n@pathtobinary,-resourcenumber\nIn addition, the COM component must be signed for the icon to be displayed.\nThe COM class must also be annotated as LUA-Enabled. This requires the following registry entry:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\n{CLSID}\nElevation\nEnabled = 1\nIf this entry is missing, then the activation returns the error CO_E_ELEVATION_DISABLED.\nNote that these entries must exist in the HKEY_LOCAL_MACHINE hive, not the HKEY_CURRENT_USER or HKEY_USERS hive. This prevents users from elevating COM classes that they did not also have the privileges to register.\nThe Elevation Moniker and the Elevation UI\nIf the client is already elevated, using the elevation moniker will not cause the Elevation UI to display.\nHow to Use the Elevation Moniker\nThe elevation moniker is a standard COM moniker, similar to the session, partition, or queue monikers. It directs an activation request to a specified server with the specified elevation level. The CLSID to be activated appears in the moniker string.\nThe elevation moniker supports the following Run level tokens:\n- Administrator\n- Highest\nThe syntax for this is as follows:\nElevation:Administrator!new:{guid}\nElevation:Highest!new:{guid}\nThe preceding syntax uses the \"new\" moniker to return an instance of the COM class specified by guid. Note that the \"new\" moniker internally uses the IClassFactory interface to obtain a class object and then calls IClassFactory::CreateInstance on it.\nThe elevation moniker can also be used to get a class object, which implements IClassFactory. The caller then calls CreateInstance to get an object instance. The syntax for this is as follows:\nElevation:Administrator!clsid:{guid}\nSample code\nThe following code example shows how to use the elevation moniker. It assumes that you have already initialized COM on the current thread.\nHRESULT CoCreateInstanceAsAdmin(HWND hwnd, REFCLSID rclsid, REFIID riid, __out void ** ppv)\n{\nBIND_OPTS3 bo;\nWCHAR wszCLSID[50];\nWCHAR wszMonikerName[300];\nStringFromGUID2(rclsid, wszCLSID, sizeof(wszCLSID)/sizeof(wszCLSID[0]));\nHRESULT hr = StringCchPrintf(wszMonikerName, sizeof(wszMonikerName)/sizeof(wszMonikerName[0]), L\"Elevation:Administrator!new:%s\", wszCLSID);\nif (FAILED(hr))\nreturn hr;\nmemset(&bo, 0, sizeof(bo));\nbo.cbStruct = sizeof(bo);\nbo.hwnd = hwnd;\nbo.dwClassContext = CLSCTX_LOCAL_SERVER;\nreturn CoGetObject(wszMonikerName, &bo, riid, ppv);\n}\nBIND_OPTS3 is new in Windows Vista. It is derived from BIND_OPTS2.\nThe only addition is an HWND field, hwnd. This handle represents a window that becomes the owner of the Elevation UI, if applicable.\nIf hwnd is NULL, COM will call GetActiveWindow to find a window handle associated with the current thread. This case might occur if the client is a script, which cannot fill in a BIND_OPTS3 structure. In this case, COM will try to use the window associated with the script thread.\nOver-The-Shoulder (OTS) Elevation\nOver-the-shoulder (OTS) elevation refers to the scenario in which a client runs a COM server with an administrator's credentials rather than his or her own. (The term \"over the shoulder\" means that the administrator is watching over the client's shoulder as the client runs the server.)\nThis scenario might cause a problem for COM calls into the server, because the server might not call CoInitializeSecurity either explicitly (that is, programmatically) or implicitly (that is, declaratively, using the registry). For such servers, COM computes a security descriptor that allows only SELF, SYSTEM, and Builtin\\Administrators to makes COM calls into the server. This arrangement will not work in OTS scenarios. Instead, the server must call CoInitializeSecurity, either explicitly or implicitly, and specify an ACL that includes the INTERACTIVE group SID and SYSTEM.\nThe following code example shows how to create a security descriptor (SD) with the INTERACTIVE group SID.\nBOOL GetAccessPermissionsForLUAServer(SECURITY_DESCRIPTOR **ppSD)\n{\n// Local call permissions to IU, SY\nLPWSTR lpszSDDL = L\"O:BAG:BAD:(A;;0x3;;;IU)(A;;0x3;;;SY)\";\nSECURITY_DESCRIPTOR *pSD;\n*ppSD = NULL;\nif (ConvertStringSecurityDescriptorToSecurityDescriptorW(lpszSDDL, SDDL_REVISION_1, (PSECURITY_DESCRIPTOR *)&pSD, NULL))\n{\n*ppSD = pSD;\nreturn TRUE;\n}\nreturn FALSE;\n}\nThe following code example shows how to call CoInitializeSecurity implicitly with the SD from the previous code example:\n// hKey is the HKCR\\AppID\\{GUID} key\nBOOL SetAccessPermissions(HKEY hkey, PSECURITY_DESCRIPTOR pSD)\n{\nBOOL bResult = FALSE;\nDWORD dwLen = GetSecurityDescriptorLength(pSD);\nLONG lResult;\nlResult = RegSetValueExA(hkey,\n\"AccessPermission\",\n0,\nREG_BINARY,\n(BYTE*)pSD,\ndwLen);\nif (lResult != ERROR_SUCCESS) goto done;\nbResult = TRUE;\ndone:\nreturn bResult;\n}\nThe following code example shows how to call CoInitializeSecurity explicitly with the above SD:\n// Absolute SD values\nPSECURITY_DESCRIPTOR pAbsSD = NULL;\nDWORD AbsSdSize = 0;\nPACL pAbsAcl = NULL;\nDWORD AbsAclSize = 0;\nPACL pAbsSacl = NULL;\nDWORD AbsSaclSize = 0;\nPSID pAbsOwner = NULL;\nDWORD AbsOwnerSize = 0;\nPSID pAbsGroup = NULL;\nDWORD AbsGroupSize = 0;\nMakeAbsoluteSD (\npSD,\npAbsSD,\n&AbsSdSize,\npAbsAcl,\n&AbsAclSize,\npAbsSacl,\n&AbsSaclSize,\npAbsOwner,\n&AbsOwnerSize,\npAbsGroup,\n&AbsGroupSize\n);\nif (ERROR_INSUFFICIENT_BUFFER == GetLastError())\n{\npAbsSD = (PSECURITY_DESCRIPTOR)LocalAlloc(LMEM_FIXED, AbsSdSize);\npAbsAcl = (PACL)LocalAlloc(LMEM_FIXED, AbsAclSize);\npAbsSacl = (PACL)LocalAlloc(LMEM_FIXED, AbsSaclSize);\npAbsOwner = (PSID)LocalAlloc(LMEM_FIXED, AbsOwnerSize);\npAbsGroup = (PSID)LocalAlloc(LMEM_FIXED, AbsGroupSize);\nif ( ! (pAbsSD && pAbsAcl && pAbsSacl && pAbsOwner && pAbsGroup))\n{\nhr = E_OUTOFMEMORY;\ngoto Cleanup;\n}\nif ( ! MakeAbsoluteSD(\npSD,\npAbsSD,\n&AbsSdSize,\npAbsAcl,\n&AbsAclSize,\npAbsSacl,\n&AbsSaclSize,\npAbsOwner,\n&AbsOwnerSize,\npAbsGroup,\n&AbsGroupSize\n))\n{\nhr = HRESULT_FROM_WIN32(GetLastError());\ngoto Cleanup;\n}\n}\nelse\n{\nhr = HRESULT_FROM_WIN32(GetLastError());\ngoto Cleanup;\n}\n// Call CoInitializeSecurity .\nCOM Permissions and Mandatory Access Labels\nWindows Vista introduces the notion of mandatory access labels in security descriptors. The label dictates whether clients can get execute access to a COM object. The label is specified in the system access control list (SACL) portion of the security descriptor. In Windows Vista, COM supports the SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP label. SACLs in the COM permissions are ignored on operating systems prior to Windows Vista.\nAs of Windows Vista, dcomcnfg.exe does not support changing the integrity level (IL) in COM permissions. It must be set programmatically.\nThe following code example shows how to create a COM security descriptor with a label that allows launch/activation requests from all LOW IL clients. Note that the labels are valid for Launch/Activation and Call permissions. Thus, it is possible to write a COM server that disallows launch, activation or calls from clients with a certain IL. For more information about integrity levels, see the section \"Understanding Windows Vista's Integrity Mechanism\" in Understanding and Working in Protected Mode Internet Explorer.\nBOOL GetLaunchActPermissionsWithIL (SECURITY_DESCRIPTOR **ppSD)\n{\n// Allow World Local Launch/Activation permissions. Label the SD for LOW IL Execute UP\nLPWSTR lpszSDDL = L\"O:BAG:BAD:(A;;0xb;;;WD)S:(ML;;NX;;;LW)\";\nif (ConvertStringSecurityDescriptorToSecurityDescriptorW(lpszSDDL, SDDL_REVISION_1, (PSECURITY_DESCRIPTOR *)&pSD, NULL))\n{\n*ppSD = pSD;\nreturn TRUE;\n}\n}\nBOOL SetLaunchActPermissions(HKEY hkey, PSECURITY_DESCRIPTOR pSD)\n{\nBOOL bResult = FALSE;\nDWORD dwLen = GetSecurityDescriptorLength(pSD);\nLONG lResult;\nlResult = RegSetValueExA(hkey,\n\"LaunchPermission\",\n0,\nREG_BINARY,\n(BYTE*)pSD,\ndwLen);\nif (lResult != ERROR_SUCCESS) goto done;\nbResult = TRUE;\ndone:\nreturn bResult;\n};\nCoCreateInstance and Integrity Levels\nThe behavior of CoCreateInstance has changed in Windows Vista, to prevent Low IL clients from binding to COM servers by default. The server must explicitly allow such bindings by specifying the SACL. The changes to CoCreateInstance are as follows:\n- When launching a COM server process, the IL in the server process token is set to the client or server token IL, whichever is lower.\n- By default, COM will prevent Low IL clients from binding to running instances of any COM servers. To allow the bind, a COM server's Launch/Activation security descriptor must contain a SACL that specifies the Low IL label (see the previous section for the sample code to create such a security descriptor).\nElevated Servers and ROT Registrations\nIf a COM server wishes to register in the running object table (ROT) and allow any client to access the registration, it must use the ROTFLAGS_ALLOWANYCLIENT flag. An \"Activate As Activator\" COM server cannot specify ROTFLAGS_ALLOWANYCLIENT because the DCOM service control manager (DCOMSCM) enforces a spoof check against this flag. Therefore, in Windows Vista, COM adds support for a new registry entry that allows the server to stipulate that its ROT registrations be made available to any client:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\AppID\n{APPID}\nROTFlags\nThe only valid value for this REG_DWORD entry is:\nROTREGFLAGS_ALLOWANYCLIENT 0x1\nThe entry must exist in the HKEY_LOCAL_MACHINE hive.\nThis entry provides an \"Activate As Activator\" server with the same functionality that ROTFLAGS_ALLOWANYCLIENT provides for a RunAs server.\nRelated topics",
+  "sanitized_txt": "Note Access to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nThe COM elevation moniker allows applications that are running under user account control (UAC) to activate COM classes with elevated privileges. For more information, see Focus on Least Privilege.\nWhen to Use the Elevation Moniker The elevation moniker is used to activate a COM class to accomplish a specific and limited function that requires elevated privileges, such as changing the system date and time.\nElevation requires participation from both a COM class and its client. The COM class must be configured to support elevation by annotating its registry entry, as described in the Requirements section. The COM client must request elevation by using the elevation moniker.\nThe elevation moniker is not intended to provide application compatibility. For example, if you want to run a legacy COM application such as WinWord as an elevated server, you should configure the COM client executable to require elevation, rather than activating the legacy application's class with the elevation moniker. When the elevated COM client calls CoCreateInstance using the legacy application's CLSID, the client's elevated state will flow to the server process.\nNot all COM functionality is compatible with elevation. The functionality that will not work includes:\n- Elevation does not flow from a client to a remote COM server. If a client activates a remote COM server with the elevation moniker, the server will not be elevated, even if it supports elevation.\n- If an elevated COM class uses impersonation during a COM call, it might lose its elevated privileges during the impersonation.\n- If an elevated COM server registers a class in the running object table (ROT), the class will not be available to non-elevated clients.\n- A process elevated by using the UAC mechanism does not load per-user classes during COM activations. For COM applications, this means that the application's COM classes must be installed in the HKEY_LOCAL_MACHINE registry hive if the application is to be used both by non-privileged and privileged accounts. The application's COM classes need only be installed in the HKEY_USERS hive if the application is never used by privileged accounts.\n- Drag and drop is not allowed from non-elevated to elevated applications.\nRequirements In order to use the elevation moniker to activate a COM class, the class must be configured to run as the launching user or the 'Activate as Activator' application identity. If the class is configured to run under any other identity, the activation returns the error CO_E_RUNAS_VALUE_MUST_BE_AAA.\nThe class must also be annotated with a \"friendly\" display name that is multilingual user interface (MUI) compatible. This requires the following registry entry:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID {CLSID} LocalizedString = displayName If this entry is missing, the activation returns the error CO_E_MISSING_DISPLAYNAME. If the MUI file is missing, the error code from the RegLoadMUIStringW function is returned.\nOptionally, to specify an application icon to be displayed by the UAC user interface, add the following registry key:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID {CLSID} Elevation IconReference = applicationIcon IconReference uses the same format as LocalizedString:\n@pathtobinary,-resourcenumber In addition, the COM component must be signed for the icon to be displayed.\nThe COM class must also be annotated as LUA-Enabled. This requires the following registry entry:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID {CLSID} Elevation Enabled = 1 If this entry is missing, then the activation returns the error CO_E_ELEVATION_DISABLED.\nNote that these entries must exist in the HKEY_LOCAL_MACHINE hive, not the HKEY_CURRENT_USER or HKEY_USERS hive. This prevents users from elevating COM classes that they did not also have the privileges to register.\nThe Elevation Moniker and the Elevation UI If the client is already elevated, using the elevation moniker will not cause the Elevation UI to display.\nHow to Use the Elevation Moniker The elevation moniker is a standard COM moniker, similar to the session, partition, or queue monikers. It directs an activation request to a specified server with the specified elevation level. The CLSID to be activated appears in the moniker string.\nThe elevation moniker supports the following Run level tokens:\n- Administrator - Highest The syntax for this is as follows:\nElevation:Administrator!new:{guid} Elevation:Highest!new:{guid} The preceding syntax uses the \"new\" moniker to return an instance of the COM class specified by guid. Note that the \"new\" moniker internally uses the IClassFactory interface to obtain a class object and then calls IClassFactory::CreateInstance on it.\nThe elevation moniker can also be used to get a class object, which implements IClassFactory. The caller then calls CreateInstance to get an object instance. The syntax for this is as follows:\nElevation:Administrator!clsid:{guid} Sample code The following code example shows how to use the elevation moniker. It assumes that you have already initialized COM on the current thread.\nHRESULT CoCreateInstanceAsAdmin(HWND hwnd, REFCLSID rclsid, REFIID riid, __out void ** ppv) { BIND_OPTS3 bo;\nWCHAR wszCLSID[50];\nWCHAR wszMonikerName[300];\nStringFromGUID2(rclsid, wszCLSID, sizeof(wszCLSID)/sizeof(wszCLSID[0]));\nHRESULT hr = StringCchPrintf(wszMonikerName, sizeof(wszMonikerName)/sizeof(wszMonikerName[0]), L\"Elevation:Administrator!new:%s\", wszCLSID);\nif (FAILED(hr)) return hr;\nmemset(&bo, 0, sizeof(bo));\nbo.cbStruct = sizeof(bo);\nbo.hwnd = hwnd;\nbo.dwClassContext = CLSCTX_LOCAL_SERVER;\nreturn CoGetObject(wszMonikerName, &bo, riid, ppv);\n} BIND_OPTS3 is new in Windows Vista. It is derived from BIND_OPTS2.\nThe only addition is an HWND field, hwnd. This handle represents a window that becomes the owner of the Elevation UI, if applicable.\nIf hwnd is NULL, COM will call GetActiveWindow to find a window handle associated with the current thread. This case might occur if the client is a script, which cannot fill in a BIND_OPTS3 structure. In this case, COM will try to use the window associated with the script thread.\nOver-The-Shoulder (OTS) Elevation Over-the-shoulder (OTS) elevation refers to the scenario in which a client runs a COM server with an administrator's credentials rather than his or her own. (The term \"over the shoulder\" means that the administrator is watching over the client's shoulder as the client runs the server.) This scenario might cause a problem for COM calls into the server, because the server might not call CoInitializeSecurity either explicitly (that is, programmatically) or implicitly (that is, declaratively, using the registry). For such servers, COM computes a security descriptor that allows only SELF, SYSTEM, and Builtin\\Administrators to makes COM calls into the server. This arrangement will not work in OTS scenarios. Instead, the server must call CoInitializeSecurity, either explicitly or implicitly, and specify an ACL that includes the INTERACTIVE group SID and SYSTEM.\nThe following code example shows how to create a security descriptor (SD) with the INTERACTIVE group SID.\nBOOL GetAccessPermissionsForLUAServer(SECURITY_DESCRIPTOR **ppSD) { // Local call permissions to IU, SY LPWSTR lpszSDDL = L\"O:BAG:BAD:(A;;0x3;;;IU)(A;;0x3;;;SY)\";\nSECURITY_DESCRIPTOR *pSD;\n*ppSD = NULL;\nif (ConvertStringSecurityDescriptorToSecurityDescriptorW(lpszSDDL, SDDL_REVISION_1, (PSECURITY_DESCRIPTOR *)&pSD, NULL)) { *ppSD = pSD;\nreturn TRUE;\n} return FALSE;\n} The following code example shows how to call CoInitializeSecurity implicitly with the SD from the previous code example:\n// hKey is the HKCR\\AppID\\{GUID} key BOOL SetAccessPermissions(HKEY hkey, PSECURITY_DESCRIPTOR pSD) { BOOL bResult = FALSE;\nDWORD dwLen = GetSecurityDescriptorLength(pSD);\nLONG lResult;\nlResult = RegSetValueExA(hkey, \"AccessPermission\", 0, REG_BINARY, (BYTE*)pSD, dwLen);\nif (lResult != ERROR_SUCCESS) goto done;\nbResult = TRUE;\ndone:\nreturn bResult;\n} The following code example shows how to call CoInitializeSecurity explicitly with the above SD:\n// Absolute SD values PSECURITY_DESCRIPTOR pAbsSD = NULL;\nDWORD AbsSdSize = 0;\nPACL pAbsAcl = NULL;\nDWORD AbsAclSize = 0;\nPACL pAbsSacl = NULL;\nDWORD AbsSaclSize = 0;\nPSID pAbsOwner = NULL;\nDWORD AbsOwnerSize = 0;\nPSID pAbsGroup = NULL;\nDWORD AbsGroupSize = 0;\nMakeAbsoluteSD ( pSD, pAbsSD, &AbsSdSize, pAbsAcl, &AbsAclSize, pAbsSacl, &AbsSaclSize, pAbsOwner, &AbsOwnerSize, pAbsGroup, &AbsGroupSize );\nif (ERROR_INSUFFICIENT_BUFFER == GetLastError()) { pAbsSD = (PSECURITY_DESCRIPTOR)LocalAlloc(LMEM_FIXED, AbsSdSize);\npAbsAcl = (PACL)LocalAlloc(LMEM_FIXED, AbsAclSize);\npAbsSacl = (PACL)LocalAlloc(LMEM_FIXED, AbsSaclSize);\npAbsOwner = (PSID)LocalAlloc(LMEM_FIXED, AbsOwnerSize);\npAbsGroup = (PSID)LocalAlloc(LMEM_FIXED, AbsGroupSize);\nif ( ! (pAbsSD && pAbsAcl && pAbsSacl && pAbsOwner && pAbsGroup)) { hr = E_OUTOFMEMORY;\ngoto Cleanup;\n} if ( ! MakeAbsoluteSD( pSD, pAbsSD, &AbsSdSize, pAbsAcl, &AbsAclSize, pAbsSacl, &AbsSaclSize, pAbsOwner, &AbsOwnerSize, pAbsGroup, &AbsGroupSize )) { hr = HRESULT_FROM_WIN32(GetLastError());\ngoto Cleanup;\n} } else { hr = HRESULT_FROM_WIN32(GetLastError());\ngoto Cleanup;\n} // Call CoInitializeSecurity .\nCOM Permissions and Mandatory Access Labels Windows Vista introduces the notion of mandatory access labels in security descriptors. The label dictates whether clients can get execute access to a COM object. The label is specified in the system access control list (SACL) portion of the security descriptor. In Windows Vista, COM supports the SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP label. SACLs in the COM permissions are ignored on operating systems prior to Windows Vista.\nAs of Windows Vista, dcomcnfg.exe does not support changing the integrity level (IL) in COM permissions. It must be set programmatically.\nThe following code example shows how to create a COM security descriptor with a label that allows launch/activation requests from all LOW IL clients. Note that the labels are valid for Launch/Activation and Call permissions. Thus, it is possible to write a COM server that disallows launch, activation or calls from clients with a certain IL. For more information about integrity levels, see the section \"Understanding Windows Vista's Integrity Mechanism\" in Understanding and Working in Protected Mode Internet Explorer.\nBOOL GetLaunchActPermissionsWithIL (SECURITY_DESCRIPTOR **ppSD) { // Allow World Local Launch/Activation permissions. Label the SD for LOW IL Execute UP LPWSTR lpszSDDL = L\"O:BAG:BAD:(A;;0xb;;;WD)S:(ML;;NX;;;LW)\";\nif (ConvertStringSecurityDescriptorToSecurityDescriptorW(lpszSDDL, SDDL_REVISION_1, (PSECURITY_DESCRIPTOR *)&pSD, NULL)) { *ppSD = pSD;\nreturn TRUE;\n} } BOOL SetLaunchActPermissions(HKEY hkey, PSECURITY_DESCRIPTOR pSD) { BOOL bResult = FALSE;\nDWORD dwLen = GetSecurityDescriptorLength(pSD);\nLONG lResult;\nlResult = RegSetValueExA(hkey, \"LaunchPermission\", 0, REG_BINARY, (BYTE*)pSD, dwLen);\nif (lResult != ERROR_SUCCESS) goto done;\nbResult = TRUE;\ndone:\nreturn bResult;\n};\nCoCreateInstance and Integrity Levels The behavior of CoCreateInstance has changed in Windows Vista, to prevent Low IL clients from binding to COM servers by default. The server must explicitly allow such bindings by specifying the SACL. The changes to CoCreateInstance are as follows:\n- When launching a COM server process, the IL in the server process token is set to the client or server token IL, whichever is lower.\n- By default, COM will prevent Low IL clients from binding to running instances of any COM servers. To allow the bind, a COM server's Launch/Activation security descriptor must contain a SACL that specifies the Low IL label (see the previous section for the sample code to create such a security descriptor).\nElevated Servers and ROT Registrations If a COM server wishes to register in the running object table (ROT) and allow any client to access the registration, it must use the ROTFLAGS_ALLOWANYCLIENT flag. An \"Activate As Activator\" COM server cannot specify ROTFLAGS_ALLOWANYCLIENT because the DCOM service control manager (DCOMSCM) enforces a spoof check against this flag. Therefore, in Windows Vista, COM adds support for a new registry entry that allows the server to stipulate that its ROT registrations be made available to any client:\nHKEY_LOCAL_MACHINE\\Software\\Classes\\AppID {APPID} ROTFlags The only valid value for this REG_DWORD entry is:\nROTREGFLAGS_ALLOWANYCLIENT 0x1 The entry must exist in the HKEY_LOCAL_MACHINE hive.\nThis entry provides an \"Activate As Activator\" server with the same functionality that ROTFLAGS_ALLOWANYCLIENT provides for a RunAs server.\nRelated topics",
+  "ID_list": [
+    "T1548.002"
+  ],
+  "Name_list": [
+    "Impersonation",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1548.002": [
+      {
+        "sentence": "Note Access to this page requires authorization.",
+        "score": 0.3456
+      },
+      {
+        "sentence": "Access to this page requires authorization.",
+        "score": 0.3484
+      },
+      {
+        "sentence": "The COM elevation moniker allows applications that are running under user account control (UAC) to activate COM classes with elevated privileges.",
+        "score": 0.8279
+      },
+      {
+        "sentence": "For more information, see Focus on Least Privilege.",
+        "score": 0.485
+      },
+      {
+        "sentence": "When to Use the Elevation Moniker The elevation moniker is used to activate a COM class to accomplish a specific and limited function that requires elevated privileges, such as changing the system date and time.",
+        "score": 0.6365
+      },
+      {
+        "sentence": "Elevation requires participation from both a COM class and its client.",
+        "score": 0.3899
+      },
+      {
+        "sentence": "The COM class must be configured to support elevation by annotating its registry entry, as described in the Requirements section.",
+        "score": 0.4992
+      },
+      {
+        "sentence": "The COM client must request elevation by using the elevation moniker.",
+        "score": 0.6226
+      },
+      {
+        "sentence": "The elevation moniker is not intended to provide application compatibility.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "For example, if you want to run a legacy COM application such as WinWord as an elevated server, you should configure the COM client executable to require elevation, rather than activating the legacy application's class with the elevation moniker.",
+        "score": 0.5584
+      },
+      {
+        "sentence": "When the elevated COM client calls CoCreateInstance using the legacy application's CLSID, the client's elevated state will flow to the server process.",
+        "score": 0.4323
+      },
+      {
+        "sentence": "Not all COM functionality is compatible with elevation.",
+        "score": 0.5502
+      },
+      {
+        "sentence": "The functionality that will not work includes: - Elevation does not flow from a client to a remote COM server.",
+        "score": 0.3203
+      },
+      {
+        "sentence": "For COM applications, this means that the application's COM classes must be installed in the HKEY_LOCAL_MACHINE registry hive if the application is to be used both by non-privileged and privileged accounts.",
+        "score": 0.4364
+      },
+      {
+        "sentence": "The application's COM classes need only be installed in the HKEY_USERS hive if the application is never used by privileged accounts. - Drag and drop is not allowed from non-elevated to elevated applications.",
+        "score": 0.5343
+      },
+      {
+        "sentence": "Requirements In order to use the elevation moniker to activate a COM class, the class must be configured to run as the launching user or the 'Activate as Activator' application identity.",
+        "score": 0.5907
+      },
+      {
+        "sentence": "If the class is configured to run under any other identity, the activation returns the error CO_E_RUNAS_VALUE_MUST_BE_AAA.",
+        "score": 0.3341
+      },
+      {
+        "sentence": "This requires the following registry entry: HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID {CLSID} LocalizedString = displayName If this entry is missing, the activation returns the error CO_E_MISSING_DISPLAYNAME.",
+        "score": 0.4018
+      },
+      {
+        "sentence": "If the MUI file is missing, the error code from the RegLoadMUIStringW function is returned.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "Optionally, to specify an application icon to be displayed by the UAC user interface, add the following registry key: HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID {CLSID} Elevation IconReference = applicationIcon IconReference uses the same format as LocalizedString: @pathtobinary,-resourcenumber In addition, the COM component must be signed for the icon to be displayed.",
+        "score": 0.536
+      },
+      {
+        "sentence": "The COM class must also be annotated as LUA-Enabled.",
+        "score": 0.3732
+      },
+      {
+        "sentence": "This requires the following registry entry: HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID {CLSID} Elevation Enabled = 1 If this entry is missing, then the activation returns the error CO_E_ELEVATION_DISABLED.",
+        "score": 0.4349
+      },
+      {
+        "sentence": "Note that these entries must exist in the HKEY_LOCAL_MACHINE hive, not the HKEY_CURRENT_USER or HKEY_USERS hive.",
+        "score": 0.3299
+      },
+      {
+        "sentence": "This prevents users from elevating COM classes that they did not also have the privileges to register.",
+        "score": 0.6857
+      },
+      {
+        "sentence": "The Elevation Moniker and the Elevation UI If the client is already elevated, using the elevation moniker will not cause the Elevation UI to display.",
+        "score": 0.5615
+      },
+      {
+        "sentence": "How to Use the Elevation Moniker The elevation moniker is a standard COM moniker, similar to the session, partition, or queue monikers.",
+        "score": 0.4251
+      },
+      {
+        "sentence": "It directs an activation request to a specified server with the specified elevation level.",
+        "score": 0.31
+      },
+      {
+        "sentence": "The elevation moniker supports the following Run level tokens: - Administrator - Highest The syntax for this is as follows: Elevation:Administrator!new:{guid} Elevation:Highest!new:{guid} The preceding syntax uses the \"new\" moniker to return an instance of the COM class specified by guid.",
+        "score": 0.5118
+      },
+      {
+        "sentence": "Note that the \"new\" moniker internally uses the IClassFactory interface to obtain a class object and then calls IClassFactory::CreateInstance on it.",
+        "score": 0.3477
+      },
+      {
+        "sentence": "The elevation moniker can also be used to get a class object, which implements IClassFactory.",
+        "score": 0.4923
+      },
+      {
+        "sentence": "The caller then calls CreateInstance to get an object instance.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "The syntax for this is as follows: Elevation:Administrator!clsid:{guid} Sample code The following code example shows how to use the elevation moniker.",
+        "score": 0.541
+      },
+      {
+        "sentence": "It assumes that you have already initialized COM on the current thread.",
+        "score": 0.4688
+      },
+      {
+        "sentence": "This handle represents a window that becomes the owner of the Elevation UI, if applicable.",
+        "score": 0.5251
+      },
+      {
+        "sentence": "If hwnd is NULL, COM will call GetActiveWindow to find a window handle associated with the current thread.",
+        "score": 0.3069
+      },
+      {
+        "sentence": "In this case, COM will try to use the window associated with the script thread.",
+        "score": 0.3791
+      },
+      {
+        "sentence": "For such servers, COM computes a security descriptor that allows only SELF, SYSTEM, and Builtin\\Administrators to makes COM calls into the server.",
+        "score": 0.5048
+      },
+      {
+        "sentence": "Instead, the server must call CoInitializeSecurity, either explicitly or implicitly, and specify an ACL that includes the INTERACTIVE group SID and SYSTEM.",
+        "score": 0.4166
+      },
+      {
+        "sentence": "The following code example shows how to create a security descriptor (SD) with the INTERACTIVE group SID.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "MakeAbsoluteSD( pSD, pAbsSD, &AbsSdSize, pAbsAcl, &AbsAclSize, pAbsSacl, &AbsSaclSize, pAbsOwner, &AbsOwnerSize, pAbsGroup, &AbsGroupSize )) { hr = HRESULT_FROM_WIN32(GetLastError()); goto Cleanup; } } else { hr = HRESULT_FROM_WIN32(GetLastError()); goto Cleanup; } // Call CoInitializeSecurity .",
+        "score": 0.3721
+      },
+      {
+        "sentence": "COM Permissions and Mandatory Access Labels Windows Vista introduces the notion of mandatory access labels in security descriptors.",
+        "score": 0.3832
+      },
+      {
+        "sentence": "The label dictates whether clients can get execute access to a COM object.",
+        "score": 0.3573
+      },
+      {
+        "sentence": "The label is specified in the system access control list (SACL) portion of the security descriptor.",
+        "score": 0.3629
+      },
+      {
+        "sentence": "In Windows Vista, COM supports the SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP label.",
+        "score": 0.4814
+      },
+      {
+        "sentence": "SACLs in the COM permissions are ignored on operating systems prior to Windows Vista.",
+        "score": 0.5269
+      },
+      {
+        "sentence": "As of Windows Vista, dcomcnfg.exe does not support changing the integrity level (IL) in COM permissions.",
+        "score": 0.5486
+      },
+      {
+        "sentence": "It must be set programmatically.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "The following code example shows how to create a COM security descriptor with a label that allows launch/activation requests from all LOW IL clients.",
+        "score": 0.4051
+      },
+      {
+        "sentence": "Note that the labels are valid for Launch/Activation and Call permissions.",
+        "score": 0.3403
+      },
+      {
+        "sentence": "Thus, it is possible to write a COM server that disallows launch, activation or calls from clients with a certain IL.",
+        "score": 0.3938
+      },
+      {
+        "sentence": "For more information about integrity levels, see the section \"Understanding Windows Vista's Integrity Mechanism\" in Understanding and Working in Protected Mode Internet Explorer.",
+        "score": 0.4947
+      },
+      {
+        "sentence": "BOOL GetLaunchActPermissionsWithIL (SECURITY_DESCRIPTOR **ppSD) { // Allow World Local Launch/Activation permissions.",
+        "score": 0.4226
+      },
+      {
+        "sentence": "The changes to CoCreateInstance are as follows: - When launching a COM server process, the IL in the server process token is set to the client or server token IL, whichever is lower. - By default, COM will prevent Low IL clients from binding to running instances of any COM servers.",
+        "score": 0.4505
+      },
+      {
+        "sentence": "To allow the bind, a COM server's Launch/Activation security descriptor must contain a SACL that specifies the Low IL label (see the previous section for the sample code to create such a security descriptor).",
+        "score": 0.4184
+      },
+      {
+        "sentence": "An \"Activate As Activator\" COM server cannot specify ROTFLAGS_ALLOWANYCLIENT because the DCOM service control manager (DCOMSCM) enforces a spoof check against this flag.",
+        "score": 0.3687
+      },
+      {
+        "sentence": "Therefore, in Windows Vista, COM adds support for a new registry entry that allows the server to stipulate that its ROT registrations be made available to any client: HKEY_LOCAL_MACHINE\\Software\\Classes\\AppID {APPID} ROTFlags The only valid value for this REG_DWORD entry is: ROTREGFLAGS_ALLOWANYCLIENT 0x1 The entry must exist in the HKEY_LOCAL_MACHINE hive.",
+        "score": 0.3586
+      }
+    ]
+  }
+}

@@ -1,0 +1,574 @@
+{
+  "original_txt": "Table of contents\nContext\nThis report is a follow up of the previous blog post on Stealc. Stealc is an information stealer advertised on the underground forums XSS, Exploit and BHF by the Plymouth threat actor. In this blog post, we focus on the technical analysis of a standalone sample. Similarities were observed with Vidar, Raccoon and Mars stealers during the reverse engineering phase.\nFunctionalities implemented in Stealc, including environment detection, anti-analysis, strings obfuscation, dynamic API resolution, a significant list of targeted browsers, extensions, wallets and installed software makes it a top-tier threat within the infostealer ecosystem.\nMalware analysis\nThe next sections list the different techniques observed during the reverse engineering of Stealc to provide information and detailed explanations on Stealc operations and behaviors.\nAll details of the infection chain, distribution and tracking of this threat were provided in part 1.\nStealc sample SHA-256 used for the analysis is: 77d6f1914af6caf909fa2a246fcec05f500f79dd56e5d0d466d55924695c702d\nStealc sample SHA-256 with a next stage configured is: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359\nAnti analysis\nThe malware implements anti-analysis techniques by adding unconditional jump to a nearby offset, confusing the decompiler that cannot grasp the pointed function.\nAs shown in figure 1, the decompiler analyzed a function with multiple jump instructions (jz, jnz opcodes), with a destination address defined to the next address plus an offset of 1 or 2 (depending on the case). This results in the decompiler not making a correct assumption and avoiding decompiling the function.\nRebuilding the function by setting the location to undefined and patching the previous byte of the location with a NOP instruction, decompilers can work properly. When applying this technique, the decompiled opcodes are the following:\nHere, the instructions mov eax, 9DE9h (B8 E8 9D 00 00) are wrongly disassembled because of the location+1. Undefining the location, replacing the B8 of the mov instruction by a NOP(0x90) and re-defining the beginning of the next instruction to E8 results in the correct disassembly of this code section.\nMain function overview\nFollowing the patching of the sample, the main function of Stealc shows similarities to the one analyzed in Raccoon and Mars stealers reverses, notably in terms of operation order and used techniques.\nThe execution flow of Stealc is straightforward, it first deobfuscates strings used for further dynamic API resolution. Then, it performs various checks on the infected host to exit on particular conditions, it also checks the amount of RAM and whether it is executed by an antivirus solution. Finally, it verifies that the current date is preceding the hardcoded one.\nAfter this initial setup and detection, the malware goes to the function responsible for the C2 interaction, in which the stealer configuration is downloaded, and data are exfiltrated.\nDefeating string encryption\nThe malware stores its strings and part of its configuration is obfuscated. Stealc data are RC4-encrypted and base64-encoded. The key for decryption is stored in the PE in cleartext, as seen in the first variable assignment in figure 5.\nFor further analysis, an IDA script to decrypt the strings and assign their value to the correct DWORD is provided in annex 2.\nDynamic API resolution\nTo reduce its detection rate by antivirus solutions, Stealc uses the Dynamic API Resolution (T1027.007) technique. To do so, the malware searches for the kernel32 base address using the PE header structure and goes through LDR_DATA_TABLE_ENTRY. Then, it iterates over the table until it matches the GetProcAddress function and returns the address of the dedicated entry.\nIn figure 6, register EAX is used to store kernel32 base address:\n- Register fs:000030h is the address of the ProcessEnvironmentBlock (PEB) member of the ThreadEnvironmentBlock (TEB) structure ;\n- The offset 0xC of the PEB structure is the LDR_DATA structure member that contains a pointer to the InMemoryOrderModuleList member;\n- InMemoryOrderModuleList is a structure of type LIST_ENTRY whose member DllBase is pointer to Kernel32 (see figure6)\nOnce the malware obtains the address of GetProcAddress, it loads the function LoadLibrary and other functions from kernel32 including OpenEventA, CreateEventA, Sleep, VirtualAlloc, etc.\nLoadLibrary is used to load advapi32, gdi32, user32, crypt32 and ntdll DLLs, only specific functions of these libraries are loaded afterwards.\nEnvironment detection & checks\nStealc attempts to detect its environment for two purposes:\n- Exit in particular conditions (sandbox environment, unwanted location, etc.)\n- Host fingerprinting\nThe malware implements the following exit conditions:\n- Username is JohnDoe (Windows Defender emulator default username);\n- Hostname is HAL9TH (Windows Defender emulator default hostname);\n- Configured language is Russian;\n- Expiration date is overdue, a date is hardcoded in the binary, if this date is passed, the malware exits. This is almost certainly a functionality added to the build by the developer(s) as part of their business model;\n- Section .text should be writable (by default Stealc configures its .text with write permission).\n- RAM capacity is below 1 GB;\n- No display is configured.\nMiscellaneous functionalities\nStealc also implements functionalities common to other malware of the stealer family. It has the capability to take a screenshot of the infected host and to fingerprint the infected machine. To retrieve this information, the sample queries the suitable registry keys and interacts with the Windows API.\nThe fingerprinted information are:\n- Public IP address;\n- Geolocation;\n- Hardware ID;\n- Operating System version;\n- Architecture;\n- Username;\n- Computer name;\n- Local time;\n- Language;\n- Keyboard layout;\n- Physical resources: CPU (core, name), RAM, number of threads, display resolution and GPU driver;\n- List of running processes;\n- List of installed applications.\nCommand and Control communication\nThe malware communicates over HTTP, data are sent in POST requests that use multi-form structure whose forms are the stolen data encoded in base64.\nIn the first interaction, the infected host sends its HWID (hardware ID) and its build name (the value is “default“).\nThe server responds with the following base64 string:\nMWZjZTYzMTFhZDg1NmUzYTVjNTQ5OTQ0NDU0NWJmOGJjNjc2MDc0YTY3ZWIwZDJiMmZiNTQwMWE4OTMxODM3Y2NiZDlhMTllfGlzZG9uZXxkb2NpYS5kb2N4fDF8MXwwfDF8MXwxfDF8MXw=\nThe decoded content from the base64 format is:\n1fce6311ad856e3a5c5499444545bf8bc676074a67eb0d2b2fb5401a8931837ccbd9a19e|isdone|docia.docx|1|1|0|1|1|1|1|1|\nThe first hash is, in fact, an identifier used as a token for all communications, and sent in a dedicated form for each message.\nThe early communications of the malware aim at downloading the configuration of the stealer, for instance the path and file patterns to look for on the infected host, the wallets or extensions to search, etc.\nThe stealer gets its configuration from the C2, with a POST request whose two forms are sent. The form name “message” indicates which type of data will be sent, it could be “browser“, “plugin“, “wallets” or “files“. The structure of the C2 response (for the configuration) is always the same, data are concatenated with the pipe character | (see figure 9).\nIt repeats this same operation for each browser, their extensions, for the wallets and installed applications.\nThe list of targeted assets is provided in the part 1 of Stealc analysis in the annex 1 – Stealc capabilities.\nAfter downloading the bot configuration, the stealer sends the fingerprinted information (see section Miscellaneous functionalities for the list of fingerprinted information that are exfiltrated).\nThe table below displays communications between the infected host and Stealc C2.\n| Request | Request forms | Response | Functionality |\n| Register infected host and download configuration | |||\n| POST main URL | hwid, build name | token | |\n| POST main URL | token, message=”browsers” | browsers configuration | configure the browsers stealing operation |\n| POST main URL | token, message=”plugins” | plugins configuration | configure the plugins stealing operation |\n| POST main URL | token, host fingerprint (RAM, OS, apps, etc) | ||\n| Target Chromium-based browsers (e.g. Chrome, Chromium, Edge) | |||\n| GET DLLs URL sqlite3.dll | download sqlite3.dll | ||\n| POST main URL | token, file_name, file | Chrome cookies | |\n| POST main URL | token, file_name, file | Chrome history | |\n| POST main URL | token, file_name, file | Chrome extensions (exfiltrated each file separately) | |\n| GET DLLs URL freebl3.dll | download freebl3.dll | ||\n| GET DLLs URL mozglue.dll | download mozglue.dll | ||\n| GET DLLs URL msvcp140.dll | download msvcp140.dll | ||\n| GET DLLs URL nss3.dll | download nss3.dll | ||\n| GET DLLs URL softoknn3.dll | download softokn3.dll | ||\n| GET DLLs URL vcrunctime140.dll | download vcrunctime140.dll | ||\n| Target Firefox-based browsers, repeat the actions executed for Chromium-based | |||\n| Target Opera-based browsers, same actions executed for Chromium-based | |||\n| POST main URL | token, message=”wallets” | list of targeted wallets | configure the wallets stealing operation |\n| POST main URL | token, message=”files” | file grabber configuration | configure the file grabber |\n| POST main URL | token, file_name, file | exfiltrate each file matching the grabber configuration | |\n| Target desktop applications: Outlook, Steam, Tox, Pidgin, Discord, Telegram | |||\n| POST main URL | token, file_name, file | send the screenshot | |\n| POST main URL | token, message=isdone | Next stage URL | Get the URL of the next stage to execute |\n| GET unrelated URL to Stealc infrastructure | Executable | Download the next stage |\n- main url: 752e382b4dcf5e3f.php\n- DLLs url: /dbe4ef521ee4cc21/\nFor each browser, wallets, plugins, the same actions are repeated and the forms are the same. The last communication is optional, this request is sent only if Stealc has a next stage configured on its panel.\nFile grabber\nAfter stealing data from targeted browsers and their extensions, the stealer uses its file grabber functionality. The grabber configuration is received from the C2 and is formatted as follow:\nstandart|%DESKTOP%\\\\|*.txt,*.doc,*.docx,*.xls|7000|1|0|\nThe structure of the configuration is the following one. First a name, then a directory or a shortcut to a directory (here the desktop), thirdly a list of file extensions that the malware wants to exfiltrate and finally the maximum size. We also identified 2 extra parameters that were not useful for the analysis.\nIn case the file name and path match the grabber filters, it is exfiltrated in a POST request to the C2 with three forms.\n| Form ID | Form name | Form value |\n| 1 | token | The token value provided by the C2 in the earlier communication |\n| 2 | file_name | The full file path to the stolen file encoded in base64 |\n| 3 | file | The file content encoded in base64 |\nDLLs loading\nTo access particular files or data, Stealc requires external DLLs that are not embedded in the PE but rather downloaded from a specific URL hosted by the C2. The downloaded DLLs are:\n- sqlite3.dll\n- freebl3.dll\n- mozglue.dll\n- msvcp40.dll\n- nss3.dll\n- softokn3.dll\n- vcruntime140.dll\nThe DLLS are all written in the C:\\ProgramData\\ directory and are then loaded (TTP: Shared Module: T1129). Of note, only specific functions are loaded by the malware.\nAfter loading the required functionalities from the DLLs, Stealc exploits them to access data of interest, Similarly, when a targeted data is found on the infected host, it is sent to the C2 using a POST request and encoding data in base64.\nAs described in this section, Stealc can be noisy in case many files are exfiltrated to the C2.\nNext Stage\nAs other analysed stealers observed upgrading their set of functionalities, Stealc is also able to download and execute a next stage payload. The next stage is configured by the request containing the form “isdone” or “done”, depending on the sample. The C2 responds with a base64 data containing the URL of the next stage to download.\nThe sample (Stealc SHA-256: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359) is configured to execute a next stage which is a Laplas Clipper, here is the response of Stealc C2 to configure the next stage, the next payload is configured by an URL that Stealc download and execute (see figure 15).\nTrace removal\nStealc attempts to reduce its infection traces by removing itself and its downloaded DLLs (T1070.004) with the following one-line command:\ncmd.exe /c timeout /t 5 & del /f /q \"$STEALERPATH\" & del \"C:\\ProgramData\\*.dll\" & exit\nThe command is executed with a basic ShellExecuteA function from Shell32.dll.\nConclusion\nStealc displays all functionalities and behaviors to be a viable tool in the information stealer catalog, and will almost certainly be incorporated in multiple intrusion sets’ toolsets, either as a shift or an expansion of their capabilities. Based on observed similarities between Stealc and other malware of the infostealer family, notably Raccoon and Mars stealer, SEKOIA.IO analysts assess it is likely a confirmation of a transmission and circulation of knowledge, including source code, and of human resources, in the Russian-speaking cybercriminal ecosystem.\nSEKOIA.IO analysts expect Stealc developer will almost certainly continue to update its stealer with new and / or improved features in the near term to meet customers’ expectations and expand its customer base. To provide our customers with actionable intelligence, SEKOIA.IO analysts will continue to monitor emerging and prevalent infostealers, including Stealc.\nAnnex 1 – Configuration extraction\nAs introduced in the strings obfuscation section, Stealc embeds the address of the C2 and its different URLs in the rdata section of the PE.\nBased on our observation, the script should meet the following requirements:\n- Retrieve the RC4 key in rdata;\n- Deobfuscate the strings until all patterns related to the C2 are spotted.\nThe RC4 key is hardcoded in the PE in cleartext and by definition RC4 keys are 20 bytes long. Stealc C2 information are stored with the following structure:\n- C2 base URL: http://<ip or domain> or https://<ip or domain>;\n- C2 URL resource which is a random string ending by .php extension;\n- C2 directory name where the DLLs are hosted (nss3.dll, sqlite3.dll, etc…).\nThe provided configuration extractor simply loops over that section to find the patterns described previously.\nfrom base64 import b64decode\nfrom pefile import PE, SectionStructure\nfrom cryptography.hazmat.primitives.ciphers import Cipher, algorithms\nclass Stealc:\n\"\"\"Stealc configuration\"\"\"\nrc4_key: bytes = b\"\"\nbase_url: str = \"\"\nendpoint_url: str = \"\"\ndlls_directory: str = \"\"\ndef __str__(self):\nout = f\"Stealc RC4 key: {self.rc4_key}\\n\"\nout += f\"SteaC Command and Control:\\n\"\nout += f\"\\t- {''.join([self.base_url, self.endpoint_url])}\\n\"\nout += f\"\\t- {''.join([self.base_url, self.dlls_directory])}\\n\"\nreturn out\ndef rc4_decrypt(self, data: bytes) -> bytes:\n\"\"\"decrypt RC4 data with the provided key.\"\"\"\nalgorithm = algorithms.ARC4(self.rc4_key)\ncipher = Cipher(algorithm, mode=None)\ndecryptor = cipher.decryptor()\nreturn decryptor.update(data)\ndef get_section(pe: PE, section_name: str) -> SectionStructure:\n\"\"\"return section by name, if not found raise KeyError exception.\"\"\"\nfor section in filter(\nlambda x: x.Name.startswith(section_name.encode()), pe.sections\n):\nreturn section\navailable_sections = \", \".join(\n[_sec.Name.replace(b\"\\x00\", b\"\").decode() for _sec in pe.sections]\n)\nraise KeyError(\nf\"{section_name} not found in the PE, available sections: {available_sections}\"\n)\ndef get_rdata(pe_path: str) -> SectionStructure:\n\"\"\"Extract Stealc radata section\"\"\"\npe = PE(pe_path)\nsection_rdata = get_section(pe, \".rdata\")\nreturn section_rdata\ndef is_valid_string(data: bytes) -> bool:\nreturn True if all(map(lambda x: x >= 43 and x <= 122, data)) else False\ndef search_Command_and_Control(stealc: Stealc, rdata_section: SectionStructure):\n\"\"\"\nSearch two types of strings in rdata section of Stealc:\n1. The RC4 key which is 20 bytes long;\n2. Strings matching the way Stealc stores its C2 configuration (these strings are decoded (base64 decode + RC4 decryption),\nThis works for the Stealc version at least until 15 Feb 2023 but could change in new versions...\n2.1 base url (`http://something...` or `https://something...`)\n2.2 endpoint which ends with `.php`\n2.3 DLLs directory starts and ends with `/` (eg: `/something_random/`)\n\"\"\"\nfor string in filter(\nlambda x: x and is_valid_string(x), rdata_section.get_data().split(b\"\\x00\" * 2)\n):\nif len(string) == 20 and not stealc.rc4_key:\n# Hopefully the RC4 key is stored as the beginning of the rdata section\nstealc.rc4_key = string\nprint(f\"[+] RC4 key found: {stealc.rc4_key}\")\nif stealc.rc4_key and string != stealc.rc4_key:\ntry:\ncleartext = stealc.rc4_decrypt(b64decode(string))\n# print(f\"{string.decode():<40} {cleartext}\")\nif cleartext.startswith(b\"http://\") or cleartext.startswith(\nb\"https://\"\n):\nprint(f\"[+] Found StealC Command and Control\")\nstealc.base_url = cleartext.decode()\nelif cleartext.startswith(b\"/\") and cleartext.endswith(b\"/\"):\nprint(f\"[+] Found DLLs URL directory name\")\nstealc.dlls_directory = cleartext.decode()\nelif cleartext.endswith(b\".php\"):\nprint(f\"[+] Found StealC endpoint\")\nstealc.endpoint_url = cleartext.decode()\nexcept Exception:\npass\nif __name__ == \"__main__\":\nimport sys\nif len(sys.argv) < 2:\nprint(f\"not enough parameter, please provide as argument the path to stealc sample.\")\nstealc = Stealc()\nrdata = get_rdata(sys.argv[1])\nsearch_Command_and_Control(stealc, rdata)\nprint(stealc)\nAnnex 2 – IDA script for string deobfuscation\nfrom idaapi import *\nfrom ida_bytes import *\nfrom ida_name import *\nfrom base64 import b64decode\nfrom string import ascii_letters, digits\nfrom cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\ndef read_rdata(name: str) -> str:\nprint(f\"read_rdata: {name}\")\naddr = get_name_ea_simple(name)\nsize = get_max_strlit_length(addr, ida_nalt.STRENC_DEFAULT)\nreturn get_bytes(addr, size - 1)\ndef rc4_decrypt(key: bytes, data: bytes) -> bytes:\nalgorithm = algorithms.ARC4(key)\ncipher = Cipher(algorithm, mode=None)\ndecryptor = cipher.decryptor()\nreturn decryptor.update(data)\ndef deobfuscate_string(base: int, end: int , KEY: bytes):\nea = base\nsize = 0\nclear = []\naddr = []\nwhile ea <= end:\nflags = ida_bytes.get_flags(ea)\nif ida_bytes.is_code(flags):\ninstr_str = idc.generate_disasm_line(ea, 1)\ninstr_str = \" \".join(instr_str.split())\nif instr_str.startswith(\"push offset a\") or instr_str.startswith(\"mov dword ptr [esp], offset a\"):\nvalue = instr_str.split(\"offset\")[-1].split(';')[0].strip()\nvalue = read_rdata(value)\nclear.append(rc4_decrypt(KEY, b64decode(value)))\nelif instr_str.startswith(\"mov dword_\"):\ntemp = instr_str.replace(\"mov dword_\", \"\")\ntemp = temp.split()[0].replace(\",\",\"\")\naddr = int(temp, 16)\nstring = get_bytes(addr, size)\ncleartext = clear.pop(-1)\ncleartext = cleartext.decode()\nidc.set_cmt(ea, cleartext, 0)\ntext = \"\"\nfor c in cleartext:\nif c in f\"{ascii_letters}{digits}\":\ntext += c\nelse:\ntext += \"_\"\ncleartext = f\"str_{text}\"\nprint(f\"replace dword_{addr:x} by `{cleartext}`\")\nset_name(addr, cleartext)\nea += 1\nThank you for reading this blogpost. You can also consult other results of surveys carried out by our analysts on the ecosystem of infostealers :\n- Stealc: a copycat of Vidar and Raccoon infostealers gaining in popularity – Part 1\n- ClearFake: a newcomer to the “fake updates” threats landscape\n- Unveiling of a large resilient infrastructure distributing information stealers\n- Raccoon Stealer v2 – Part 2: In-depth analysis\n- Mars, a red-hot information stealer\n- Following NoName057(16) DDoSia Project’s Targets\n- Tycoon 2FA: an in-depth analysis of the latest version of the AiTM phishing kit",
+  "sanitized_txt": "Table of contents Context This report is a follow up of the previous blog post on Stealc. Stealc is an information stealer advertised on the underground forums XSS, Exploit and BHF by the Plymouth threat actor. In this blog post, we focus on the technical analysis of a standalone sample. Similarities were observed with Vidar, Raccoon and Mars stealers during the reverse engineering phase.\nFunctionalities implemented in Stealc, including environment detection, anti-analysis, strings obfuscation, dynamic API resolution, a significant list of targeted browsers, extensions, wallets and installed software makes it a top-tier threat within the infostealer ecosystem.\nMalware analysis The next sections list the different techniques observed during the reverse engineering of Stealc to provide information and detailed explanations on Stealc operations and behaviors.\nAll details of the infection chain, distribution and tracking of this threat were provided in part 1.\nStealc sample SHA-256 used for the analysis is: 77d6f1914af6caf909fa2a246fcec05f500f79dd56e5d0d466d55924695c702d Stealc sample SHA-256 with a next stage configured is: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359 Anti analysis The malware implements anti-analysis techniques by adding unconditional jump to a nearby offset, confusing the decompiler that cannot grasp the pointed function.\nAs shown in figure 1, the decompiler analyzed a function with multiple jump instructions (jz, jnz opcodes), with a destination address defined to the next address plus an offset of 1 or 2 (depending on the case). This results in the decompiler not making a correct assumption and avoiding decompiling the function.\nRebuilding the function by setting the location to undefined and patching the previous byte of the location with a NOP instruction, decompilers can work properly. When applying this technique, the decompiled opcodes are the following:\nHere, the instructions mov eax, 9DE9h (B8 E8 9D 00 00) are wrongly disassembled because of the location+1. Undefining the location, replacing the B8 of the mov instruction by a NOP(0x90) and re-defining the beginning of the next instruction to E8 results in the correct disassembly of this code section.\nMain function overview Following the patching of the sample, the main function of Stealc shows similarities to the one analyzed in Raccoon and Mars stealers reverses, notably in terms of operation order and used techniques.\nThe execution flow of Stealc is straightforward, it first deobfuscates strings used for further dynamic API resolution. Then, it performs various checks on the infected host to exit on particular conditions, it also checks the amount of RAM and whether it is executed by an antivirus solution. Finally, it verifies that the current date is preceding the hardcoded one.\nAfter this initial setup and detection, the malware goes to the function responsible for the C2 interaction, in which the stealer configuration is downloaded, and data are exfiltrated.\nDefeating string encryption The malware stores its strings and part of its configuration is obfuscated. Stealc data are RC4-encrypted and base64-encoded. The key for decryption is stored in the PE in cleartext, as seen in the first variable assignment in figure 5.\nFor further analysis, an IDA script to decrypt the strings and assign their value to the correct DWORD is provided in annex 2.\nIn figure 6, register EAX is used to store kernel32 base address:\n- Register fs:000030h is the address of the ProcessEnvironmentBlock (PEB) member of the ThreadEnvironmentBlock (TEB) structure ;\n- The offset 0xC of the PEB structure is the LDR_DATA structure member that contains a pointer to the InMemoryOrderModuleList member;\n- InMemoryOrderModuleList is a structure of type LIST_ENTRY whose member DllBase is pointer to Kernel32 (see figure6) Once the malware obtains the address of GetProcAddress, it loads the function LoadLibrary and other functions from kernel32 including OpenEventA, CreateEventA, Sleep, VirtualAlloc, etc.\nLoadLibrary is used to load advapi32, gdi32, user32, crypt32 and ntdll DLLs, only specific functions of these libraries are loaded afterwards.\nEnvironment detection & checks Stealc attempts to detect its environment for two purposes:\n- Exit in particular conditions (sandbox environment, unwanted location, etc.) - Host fingerprinting The malware implements the following exit conditions:\n- Username is JohnDoe (Windows Defender emulator default username);\n- Hostname is HAL9TH (Windows Defender emulator default hostname);\n- Configured language is Russian;\n- Expiration date is overdue, a date is hardcoded in the binary, if this date is passed, the malware exits. This is almost certainly a functionality added to the build by the developer(s) as part of their business model;\n- Section .text should be writable (by default Stealc configures its .text with write permission).\n- RAM capacity is below 1 GB;\n- No display is configured.\nMiscellaneous functionalities Stealc also implements functionalities common to other malware of the stealer family. It has the capability to take a screenshot of the infected host and to fingerprint the infected machine. To retrieve this information, the sample queries the suitable registry keys and interacts with the Windows API.\nThe fingerprinted information are:\n- Public IP address;\n- Geolocation;\n- Hardware ID;\n- Operating System version;\n- Architecture;\n- Username;\n- Computer name;\n- Local time;\n- Language;\n- Keyboard layout;\n- Physical resources: CPU (core, name), RAM, number of threads, display resolution and GPU driver;\n- List of running processes;\n- List of installed applications.\nCommand and Control communication The malware communicates over HTTP, data are sent in POST requests that use multi-form structure whose forms are the stolen data encoded in base64.\nIn the first interaction, the infected host sends its HWID (hardware ID) and its build name (the value is “default“).\nThe server responds with the following base64 string:\nMWZjZTYzMTFhZDg1NmUzYTVjNTQ5OTQ0NDU0NWJmOGJjNjc2MDc0YTY3ZWIwZDJiMmZiNTQwMWE4OTMxODM3Y2NiZDlhMTllfGlzZG9uZXxkb2NpYS5kb2N4fDF8MXwwfDF8MXwxfDF8MXw= The decoded content from the base64 format is:\n1fce6311ad856e3a5c5499444545bf8bc676074a67eb0d2b2fb5401a8931837ccbd9a19e|isdone|docia.docx|1|1|0|1|1|1|1|1| The first hash is, in fact, an identifier used as a token for all communications, and sent in a dedicated form for each message.\nThe early communications of the malware aim at downloading the configuration of the stealer, for instance the path and file patterns to look for on the infected host, the wallets or extensions to search, etc.\nThe stealer gets its configuration from the C2, with a POST request whose two forms are sent. The form name “message” indicates which type of data will be sent, it could be “browser“, “plugin“, “wallets” or “files“. The structure of the C2 response (for the configuration) is always the same, data are concatenated with the pipe character | (see figure 9).\nIt repeats this same operation for each browser, their extensions, for the wallets and installed applications.\nThe list of targeted assets is provided in the part 1 of Stealc analysis in the annex 1 – Stealc capabilities.\nAfter downloading the bot configuration, the stealer sends the fingerprinted information (see section Miscellaneous functionalities for the list of fingerprinted information that are exfiltrated).\nThe table below displays communications between the infected host and Stealc C2.\n| Request | Request forms | Response | Functionality | | Register infected host and download configuration | ||| | POST main URL | hwid, build name | token | | | POST main URL | token, message=”browsers” | browsers configuration | configure the browsers stealing operation | | POST main URL | token, message=”plugins” | plugins configuration | configure the plugins stealing operation | | POST main URL | token, host fingerprint (RAM, OS, apps, etc) | || | Target Chromium-based browsers (e.g. Chrome, Chromium, Edge) | ||| | GET DLLs URL sqlite3.dll | download sqlite3.dll | || | POST main URL | token, file_name, file | Chrome cookies | | | POST main URL | token, file_name, file | Chrome history | | | POST main URL | token, file_name, file | Chrome extensions (exfiltrated each file separately) | | | GET DLLs URL freebl3.dll | download freebl3.dll | || | GET DLLs URL mozglue.dll | download mozglue.dll | || | GET DLLs URL msvcp140.dll | download msvcp140.dll | || | GET DLLs URL nss3.dll | download nss3.dll | || | GET DLLs URL softoknn3.dll | download softokn3.dll | || | GET DLLs URL vcrunctime140.dll | download vcrunctime140.dll | || | Target Firefox-based browsers, repeat the actions executed for Chromium-based | ||| | Target Opera-based browsers, same actions executed for Chromium-based | ||| | POST main URL | token, message=”wallets” | list of targeted wallets | configure the wallets stealing operation | | POST main URL | token, message=”files” | file grabber configuration | configure the file grabber | | POST main URL | token, file_name, file | exfiltrate each file matching the grabber configuration | | | Target desktop applications: Outlook, Steam, Tox, Pidgin, Discord, Telegram | ||| | POST main URL | token, file_name, file | send the screenshot | | | POST main URL | token, message=isdone | Next stage URL | Get the URL of the next stage to execute | | GET unrelated URL to Stealc infrastructure | Executable | Download the next stage | - main url: 752e382b4dcf5e3f.php - DLLs url: /dbe4ef521ee4cc21/ For each browser, wallets, plugins, the same actions are repeated and the forms are the same. The last communication is optional, this request is sent only if Stealc has a next stage configured on its panel.\nFile grabber After stealing data from targeted browsers and their extensions, the stealer uses its file grabber functionality. The grabber configuration is received from the C2 and is formatted as follow:\nstandart|%DESKTOP%\\\\|*.txt,*.doc,*.docx,*.xls|7000|1|0| The structure of the configuration is the following one. First a name, then a directory or a shortcut to a directory (here the desktop), thirdly a list of file extensions that the malware wants to exfiltrate and finally the maximum size. We also identified 2 extra parameters that were not useful for the analysis.\nIn case the file name and path match the grabber filters, it is exfiltrated in a POST request to the C2 with three forms.\n| Form ID | Form name | Form value | | 1 | token | The token value provided by the C2 in the earlier communication | | 2 | file_name | The full file path to the stolen file encoded in base64 | | 3 | file | The file content encoded in base64 | DLLs loading To access particular files or data, Stealc requires external DLLs that are not embedded in the PE but rather downloaded from a specific URL hosted by the C2. The downloaded DLLs are:\nAfter loading the required functionalities from the DLLs, Stealc exploits them to access data of interest, Similarly, when a targeted data is found on the infected host, it is sent to the C2 using a POST request and encoding data in base64.\nAs described in this section, Stealc can be noisy in case many files are exfiltrated to the C2.\nNext Stage As other analysed stealers observed upgrading their set of functionalities, Stealc is also able to download and execute a next stage payload. The next stage is configured by the request containing the form “isdone” or “done”, depending on the sample. The C2 responds with a base64 data containing the URL of the next stage to download.\nThe sample (Stealc SHA-256: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359) is configured to execute a next stage which is a Laplas Clipper, here is the response of Stealc C2 to configure the next stage, the next payload is configured by an URL that Stealc download and execute (see figure 15).\ncmd.exe /c timeout /t 5 & del /f /q \"$STEALERPATH\" & del \"C:\\ProgramData\\*.dll\" & exit The command is executed with a basic ShellExecuteA function from Shell32.dll.\nConclusion Stealc displays all functionalities and behaviors to be a viable tool in the information stealer catalog, and will almost certainly be incorporated in multiple intrusion sets’ toolsets, either as a shift or an expansion of their capabilities. Based on observed similarities between Stealc and other malware of the infostealer family, notably Raccoon and Mars stealer, SEKOIA.IO analysts assess it is likely a confirmation of a transmission and circulation of knowledge, including source code, and of human resources, in the Russian-speaking cybercriminal ecosystem.\nSEKOIA.IO analysts expect Stealc developer will almost certainly continue to update its stealer with new and / or improved features in the near term to meet customers’ expectations and expand its customer base. To provide our customers with actionable intelligence, SEKOIA.IO analysts will continue to monitor emerging and prevalent infostealers, including Stealc.\nAnnex 1 – Configuration extraction As introduced in the strings obfuscation section, Stealc embeds the address of the C2 and its different URLs in the rdata section of the PE.\nBased on our observation, the script should meet the following requirements:\n- Retrieve the RC4 key in rdata;\n- Deobfuscate the strings until all patterns related to the C2 are spotted.\nThe RC4 key is hardcoded in the PE in cleartext and by definition RC4 keys are 20 bytes long. Stealc C2 information are stored with the following structure:\n- C2 base URL: http://<ip or domain> or https://<ip or domain>;\n- C2 URL resource which is a random string ending by .php extension;\n- C2 directory name where the DLLs are hosted (nss3.dll, sqlite3.dll, etc…).\nThe provided configuration extractor simply loops over that section to find the patterns described previously.\nfrom base64 import b64decode from pefile import PE, SectionStructure from cryptography.hazmat.primitives.ciphers import Cipher, algorithms class Stealc:\n\"\"\"Stealc configuration\"\"\" rc4_key: bytes = b\"\" base_url: str = \"\" endpoint_url: str = \"\" dlls_directory: str = \"\" def __str__(self):\nout = f\"Stealc RC4 key: {self.rc4_key}\\n\" out += f\"SteaC Command and Control:\\n\" out += f\"\\t- {''.join([self.base_url, self.endpoint_url])}\\n\" out += f\"\\t- {''.join([self.base_url, self.dlls_directory])}\\n\" return out def rc4_decrypt(self, data: bytes) -> bytes:\n\"\"\"decrypt RC4 data with the provided key.\"\"\" algorithm = algorithms.ARC4(self.rc4_key) cipher = Cipher(algorithm, mode=None) decryptor = cipher.decryptor() return decryptor.update(data) def get_section(pe: PE, section_name: str) -> SectionStructure:\n\"\"\"return section by name, if not found raise KeyError exception.\"\"\" for section in filter( lambda x: x.Name.startswith(section_name.encode()), pe.sections ):\nreturn section available_sections = \", \".join( [_sec.Name.replace(b\"\\x00\", b\"\").decode() for _sec in pe.sections] ) raise KeyError( f\"{section_name} not found in the PE, available sections: {available_sections}\" ) def get_rdata(pe_path: str) -> SectionStructure:\n\"\"\"Extract Stealc radata section\"\"\" pe = PE(pe_path) section_rdata = get_section(pe, \".rdata\") return section_rdata def is_valid_string(data: bytes) -> bool:\nreturn True if all(map(lambda x: x >= 43 and x <= 122, data)) else False def search_Command_and_Control(stealc: Stealc, rdata_section: SectionStructure):\n\"\"\" Search two types of strings in rdata section of Stealc:\n1. The RC4 key which is 20 bytes long;\n2. Strings matching the way Stealc stores its C2 configuration (these strings are decoded (base64 decode + RC4 decryption), This works for the Stealc version at least until 15 Feb 2023 but could change in new versions...\n2.1 base url (`http://something...` or `https://something...`) 2.2 endpoint which ends with `.php` 2.3 DLLs directory starts and ends with `/` (eg: `/something_random/`) \"\"\" for string in filter( lambda x: x and is_valid_string(x), rdata_section.get_data().split(b\"\\x00\" * 2) ):\nif len(string) == 20 and not stealc.rc4_key:\n# Hopefully the RC4 key is stored as the beginning of the rdata section stealc.rc4_key = string print(f\"[+] RC4 key found: {stealc.rc4_key}\") if stealc.rc4_key and string != stealc.rc4_key:\ntry:\ncleartext = stealc.rc4_decrypt(b64decode(string)) # print(f\"{string.decode():<40} {cleartext}\") if cleartext.startswith(b\"http://\") or cleartext.startswith( b\"https://\" ):\nprint(f\"[+] Found StealC Command and Control\") stealc.base_url = cleartext.decode() elif cleartext.startswith(b\"/\") and cleartext.endswith(b\"/\"):\nprint(f\"[+] Found DLLs URL directory name\") stealc.dlls_directory = cleartext.decode() elif cleartext.endswith(b\".php\"):\nprint(f\"[+] Found StealC endpoint\") stealc.endpoint_url = cleartext.decode() except Exception:\npass if __name__ == \"__main__\":\nimport sys if len(sys.argv) < 2:\nprint(f\"not enough parameter, please provide as argument the path to stealc sample.\") stealc = Stealc() rdata = get_rdata(sys.argv[1]) search_Command_and_Control(stealc, rdata) print(stealc) Annex 2 – IDA script for string deobfuscation from idaapi import * from ida_bytes import * from ida_name import * from base64 import b64decode from string import ascii_letters, digits from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes def read_rdata(name: str) -> str:\nprint(f\"read_rdata: {name}\") addr = get_name_ea_simple(name) size = get_max_strlit_length(addr, ida_nalt.STRENC_DEFAULT) return get_bytes(addr, size - 1) def rc4_decrypt(key: bytes, data: bytes) -> bytes:\nalgorithm = algorithms.ARC4(key) cipher = Cipher(algorithm, mode=None) decryptor = cipher.decryptor() return decryptor.update(data) def deobfuscate_string(base: int, end: int , KEY: bytes):\nea = base size = 0 clear = [] addr = [] while ea <= end:\nflags = ida_bytes.get_flags(ea) if ida_bytes.is_code(flags):\ninstr_str = idc.generate_disasm_line(ea, 1) instr_str = \" \".join(instr_str.split()) if instr_str.startswith(\"push offset a\") or instr_str.startswith(\"mov dword ptr [esp], offset a\"):\nvalue = instr_str.split(\"offset\")[-1].split(';')[0].strip() value = read_rdata(value) clear.append(rc4_decrypt(KEY, b64decode(value))) elif instr_str.startswith(\"mov dword_\"):\ntemp = instr_str.replace(\"mov dword_\", \"\") temp = temp.split()[0].replace(\",\",\"\") addr = int(temp, 16) string = get_bytes(addr, size) cleartext = clear.pop(-1) cleartext = cleartext.decode() idc.set_cmt(ea, cleartext, 0) text = \"\" for c in cleartext:\nif c in f\"{ascii_letters}{digits}\":\ntext += c else:\ntext += \"_\" cleartext = f\"str_{text}\" print(f\"replace dword_{addr:x} by `{cleartext}`\") set_name(addr, cleartext) ea += 1 Thank you for reading this blogpost. You can also consult other results of surveys carried out by our analysts on the ecosystem of infostealers :\n- Stealc: a copycat of Vidar and Raccoon infostealers gaining in popularity – Part 1 - ClearFake: a newcomer to the “fake updates” threats landscape - Unveiling of a large resilient infrastructure distributing information stealers - Raccoon Stealer v2 – Part 2: In-depth analysis - Mars, a red-hot information stealer - Following NoName057(16) DDoSia Project’s Targets - Tycoon 2FA: an in-depth analysis of the latest version of the AiTM phishing kit",
+  "ID_list": [
+    "T1027.007",
+    "T1070.004",
+    "T1129"
+  ],
+  "Name_list": [
+    "Execution",
+    "Phishing",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1129": [
+      {
+        "sentence": "Table of contents Context This report is a follow up of the previous blog post on Stealc.",
+        "score": 0.31
+      },
+      {
+        "sentence": "Stealc is an information stealer advertised on the underground forums XSS, Exploit and BHF by the Plymouth threat actor.",
+        "score": 0.3082
+      },
+      {
+        "sentence": "In this blog post, we focus on the technical analysis of a standalone sample.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "Similarities were observed with Vidar, Raccoon and Mars stealers during the reverse engineering phase.",
+        "score": 0.388
+      },
+      {
+        "sentence": "Functionalities implemented in Stealc, including environment detection, anti-analysis, strings obfuscation, dynamic API resolution, a significant list of targeted browsers, extensions, wallets and installed software makes it a top-tier threat within the infostealer ecosystem.",
+        "score": 0.3976
+      },
+      {
+        "sentence": "Malware analysis The next sections list the different techniques observed during the reverse engineering of Stealc to provide information and detailed explanations on Stealc operations and behaviors.",
+        "score": 0.5186
+      },
+      {
+        "sentence": "All details of the infection chain, distribution and tracking of this threat were provided in part 1.",
+        "score": 0.354
+      },
+      {
+        "sentence": "Stealc sample SHA-256 used for the analysis is: 77d6f1914af6caf909fa2a246fcec05f500f79dd56e5d0d466d55924695c702d Stealc sample SHA-256 with a next stage configured is: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359 Anti analysis The malware implements anti-analysis techniques by adding unconditional jump to a nearby offset, confusing the decompiler that cannot grasp the pointed function.",
+        "score": 0.5353
+      },
+      {
+        "sentence": "As shown in figure 1, the decompiler analyzed a function with multiple jump instructions (jz, jnz opcodes), with a destination address defined to the next address plus an offset of 1 or 2 (depending on the case).",
+        "score": 0.4775
+      },
+      {
+        "sentence": "This results in the decompiler not making a correct assumption and avoiding decompiling the function.",
+        "score": 0.4713
+      },
+      {
+        "sentence": "Rebuilding the function by setting the location to undefined and patching the previous byte of the location with a NOP instruction, decompilers can work properly.",
+        "score": 0.5301
+      },
+      {
+        "sentence": "When applying this technique, the decompiled opcodes are the following: Here, the instructions mov eax, 9DE9h (B8 E8 9D 00 00) are wrongly disassembled because of the location+1.",
+        "score": 0.4221
+      },
+      {
+        "sentence": "Undefining the location, replacing the B8 of the mov instruction by a NOP(0x90) and re-defining the beginning of the next instruction to E8 results in the correct disassembly of this code section.",
+        "score": 0.4349
+      },
+      {
+        "sentence": "Main function overview Following the patching of the sample, the main function of Stealc shows similarities to the one analyzed in Raccoon and Mars stealers reverses, notably in terms of operation order and used techniques.",
+        "score": 0.5485
+      },
+      {
+        "sentence": "The execution flow of Stealc is straightforward, it first deobfuscates strings used for further dynamic API resolution.",
+        "score": 0.5353
+      },
+      {
+        "sentence": "After this initial setup and detection, the malware goes to the function responsible for the C2 interaction, in which the stealer configuration is downloaded, and data are exfiltrated.",
+        "score": 0.5158
+      },
+      {
+        "sentence": "Defeating string encryption The malware stores its strings and part of its configuration is obfuscated.",
+        "score": 0.4395
+      },
+      {
+        "sentence": "Stealc data are RC4-encrypted and base64-encoded.",
+        "score": 0.4697
+      },
+      {
+        "sentence": "The key for decryption is stored in the PE in cleartext, as seen in the first variable assignment in figure 5.",
+        "score": 0.5015
+      },
+      {
+        "sentence": "For further analysis, an IDA script to decrypt the strings and assign their value to the correct DWORD is provided in annex 2.",
+        "score": 0.5279
+      },
+      {
+        "sentence": "Dynamic API resolution To reduce its detection rate by antivirus solutions, Stealc uses the Dynamic API Resolution () technique.",
+        "score": 0.3971
+      },
+      {
+        "sentence": "To do so, the malware searches for the kernel32 base address using the PE header structure and goes through LDR_DATA_TABLE_ENTRY.",
+        "score": 0.4322
+      },
+      {
+        "sentence": "Then, it iterates over the table until it matches the GetProcAddress function and returns the address of the dedicated entry.",
+        "score": 0.461
+      },
+      {
+        "sentence": "LoadLibrary is used to load advapi32, gdi32, user32, crypt32 and ntdll DLLs, only specific functions of these libraries are loaded afterwards.",
+        "score": 0.663
+      },
+      {
+        "sentence": "This is almost certainly a functionality added to the build by the developer(s) as part of their business model; - Section .text should be writable (by default Stealc configures its .text with write permission). - RAM capacity is below 1 GB; - No display is configured.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "Miscellaneous functionalities Stealc also implements functionalities common to other malware of the stealer family.",
+        "score": 0.4746
+      },
+      {
+        "sentence": "The fingerprinted information are: - Public IP address; - Geolocation; - Hardware ID; - Operating System version; - Architecture; - Username; - Computer name; - Local time; - Language; - Keyboard layout; - Physical resources: CPU (core, name), RAM, number of threads, display resolution and GPU driver; - List of running processes; - List of installed applications.",
+        "score": 0.3063
+      },
+      {
+        "sentence": "Command and Control communication The malware communicates over HTTP, data are sent in POST requests that use multi-form structure whose forms are the stolen data encoded in base64.",
+        "score": 0.3884
+      },
+      {
+        "sentence": "In the first interaction, the infected host sends its HWID (hardware ID) and its build name (the value is “default“).",
+        "score": 0.3113
+      },
+      {
+        "sentence": "The server responds with the following base64 string: MWZjZTYzMTFhZDg1NmUzYTVjNTQ5OTQ0NDU0NWJmOGJjNjc2MDc0YTY3ZWIwZDJiMmZiNTQwMWE4OTMxODM3Y2NiZDlhMTllfGlzZG9uZXxkb2NpYS5kb2N4fDF8MXwwfDF8MXwxfDF8MXw= The decoded content from the base64 format is: 1fce6311ad856e3a5c5499444545bf8bc676074a67eb0d2b2fb5401a8931837ccbd9a19e|isdone|docia.docx|1|1|0|1|1|1|1|1| The first hash is, in fact, an identifier used as a token for all communications, and sent in a dedicated form for each message.",
+        "score": 0.4827
+      },
+      {
+        "sentence": "The early communications of the malware aim at downloading the configuration of the stealer, for instance the path and file patterns to look for on the infected host, the wallets or extensions to search, etc.",
+        "score": 0.3794
+      },
+      {
+        "sentence": "The stealer gets its configuration from the C2, with a POST request whose two forms are sent.",
+        "score": 0.369
+      },
+      {
+        "sentence": "The structure of the C2 response (for the configuration) is always the same, data are concatenated with the pipe character | (see figure 9).",
+        "score": 0.4524
+      },
+      {
+        "sentence": "The list of targeted assets is provided in the part 1 of Stealc analysis in the annex 1 – Stealc capabilities.",
+        "score": 0.3398
+      },
+      {
+        "sentence": "After downloading the bot configuration, the stealer sends the fingerprinted information (see section Miscellaneous functionalities for the list of fingerprinted information that are exfiltrated).",
+        "score": 0.3399
+      },
+      {
+        "sentence": "The last communication is optional, this request is sent only if Stealc has a next stage configured on its panel.",
+        "score": 0.3647
+      },
+      {
+        "sentence": "File grabber After stealing data from targeted browsers and their extensions, the stealer uses its file grabber functionality.",
+        "score": 0.3304
+      },
+      {
+        "sentence": "The grabber configuration is received from the C2 and is formatted as follow: standart|%DESKTOP%\\\\|*.txt,*.doc,*.docx,*.xls|7000|1|0| The structure of the configuration is the following one.",
+        "score": 0.4289
+      },
+      {
+        "sentence": "First a name, then a directory or a shortcut to a directory (here the desktop), thirdly a list of file extensions that the malware wants to exfiltrate and finally the maximum size.",
+        "score": 0.3178
+      },
+      {
+        "sentence": "We also identified 2 extra parameters that were not useful for the analysis.",
+        "score": 0.3623
+      },
+      {
+        "sentence": "The downloaded DLLs are: - sqlite3.dll - freebl3.dll - mozglue.dll - msvcp40.dll - nss3.dll - softokn3.dll - vcruntime140.dll The DLLS are all written in the C:\\ProgramData\\ directory and are then loaded (TTP: Shared Module: ).",
+        "score": 0.6979
+      },
+      {
+        "sentence": "Of note, only specific functions are loaded by the malware.",
+        "score": 0.6649
+      },
+      {
+        "sentence": "After loading the required functionalities from the DLLs, Stealc exploits them to access data of interest, Similarly, when a targeted data is found on the infected host, it is sent to the C2 using a POST request and encoding data in base64.",
+        "score": 0.5451
+      },
+      {
+        "sentence": "As described in this section, Stealc can be noisy in case many files are exfiltrated to the C2.",
+        "score": 0.3017
+      },
+      {
+        "sentence": "Next Stage As other analysed stealers observed upgrading their set of functionalities, Stealc is also able to download and execute a next stage payload.",
+        "score": 0.6834
+      },
+      {
+        "sentence": "The next stage is configured by the request containing the form “isdone” or “done”, depending on the sample.",
+        "score": 0.313
+      },
+      {
+        "sentence": "The C2 responds with a base64 data containing the URL of the next stage to download.",
+        "score": 0.538
+      },
+      {
+        "sentence": "The sample (Stealc SHA-256: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359) is configured to execute a next stage which is a Laplas Clipper, here is the response of Stealc C2 to configure the next stage, the next payload is configured by an URL that Stealc download and execute (see figure 15).",
+        "score": 0.6337
+      },
+      {
+        "sentence": "Trace removal Stealc attempts to reduce its infection traces by removing itself and its downloaded DLLs () with the following one-line command: cmd.exe /c timeout /t 5 & del /f /q \"$STEALERPATH\" & del \"C:\\ProgramData\\*.dll\" & exit The command is executed with a basic ShellExecuteA function from Shell32.dll.",
+        "score": 0.4896
+      },
+      {
+        "sentence": "Conclusion Stealc displays all functionalities and behaviors to be a viable tool in the information stealer catalog, and will almost certainly be incorporated in multiple intrusion sets’ toolsets, either as a shift or an expansion of their capabilities.",
+        "score": 0.3654
+      },
+      {
+        "sentence": "Based on observed similarities between Stealc and other malware of the infostealer family, notably Raccoon and Mars stealer, SEKOIA.IO analysts assess it is likely a confirmation of a transmission and circulation of knowledge, including source code, and of human resources, in the Russian-speaking cybercriminal ecosystem.",
+        "score": 0.4515
+      },
+      {
+        "sentence": "SEKOIA.IO analysts expect Stealc developer will almost certainly continue to update its stealer with new and / or improved features in the near term to meet customers’ expectations and expand its customer base.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "To provide our customers with actionable intelligence, SEKOIA.IO analysts will continue to monitor emerging and prevalent infostealers, including Stealc.",
+        "score": 0.3537
+      },
+      {
+        "sentence": "Annex 1 – Configuration extraction As introduced in the strings obfuscation section, Stealc embeds the address of the C2 and its different URLs in the rdata section of the PE.",
+        "score": 0.5705
+      },
+      {
+        "sentence": "Based on our observation, the script should meet the following requirements: - Retrieve the RC4 key in rdata; - Deobfuscate the strings until all patterns related to the C2 are spotted.",
+        "score": 0.485
+      },
+      {
+        "sentence": "The RC4 key is hardcoded in the PE in cleartext and by definition RC4 keys are 20 bytes long.",
+        "score": 0.4116
+      },
+      {
+        "sentence": "Stealc C2 information are stored with the following structure: - C2 base URL: http://<ip or domain> or https://<ip or domain>; - C2 URL resource which is a random string ending by .php extension; - C2 directory name where the DLLs are hosted (nss3.dll, sqlite3.dll, etc…).",
+        "score": 0.5065
+      },
+      {
+        "sentence": "The RC4 key which is 20 bytes long; 2.",
+        "score": 0.3788
+      },
+      {
+        "sentence": "Strings matching the way Stealc stores its C2 configuration (these strings are decoded (base64 decode + RC4 decryption), This works for the Stealc version at least until 15 Feb 2023 but could change in new versions...",
+        "score": 0.5274
+      }
+    ],
+    "T1027.007": [
+      {
+        "sentence": "Stealc is an information stealer advertised on the underground forums XSS, Exploit and BHF by the Plymouth threat actor.",
+        "score": 0.3506
+      },
+      {
+        "sentence": "In this blog post, we focus on the technical analysis of a standalone sample.",
+        "score": 0.362
+      },
+      {
+        "sentence": "Similarities were observed with Vidar, Raccoon and Mars stealers during the reverse engineering phase.",
+        "score": 0.4725
+      },
+      {
+        "sentence": "Functionalities implemented in Stealc, including environment detection, anti-analysis, strings obfuscation, dynamic API resolution, a significant list of targeted browsers, extensions, wallets and installed software makes it a top-tier threat within the infostealer ecosystem.",
+        "score": 0.6806
+      },
+      {
+        "sentence": "Malware analysis The next sections list the different techniques observed during the reverse engineering of Stealc to provide information and detailed explanations on Stealc operations and behaviors.",
+        "score": 0.6261
+      },
+      {
+        "sentence": "Stealc sample SHA-256 used for the analysis is: 77d6f1914af6caf909fa2a246fcec05f500f79dd56e5d0d466d55924695c702d Stealc sample SHA-256 with a next stage configured is: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359 Anti analysis The malware implements anti-analysis techniques by adding unconditional jump to a nearby offset, confusing the decompiler that cannot grasp the pointed function.",
+        "score": 0.7091
+      },
+      {
+        "sentence": "As shown in figure 1, the decompiler analyzed a function with multiple jump instructions (jz, jnz opcodes), with a destination address defined to the next address plus an offset of 1 or 2 (depending on the case).",
+        "score": 0.6015
+      },
+      {
+        "sentence": "This results in the decompiler not making a correct assumption and avoiding decompiling the function.",
+        "score": 0.6303
+      },
+      {
+        "sentence": "Rebuilding the function by setting the location to undefined and patching the previous byte of the location with a NOP instruction, decompilers can work properly.",
+        "score": 0.6353
+      },
+      {
+        "sentence": "When applying this technique, the decompiled opcodes are the following: Here, the instructions mov eax, 9DE9h (B8 E8 9D 00 00) are wrongly disassembled because of the location+1.",
+        "score": 0.5886
+      },
+      {
+        "sentence": "Undefining the location, replacing the B8 of the mov instruction by a NOP(0x90) and re-defining the beginning of the next instruction to E8 results in the correct disassembly of this code section.",
+        "score": 0.5154
+      },
+      {
+        "sentence": "Main function overview Following the patching of the sample, the main function of Stealc shows similarities to the one analyzed in Raccoon and Mars stealers reverses, notably in terms of operation order and used techniques.",
+        "score": 0.6268
+      },
+      {
+        "sentence": "The execution flow of Stealc is straightforward, it first deobfuscates strings used for further dynamic API resolution.",
+        "score": 0.6338
+      },
+      {
+        "sentence": "Then, it performs various checks on the infected host to exit on particular conditions, it also checks the amount of RAM and whether it is executed by an antivirus solution.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "After this initial setup and detection, the malware goes to the function responsible for the C2 interaction, in which the stealer configuration is downloaded, and data are exfiltrated.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "Defeating string encryption The malware stores its strings and part of its configuration is obfuscated.",
+        "score": 0.7421
+      },
+      {
+        "sentence": "Stealc data are RC4-encrypted and base64-encoded.",
+        "score": 0.605
+      },
+      {
+        "sentence": "The key for decryption is stored in the PE in cleartext, as seen in the first variable assignment in figure 5.",
+        "score": 0.6542
+      },
+      {
+        "sentence": "For further analysis, an IDA script to decrypt the strings and assign their value to the correct DWORD is provided in annex 2.",
+        "score": 0.6108
+      },
+      {
+        "sentence": "Dynamic API resolution To reduce its detection rate by antivirus solutions, Stealc uses the Dynamic API Resolution () technique.",
+        "score": 0.7301
+      },
+      {
+        "sentence": "To do so, the malware searches for the kernel32 base address using the PE header structure and goes through LDR_DATA_TABLE_ENTRY.",
+        "score": 0.5276
+      },
+      {
+        "sentence": "Then, it iterates over the table until it matches the GetProcAddress function and returns the address of the dedicated entry.",
+        "score": 0.6695
+      },
+      {
+        "sentence": "LoadLibrary is used to load advapi32, gdi32, user32, crypt32 and ntdll DLLs, only specific functions of these libraries are loaded afterwards.",
+        "score": 0.6786
+      },
+      {
+        "sentence": "This is almost certainly a functionality added to the build by the developer(s) as part of their business model; - Section .text should be writable (by default Stealc configures its .text with write permission). - RAM capacity is below 1 GB; - No display is configured.",
+        "score": 0.4571
+      },
+      {
+        "sentence": "Miscellaneous functionalities Stealc also implements functionalities common to other malware of the stealer family.",
+        "score": 0.4442
+      },
+      {
+        "sentence": "To retrieve this information, the sample queries the suitable registry keys and interacts with the Windows API.",
+        "score": 0.4341
+      },
+      {
+        "sentence": "The fingerprinted information are: - Public IP address; - Geolocation; - Hardware ID; - Operating System version; - Architecture; - Username; - Computer name; - Local time; - Language; - Keyboard layout; - Physical resources: CPU (core, name), RAM, number of threads, display resolution and GPU driver; - List of running processes; - List of installed applications.",
+        "score": 0.3817
+      },
+      {
+        "sentence": "Command and Control communication The malware communicates over HTTP, data are sent in POST requests that use multi-form structure whose forms are the stolen data encoded in base64.",
+        "score": 0.3668
+      },
+      {
+        "sentence": "In the first interaction, the infected host sends its HWID (hardware ID) and its build name (the value is “default“).",
+        "score": 0.3689
+      },
+      {
+        "sentence": "The server responds with the following base64 string: MWZjZTYzMTFhZDg1NmUzYTVjNTQ5OTQ0NDU0NWJmOGJjNjc2MDc0YTY3ZWIwZDJiMmZiNTQwMWE4OTMxODM3Y2NiZDlhMTllfGlzZG9uZXxkb2NpYS5kb2N4fDF8MXwwfDF8MXwxfDF8MXw= The decoded content from the base64 format is: 1fce6311ad856e3a5c5499444545bf8bc676074a67eb0d2b2fb5401a8931837ccbd9a19e|isdone|docia.docx|1|1|0|1|1|1|1|1| The first hash is, in fact, an identifier used as a token for all communications, and sent in a dedicated form for each message.",
+        "score": 0.5364
+      },
+      {
+        "sentence": "The early communications of the malware aim at downloading the configuration of the stealer, for instance the path and file patterns to look for on the infected host, the wallets or extensions to search, etc.",
+        "score": 0.3517
+      },
+      {
+        "sentence": "The structure of the C2 response (for the configuration) is always the same, data are concatenated with the pipe character | (see figure 9).",
+        "score": 0.4275
+      },
+      {
+        "sentence": "It repeats this same operation for each browser, their extensions, for the wallets and installed applications.",
+        "score": 0.3874
+      },
+      {
+        "sentence": "The list of targeted assets is provided in the part 1 of Stealc analysis in the annex 1 – Stealc capabilities.",
+        "score": 0.4044
+      },
+      {
+        "sentence": "File grabber After stealing data from targeted browsers and their extensions, the stealer uses its file grabber functionality.",
+        "score": 0.301
+      },
+      {
+        "sentence": "The grabber configuration is received from the C2 and is formatted as follow: standart|%DESKTOP%\\\\|*.txt,*.doc,*.docx,*.xls|7000|1|0| The structure of the configuration is the following one.",
+        "score": 0.3353
+      },
+      {
+        "sentence": "First a name, then a directory or a shortcut to a directory (here the desktop), thirdly a list of file extensions that the malware wants to exfiltrate and finally the maximum size.",
+        "score": 0.3464
+      },
+      {
+        "sentence": "We also identified 2 extra parameters that were not useful for the analysis.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "The downloaded DLLs are: - sqlite3.dll - freebl3.dll - mozglue.dll - msvcp40.dll - nss3.dll - softokn3.dll - vcruntime140.dll The DLLS are all written in the C:\\ProgramData\\ directory and are then loaded (TTP: Shared Module: ).",
+        "score": 0.5334
+      },
+      {
+        "sentence": "Of note, only specific functions are loaded by the malware.",
+        "score": 0.6724
+      },
+      {
+        "sentence": "After loading the required functionalities from the DLLs, Stealc exploits them to access data of interest, Similarly, when a targeted data is found on the infected host, it is sent to the C2 using a POST request and encoding data in base64.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "Next Stage As other analysed stealers observed upgrading their set of functionalities, Stealc is also able to download and execute a next stage payload.",
+        "score": 0.4108
+      },
+      {
+        "sentence": "The next stage is configured by the request containing the form “isdone” or “done”, depending on the sample.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "The C2 responds with a base64 data containing the URL of the next stage to download.",
+        "score": 0.4392
+      },
+      {
+        "sentence": "The sample (Stealc SHA-256: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359) is configured to execute a next stage which is a Laplas Clipper, here is the response of Stealc C2 to configure the next stage, the next payload is configured by an URL that Stealc download and execute (see figure 15).",
+        "score": 0.4428
+      },
+      {
+        "sentence": "Trace removal Stealc attempts to reduce its infection traces by removing itself and its downloaded DLLs () with the following one-line command: cmd.exe /c timeout /t 5 & del /f /q \"$STEALERPATH\" & del \"C:\\ProgramData\\*.dll\" & exit The command is executed with a basic ShellExecuteA function from Shell32.dll.",
+        "score": 0.6563
+      },
+      {
+        "sentence": "Conclusion Stealc displays all functionalities and behaviors to be a viable tool in the information stealer catalog, and will almost certainly be incorporated in multiple intrusion sets’ toolsets, either as a shift or an expansion of their capabilities.",
+        "score": 0.3917
+      },
+      {
+        "sentence": "Based on observed similarities between Stealc and other malware of the infostealer family, notably Raccoon and Mars stealer, SEKOIA.IO analysts assess it is likely a confirmation of a transmission and circulation of knowledge, including source code, and of human resources, in the Russian-speaking cybercriminal ecosystem.",
+        "score": 0.5075
+      },
+      {
+        "sentence": "SEKOIA.IO analysts expect Stealc developer will almost certainly continue to update its stealer with new and / or improved features in the near term to meet customers’ expectations and expand its customer base.",
+        "score": 0.4239
+      },
+      {
+        "sentence": "To provide our customers with actionable intelligence, SEKOIA.IO analysts will continue to monitor emerging and prevalent infostealers, including Stealc.",
+        "score": 0.4086
+      },
+      {
+        "sentence": "Annex 1 – Configuration extraction As introduced in the strings obfuscation section, Stealc embeds the address of the C2 and its different URLs in the rdata section of the PE.",
+        "score": 0.6513
+      },
+      {
+        "sentence": "Based on our observation, the script should meet the following requirements: - Retrieve the RC4 key in rdata; - Deobfuscate the strings until all patterns related to the C2 are spotted.",
+        "score": 0.6296
+      },
+      {
+        "sentence": "The RC4 key is hardcoded in the PE in cleartext and by definition RC4 keys are 20 bytes long.",
+        "score": 0.5661
+      },
+      {
+        "sentence": "Stealc C2 information are stored with the following structure: - C2 base URL: http://<ip or domain> or https://<ip or domain>; - C2 URL resource which is a random string ending by .php extension; - C2 directory name where the DLLs are hosted (nss3.dll, sqlite3.dll, etc…).",
+        "score": 0.4398
+      },
+      {
+        "sentence": "The RC4 key which is 20 bytes long; 2.",
+        "score": 0.5329
+      },
+      {
+        "sentence": "Strings matching the way Stealc stores its C2 configuration (these strings are decoded (base64 decode + RC4 decryption), This works for the Stealc version at least until 15 Feb 2023 but could change in new versions...",
+        "score": 0.5603
+      }
+    ],
+    "T1070.004": [
+      {
+        "sentence": "Functionalities implemented in Stealc, including environment detection, anti-analysis, strings obfuscation, dynamic API resolution, a significant list of targeted browsers, extensions, wallets and installed software makes it a top-tier threat within the infostealer ecosystem.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "Malware analysis The next sections list the different techniques observed during the reverse engineering of Stealc to provide information and detailed explanations on Stealc operations and behaviors.",
+        "score": 0.3002
+      },
+      {
+        "sentence": "Stealc sample SHA-256 used for the analysis is: 77d6f1914af6caf909fa2a246fcec05f500f79dd56e5d0d466d55924695c702d Stealc sample SHA-256 with a next stage configured is: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359 Anti analysis The malware implements anti-analysis techniques by adding unconditional jump to a nearby offset, confusing the decompiler that cannot grasp the pointed function.",
+        "score": 0.3894
+      },
+      {
+        "sentence": "Rebuilding the function by setting the location to undefined and patching the previous byte of the location with a NOP instruction, decompilers can work properly.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "Main function overview Following the patching of the sample, the main function of Stealc shows similarities to the one analyzed in Raccoon and Mars stealers reverses, notably in terms of operation order and used techniques.",
+        "score": 0.3441
+      },
+      {
+        "sentence": "After this initial setup and detection, the malware goes to the function responsible for the C2 interaction, in which the stealer configuration is downloaded, and data are exfiltrated.",
+        "score": 0.3184
+      },
+      {
+        "sentence": "Defeating string encryption The malware stores its strings and part of its configuration is obfuscated.",
+        "score": 0.3786
+      },
+      {
+        "sentence": "Stealc data are RC4-encrypted and base64-encoded.",
+        "score": 0.3853
+      },
+      {
+        "sentence": "This is almost certainly a functionality added to the build by the developer(s) as part of their business model; - Section .text should be writable (by default Stealc configures its .text with write permission). - RAM capacity is below 1 GB; - No display is configured.",
+        "score": 0.307
+      },
+      {
+        "sentence": "The server responds with the following base64 string: MWZjZTYzMTFhZDg1NmUzYTVjNTQ5OTQ0NDU0NWJmOGJjNjc2MDc0YTY3ZWIwZDJiMmZiNTQwMWE4OTMxODM3Y2NiZDlhMTllfGlzZG9uZXxkb2NpYS5kb2N4fDF8MXwwfDF8MXwxfDF8MXw= The decoded content from the base64 format is: 1fce6311ad856e3a5c5499444545bf8bc676074a67eb0d2b2fb5401a8931837ccbd9a19e|isdone|docia.docx|1|1|0|1|1|1|1|1| The first hash is, in fact, an identifier used as a token for all communications, and sent in a dedicated form for each message.",
+        "score": 0.3398
+      },
+      {
+        "sentence": "The early communications of the malware aim at downloading the configuration of the stealer, for instance the path and file patterns to look for on the infected host, the wallets or extensions to search, etc.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "The structure of the C2 response (for the configuration) is always the same, data are concatenated with the pipe character | (see figure 9).",
+        "score": 0.3266
+      },
+      {
+        "sentence": "The grabber configuration is received from the C2 and is formatted as follow: standart|%DESKTOP%\\\\|*.txt,*.doc,*.docx,*.xls|7000|1|0| The structure of the configuration is the following one.",
+        "score": 0.3645
+      },
+      {
+        "sentence": "As described in this section, Stealc can be noisy in case many files are exfiltrated to the C2.",
+        "score": 0.3239
+      },
+      {
+        "sentence": "Next Stage As other analysed stealers observed upgrading their set of functionalities, Stealc is also able to download and execute a next stage payload.",
+        "score": 0.3558
+      },
+      {
+        "sentence": "The next stage is configured by the request containing the form “isdone” or “done”, depending on the sample.",
+        "score": 0.3298
+      },
+      {
+        "sentence": "The C2 responds with a base64 data containing the URL of the next stage to download.",
+        "score": 0.3048
+      },
+      {
+        "sentence": "The sample (Stealc SHA-256: 1587857ad744c322a2b32731cdd48d98eac13f8aa8ff2f2afb01ebba88d15359) is configured to execute a next stage which is a Laplas Clipper, here is the response of Stealc C2 to configure the next stage, the next payload is configured by an URL that Stealc download and execute (see figure 15).",
+        "score": 0.358
+      },
+      {
+        "sentence": "Trace removal Stealc attempts to reduce its infection traces by removing itself and its downloaded DLLs () with the following one-line command: cmd.exe /c timeout /t 5 & del /f /q \"$STEALERPATH\" & del \"C:\\ProgramData\\*.dll\" & exit The command is executed with a basic ShellExecuteA function from Shell32.dll.",
+        "score": 0.6536
+      },
+      {
+        "sentence": "Based on observed similarities between Stealc and other malware of the infostealer family, notably Raccoon and Mars stealer, SEKOIA.IO analysts assess it is likely a confirmation of a transmission and circulation of knowledge, including source code, and of human resources, in the Russian-speaking cybercriminal ecosystem.",
+        "score": 0.306
+      },
+      {
+        "sentence": "Annex 1 – Configuration extraction As introduced in the strings obfuscation section, Stealc embeds the address of the C2 and its different URLs in the rdata section of the PE.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "Based on our observation, the script should meet the following requirements: - Retrieve the RC4 key in rdata; - Deobfuscate the strings until all patterns related to the C2 are spotted.",
+        "score": 0.4196
+      },
+      {
+        "sentence": "Strings matching the way Stealc stores its C2 configuration (these strings are decoded (base64 decode + RC4 decryption), This works for the Stealc version at least until 15 Feb 2023 but could change in new versions...",
+        "score": 0.3117
+      }
+    ]
+  }
+}

@@ -1,0 +1,322 @@
+{
+  "original_txt": "Note\nAccess to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nAn atom table is a system-defined table that stores strings and corresponding identifiers. An application places a string in an atom table and receives a 16-bit integer, called an atom, that can be used to access the string. A string that has been placed in an atom table is called an atom name.\nThe system provides a number of atom tables. Each atom table serves a different purpose. For example, Dynamic Data Exchange (DDE) applications use the global atom table to share item-name and topic-name strings with other applications. Rather than passing actual strings, a DDE application passes global atoms to its partner application. The partner uses the atoms to obtain the strings from the atom table.\nApplications can use local atom tables to store their own item-name associations.\nThe system uses atom tables that are not directly accessible to applications. However, the application uses these atoms when calling a variety of functions. For example, registered clipboard formats are stored in an internal atom table used by the system. An application adds atoms to this atom table using the RegisterClipboardFormat function. Also, registered classes are stored in an internal atom table used by the system. An application adds atoms to this atom table using the RegisterClass or RegisterClassEx function.\nThe following topics are discussed in this section.\n- Global Atom Table\n- User Atom Table\n- Local Atom Tables\n- Atom Types\n- Atom Creation and Usage Count\n- Atom-Table Queries\n- Atom String Formats\nGlobal Atom Table\nThe global atom table is available to all applications. When an application places a string in the global atom table, the system generates an atom that is unique throughout the system. Any application that has the atom can obtain the string it identifies by querying the global atom table.\nAn application that defines a private DDE-data format for sharing data with other applications should place the format name in the global atom table. This technique prevents conflicts with the names of formats defined by the system or by other applications, and makes the identifiers (atoms) for the messages or formats available to the other applications.\nUser Atom Table\nIn addition to the global atom table, the user atom table is another system atom table that is also shared across all processes. The user atom table is used for a small number of scenarios internal to win32k; for example, windows module names, well known strings in win32k, OLE formats, etc. Although applications do not interact with the user atom table directly, they call several APIs—such as RegisterClass, RegisterWindowMessage, and RegisterClipboardFormat—that add entries to the user atom table. The entries added by RegisterClass\ncan be deleted by UnregisterClass\n. However, the entries added by RegisterWindowMessage\nand RegisterClipboardFormat\ndo not get deleted until the session ends. If the user atom table has no more space and the string being passed in is not already in the table, the call will fail.\nAtom Table Size\nMany critical APIs, including CreateWindow, rely on user atoms. Therefore, space exhaustion in the user atom table will result in serious issues; for example, all applications may fail to launch. Here are some recommendations to ensure your application utilizes atom tables efficiently and preserves the reliability and performance of the application and system:\nYou should limit your app's usage of the user atom table. Storing unique strings using APIs like\nRegisterClass\n,RegisterWindowMessage\n, orRegisterClipboardFormat\ntakes space in the user atom table, which is used globally by other apps to register window classes using strings. If at all possible, you should use AddAtom/DeleteAtom to store strings in a local atom table, or GlobalAddAtom/GlobalDeleteAtom if the atoms are needed cross-process.If there is concern about the application causing user atom table issues, you can investigate the root cause by connecting the kernel debugger and breaking into the process on calls to\nUserAddAtomEx\n(bae1 win32kbase!UserAddAtomEx /p <eprocess> \"kc10;g\"\n). Look foruser32!\non the callstack to see which API is being called. The methodology is similar to the global atom table issue detection explained in Identifying Global Atom Table Leaks. Another way to dump the contents of the user atom table is by calling GetClipboardFormatName over the range of possible atoms from 0xC000 to 0xFFFF. If the total atom count steadily goes up while the application is running or does not return to baseline when the app is closed, there is a problem.\nLocal Atom Tables\nAn application can use a local atom table to efficiently manage a large number of strings used only within the application. These strings, and the associated atoms, are available only to the application that created the table.\nAn application requiring the same string in a number of structures can reduce memory usage by using a local atom table. Rather than copying the string into each structure, the application can place the string in the atom table and include the resulting atom in the structures. In this way, a string appears only once in memory but can be used many times in the application.\nApplications can also use local atom tables to save time when searching for a particular string. To perform a search, an application need only place the search string in the atom table and compare the resulting atom with the atoms in the relevant structures. Comparing atoms is typically faster than comparing strings.\nAtom tables are implemented as hash tables. By default, a local atom table uses 37 buckets for its hash table. However, you can change the number of buckets used by calling the InitAtomTable function. If the application calls InitAtomTable, however, it must do so before calling any other atom-management functions.\nAtom Types\nApplications can create two types of atoms: string atoms and integer atoms. The values of integer atoms and string atoms do not overlap, so both types of atoms can be used in the same block of code.\nSeveral functions accept either strings or atoms as parameters. When passing an atom to these functions, an application can use the MAKEINTATOM macro to convert the atom into a form that can be used by the function.\nThe following sections describe atom types.\nString Atoms\nWhen applications pass null-terminated strings to the GlobalAddAtom, AddAtom, GlobalFindAtom, and FindAtom functions, they receive string atoms (16-bit integers) in return. String atoms have the following properties:\n- The values of string atoms are in the range 0xC000 (MAXINTATOM) through 0xFFFF.\n- Case is not significant in searches for an atom name in an atom table. Also, the entire string must match in a search operation; no substring matching is performed.\n- The string associated with a string atom can be no more than 255 bytes in size. This limitation applies to all atom functions.\n- A reference count is associated with each atom name. The count is incremented each time the atom name is added to the table and decremented each time the atom name is deleted from it. This prevents different users of the same string atom from destroying each other's atom names. When the reference count for an atom name equals zero, the system removes the atom and the atom name from the table.\nInteger Atoms\nInteger atoms differ from string atoms in the following ways:\n- The values of integer atoms are in the range 0x0001 through 0xBFFF (MAXINTATOM– 1).\n- The string representation of an integer atom is #dddd, where the values represented by dddd are decimal digits. Leading zeros are ignored.\n- There is no reference count or storage overhead associated with an integer atom.\nAtom Creation and Usage Count\nAn application creates a local atom by calling the AddAtom function; it creates a global atom by calling the GlobalAddAtom function. Both functions require a pointer to a string. The system searches the appropriate atom table for the string and returns the corresponding atom to the application. In the case of a string atom, if the string already resides in the atom table, the system increments the reference count for the string during this process.\nRepeated calls to add the same atom name return the same atom. If the atom name does not exist in the table when AddAtom is called, the atom name is added to the table and a new atom is returned. If it is a string atom, its reference count is also set to one.\nAn application should call the DeleteAtom function when it no longer needs to use a local atom; it should call the GlobalDeleteAtom function when it no longer needs a global atom. In the case of a string atom, either of these functions reduces the reference count of the corresponding atom by one. When the reference count reaches zero, the system deletes the atom name from the table.\nThe atom name of a string atom remains in the global atom table as long as its reference count is greater than zero, even after the application that placed it in the table terminates. A local atom table is destroyed when the associated application terminates, regardless of the reference counts of the atoms in the table.\nAtom-Table Queries\nAn application can determine whether a particular string is already in an atom table by using the FindAtom or GlobalFindAtom function. These functions search an atom table for the specified string and, if the string is there, return the corresponding atom.\nAn application can use the GetAtomName or GlobalGetAtomName function to retrieve an atom-name string from an atom table, provided the application has the atom corresponding to the string being sought. Both functions copy the atom-name string of the specified atom to a buffer and return the length of the string that was copied. GetAtomName retrieves an atom-name string from a local atom table, and GlobalGetAtomName retrieves an atom-name string from the global atom table.\nAtom String Formats\nThe AddAtom, GlobalAddAtom, FindAtom, and GlobalFindAtom functions take a pointer to a null-terminated string. An application can specify this pointer in one of the following ways.\n| String format | Description |\n|---|---|\n| #dddd | An integer specified as a decimal string. Used to create or find an integer atom. |\n| string atom name | A string atom name. Used to add a string atom name to an atom table and receive an atom in return. |",
+  "sanitized_txt": "Note Access to this page requires authorization. You can try signing in or changing directories.\nAccess to this page requires authorization. You can try changing directories.\nAn atom table is a system-defined table that stores strings and corresponding identifiers. An application places a string in an atom table and receives a 16-bit integer, called an atom, that can be used to access the string. A string that has been placed in an atom table is called an atom name.\nThe system provides a number of atom tables. Each atom table serves a different purpose. For example, Dynamic Data Exchange (DDE) applications use the global atom table to share item-name and topic-name strings with other applications. Rather than passing actual strings, a DDE application passes global atoms to its partner application. The partner uses the atoms to obtain the strings from the atom table.\nApplications can use local atom tables to store their own item-name associations.\nThe system uses atom tables that are not directly accessible to applications. However, the application uses these atoms when calling a variety of functions. For example, registered clipboard formats are stored in an internal atom table used by the system. An application adds atoms to this atom table using the RegisterClipboardFormat function. Also, registered classes are stored in an internal atom table used by the system. An application adds atoms to this atom table using the RegisterClass or RegisterClassEx function.\nThe following topics are discussed in this section.\n- Global Atom Table - User Atom Table - Local Atom Tables - Atom Types - Atom Creation and Usage Count - Atom-Table Queries - Atom String Formats Global Atom Table The global atom table is available to all applications. When an application places a string in the global atom table, the system generates an atom that is unique throughout the system. Any application that has the atom can obtain the string it identifies by querying the global atom table.\nAn application that defines a private DDE-data format for sharing data with other applications should place the format name in the global atom table. This technique prevents conflicts with the names of formats defined by the system or by other applications, and makes the identifiers (atoms) for the messages or formats available to the other applications.\nUser Atom Table In addition to the global atom table, the user atom table is another system atom table that is also shared across all processes. The user atom table is used for a small number of scenarios internal to win32k; for example, windows module names, well known strings in win32k, OLE formats, etc. Although applications do not interact with the user atom table directly, they call several APIs—such as RegisterClass, RegisterWindowMessage, and RegisterClipboardFormat—that add entries to the user atom table. The entries added by RegisterClass can be deleted by UnregisterClass . However, the entries added by RegisterWindowMessage and RegisterClipboardFormat do not get deleted until the session ends. If the user atom table has no more space and the string being passed in is not already in the table, the call will fail.\nAtom Table Size Many critical APIs, including CreateWindow, rely on user atoms. Therefore, space exhaustion in the user atom table will result in serious issues; for example, all applications may fail to launch. Here are some recommendations to ensure your application utilizes atom tables efficiently and preserves the reliability and performance of the application and system:\nYou should limit your app's usage of the user atom table. Storing unique strings using APIs like RegisterClass ,RegisterWindowMessage , orRegisterClipboardFormat takes space in the user atom table, which is used globally by other apps to register window classes using strings. If at all possible, you should use AddAtom/DeleteAtom to store strings in a local atom table, or GlobalAddAtom/GlobalDeleteAtom if the atoms are needed cross-process.If there is concern about the application causing user atom table issues, you can investigate the root cause by connecting the kernel debugger and breaking into the process on calls to UserAddAtomEx (bae1 win32kbase!UserAddAtomEx /p <eprocess> \"kc10;g\" ). Look foruser32!\non the callstack to see which API is being called. The methodology is similar to the global atom table issue detection explained in Identifying Global Atom Table Leaks. Another way to dump the contents of the user atom table is by calling GetClipboardFormatName over the range of possible atoms from 0xC000 to 0xFFFF. If the total atom count steadily goes up while the application is running or does not return to baseline when the app is closed, there is a problem.\nLocal Atom Tables An application can use a local atom table to efficiently manage a large number of strings used only within the application. These strings, and the associated atoms, are available only to the application that created the table.\nAn application requiring the same string in a number of structures can reduce memory usage by using a local atom table. Rather than copying the string into each structure, the application can place the string in the atom table and include the resulting atom in the structures. In this way, a string appears only once in memory but can be used many times in the application.\nApplications can also use local atom tables to save time when searching for a particular string. To perform a search, an application need only place the search string in the atom table and compare the resulting atom with the atoms in the relevant structures. Comparing atoms is typically faster than comparing strings.\nAtom tables are implemented as hash tables. By default, a local atom table uses 37 buckets for its hash table. However, you can change the number of buckets used by calling the InitAtomTable function. If the application calls InitAtomTable, however, it must do so before calling any other atom-management functions.\nAtom Types Applications can create two types of atoms: string atoms and integer atoms. The values of integer atoms and string atoms do not overlap, so both types of atoms can be used in the same block of code.\nSeveral functions accept either strings or atoms as parameters. When passing an atom to these functions, an application can use the MAKEINTATOM macro to convert the atom into a form that can be used by the function.\nThe following sections describe atom types.\nString Atoms When applications pass null-terminated strings to the GlobalAddAtom, AddAtom, GlobalFindAtom, and FindAtom functions, they receive string atoms (16-bit integers) in return. String atoms have the following properties:\n- The values of string atoms are in the range 0xC000 (MAXINTATOM) through 0xFFFF.\n- Case is not significant in searches for an atom name in an atom table. Also, the entire string must match in a search operation; no substring matching is performed.\n- The string associated with a string atom can be no more than 255 bytes in size. This limitation applies to all atom functions.\n- A reference count is associated with each atom name. The count is incremented each time the atom name is added to the table and decremented each time the atom name is deleted from it. This prevents different users of the same string atom from destroying each other's atom names. When the reference count for an atom name equals zero, the system removes the atom and the atom name from the table.\nInteger Atoms Integer atoms differ from string atoms in the following ways:\n- The values of integer atoms are in the range 0x0001 through 0xBFFF (MAXINTATOM– 1).\n- The string representation of an integer atom is #dddd, where the values represented by dddd are decimal digits. Leading zeros are ignored.\n- There is no reference count or storage overhead associated with an integer atom.\nAtom Creation and Usage Count An application creates a local atom by calling the AddAtom function; it creates a global atom by calling the GlobalAddAtom function. Both functions require a pointer to a string. The system searches the appropriate atom table for the string and returns the corresponding atom to the application. In the case of a string atom, if the string already resides in the atom table, the system increments the reference count for the string during this process.\nRepeated calls to add the same atom name return the same atom. If the atom name does not exist in the table when AddAtom is called, the atom name is added to the table and a new atom is returned. If it is a string atom, its reference count is also set to one.\nAn application should call the DeleteAtom function when it no longer needs to use a local atom; it should call the GlobalDeleteAtom function when it no longer needs a global atom. In the case of a string atom, either of these functions reduces the reference count of the corresponding atom by one. When the reference count reaches zero, the system deletes the atom name from the table.\nThe atom name of a string atom remains in the global atom table as long as its reference count is greater than zero, even after the application that placed it in the table terminates. A local atom table is destroyed when the associated application terminates, regardless of the reference counts of the atoms in the table.\nAtom-Table Queries An application can determine whether a particular string is already in an atom table by using the FindAtom or GlobalFindAtom function. These functions search an atom table for the specified string and, if the string is there, return the corresponding atom.\nAn application can use the GetAtomName or GlobalGetAtomName function to retrieve an atom-name string from an atom table, provided the application has the atom corresponding to the string being sought. Both functions copy the atom-name string of the specified atom to a buffer and return the length of the string that was copied. GetAtomName retrieves an atom-name string from a local atom table, and GlobalGetAtomName retrieves an atom-name string from the global atom table.\nAtom String Formats The AddAtom, GlobalAddAtom, FindAtom, and GlobalFindAtom functions take a pointer to a null-terminated string. An application can specify this pointer in one of the following ways.\n| String format | Description | |---|---| | #dddd | An integer specified as a decimal string. Used to create or find an integer atom. | | string atom name | A string atom name. Used to add a string atom name to an atom table and receive an atom in return. |",
+  "ID_list": [
+    "T1055.004"
+  ],
+  "Name_list": [
+    "Dynamic Data Exchange"
+  ],
+  "TTP_sentences": {
+    "T1055.004": [
+      {
+        "sentence": "Note Access to this page requires authorization.",
+        "score": 0.3219
+      },
+      {
+        "sentence": "Access to this page requires authorization.",
+        "score": 0.326
+      },
+      {
+        "sentence": "An atom table is a system-defined table that stores strings and corresponding identifiers.",
+        "score": 0.3621
+      },
+      {
+        "sentence": "An application places a string in an atom table and receives a 16-bit integer, called an atom, that can be used to access the string.",
+        "score": 0.4453
+      },
+      {
+        "sentence": "A string that has been placed in an atom table is called an atom name.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "Each atom table serves a different purpose.",
+        "score": 0.3663
+      },
+      {
+        "sentence": "For example, Dynamic Data Exchange (DDE) applications use the global atom table to share item-name and topic-name strings with other applications.",
+        "score": 0.3433
+      },
+      {
+        "sentence": "Rather than passing actual strings, a DDE application passes global atoms to its partner application.",
+        "score": 0.4291
+      },
+      {
+        "sentence": "The partner uses the atoms to obtain the strings from the atom table.",
+        "score": 0.3285
+      },
+      {
+        "sentence": "The system uses atom tables that are not directly accessible to applications.",
+        "score": 0.3189
+      },
+      {
+        "sentence": "However, the application uses these atoms when calling a variety of functions.",
+        "score": 0.4653
+      },
+      {
+        "sentence": "For example, registered clipboard formats are stored in an internal atom table used by the system.",
+        "score": 0.3106
+      },
+      {
+        "sentence": "An application adds atoms to this atom table using the RegisterClipboardFormat function.",
+        "score": 0.4916
+      },
+      {
+        "sentence": "Also, registered classes are stored in an internal atom table used by the system.",
+        "score": 0.3832
+      },
+      {
+        "sentence": "An application adds atoms to this atom table using the RegisterClass or RegisterClassEx function.",
+        "score": 0.5174
+      },
+      {
+        "sentence": "The following topics are discussed in this section. - Global Atom Table - User Atom Table - Local Atom Tables - Atom Types - Atom Creation and Usage Count - Atom-Table Queries - Atom String Formats Global Atom Table The global atom table is available to all applications.",
+        "score": 0.3859
+      },
+      {
+        "sentence": "When an application places a string in the global atom table, the system generates an atom that is unique throughout the system.",
+        "score": 0.4053
+      },
+      {
+        "sentence": "Any application that has the atom can obtain the string it identifies by querying the global atom table.",
+        "score": 0.3458
+      },
+      {
+        "sentence": "This technique prevents conflicts with the names of formats defined by the system or by other applications, and makes the identifiers (atoms) for the messages or formats available to the other applications.",
+        "score": 0.401
+      },
+      {
+        "sentence": "User Atom Table In addition to the global atom table, the user atom table is another system atom table that is also shared across all processes.",
+        "score": 0.4328
+      },
+      {
+        "sentence": "The user atom table is used for a small number of scenarios internal to win32k; for example, windows module names, well known strings in win32k, OLE formats, etc.",
+        "score": 0.3674
+      },
+      {
+        "sentence": "Although applications do not interact with the user atom table directly, they call several APIs—such as RegisterClass, RegisterWindowMessage, and RegisterClipboardFormat—that add entries to the user atom table.",
+        "score": 0.5002
+      },
+      {
+        "sentence": "The entries added by RegisterClass can be deleted by UnregisterClass .",
+        "score": 0.3284
+      },
+      {
+        "sentence": "However, the entries added by RegisterWindowMessage and RegisterClipboardFormat do not get deleted until the session ends.",
+        "score": 0.4056
+      },
+      {
+        "sentence": "If the user atom table has no more space and the string being passed in is not already in the table, the call will fail.",
+        "score": 0.4354
+      },
+      {
+        "sentence": "Atom Table Size Many critical APIs, including CreateWindow, rely on user atoms.",
+        "score": 0.4476
+      },
+      {
+        "sentence": "Therefore, space exhaustion in the user atom table will result in serious issues; for example, all applications may fail to launch.",
+        "score": 0.3531
+      },
+      {
+        "sentence": "Here are some recommendations to ensure your application utilizes atom tables efficiently and preserves the reliability and performance of the application and system: You should limit your app's usage of the user atom table.",
+        "score": 0.4181
+      },
+      {
+        "sentence": "Storing unique strings using APIs like RegisterClass ,RegisterWindowMessage , orRegisterClipboardFormat takes space in the user atom table, which is used globally by other apps to register window classes using strings.",
+        "score": 0.5194
+      },
+      {
+        "sentence": "If at all possible, you should use AddAtom/DeleteAtom to store strings in a local atom table, or GlobalAddAtom/GlobalDeleteAtom if the atoms are needed cross-process.If there is concern about the application causing user atom table issues, you can investigate the root cause by connecting the kernel debugger and breaking into the process on calls to UserAddAtomEx (bae1 win32kbase!UserAddAtomEx /p <eprocess> \"kc10;g\" ).",
+        "score": 0.6086
+      },
+      {
+        "sentence": "Look foruser32! on the callstack to see which API is being called.",
+        "score": 0.376
+      },
+      {
+        "sentence": "The methodology is similar to the global atom table issue detection explained in Identifying Global Atom Table Leaks.",
+        "score": 0.4392
+      },
+      {
+        "sentence": "Another way to dump the contents of the user atom table is by calling GetClipboardFormatName over the range of possible atoms from 0xC000 to 0xFFFF.",
+        "score": 0.4377
+      },
+      {
+        "sentence": "If the total atom count steadily goes up while the application is running or does not return to baseline when the app is closed, there is a problem.",
+        "score": 0.4294
+      },
+      {
+        "sentence": "Local Atom Tables An application can use a local atom table to efficiently manage a large number of strings used only within the application.",
+        "score": 0.4217
+      },
+      {
+        "sentence": "These strings, and the associated atoms, are available only to the application that created the table.",
+        "score": 0.3158
+      },
+      {
+        "sentence": "An application requiring the same string in a number of structures can reduce memory usage by using a local atom table.",
+        "score": 0.4542
+      },
+      {
+        "sentence": "Rather than copying the string into each structure, the application can place the string in the atom table and include the resulting atom in the structures.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "In this way, a string appears only once in memory but can be used many times in the application.",
+        "score": 0.3142
+      },
+      {
+        "sentence": "To perform a search, an application need only place the search string in the atom table and compare the resulting atom with the atoms in the relevant structures.",
+        "score": 0.318
+      },
+      {
+        "sentence": "Comparing atoms is typically faster than comparing strings.",
+        "score": 0.3469
+      },
+      {
+        "sentence": "Atom tables are implemented as hash tables.",
+        "score": 0.3398
+      },
+      {
+        "sentence": "However, you can change the number of buckets used by calling the InitAtomTable function.",
+        "score": 0.3931
+      },
+      {
+        "sentence": "If the application calls InitAtomTable, however, it must do so before calling any other atom-management functions.",
+        "score": 0.5786
+      },
+      {
+        "sentence": "Atom Types Applications can create two types of atoms: string atoms and integer atoms.",
+        "score": 0.3542
+      },
+      {
+        "sentence": "The values of integer atoms and string atoms do not overlap, so both types of atoms can be used in the same block of code.",
+        "score": 0.4143
+      },
+      {
+        "sentence": "Several functions accept either strings or atoms as parameters.",
+        "score": 0.3698
+      },
+      {
+        "sentence": "When passing an atom to these functions, an application can use the MAKEINTATOM macro to convert the atom into a form that can be used by the function.",
+        "score": 0.4672
+      },
+      {
+        "sentence": "The following sections describe atom types.",
+        "score": 0.3428
+      },
+      {
+        "sentence": "String Atoms When applications pass null-terminated strings to the GlobalAddAtom, AddAtom, GlobalFindAtom, and FindAtom functions, they receive string atoms (16-bit integers) in return.",
+        "score": 0.4978
+      },
+      {
+        "sentence": "Also, the entire string must match in a search operation; no substring matching is performed. - The string associated with a string atom can be no more than 255 bytes in size.",
+        "score": 0.3316
+      },
+      {
+        "sentence": "This limitation applies to all atom functions. - A reference count is associated with each atom name.",
+        "score": 0.3492
+      },
+      {
+        "sentence": "The count is incremented each time the atom name is added to the table and decremented each time the atom name is deleted from it.",
+        "score": 0.3164
+      },
+      {
+        "sentence": "When the reference count for an atom name equals zero, the system removes the atom and the atom name from the table.",
+        "score": 0.3177
+      },
+      {
+        "sentence": "Integer Atoms Integer atoms differ from string atoms in the following ways: - The values of integer atoms are in the range 0x0001 through 0xBFFF (MAXINTATOM– 1). - The string representation of an integer atom is #dddd, where the values represented by dddd are decimal digits.",
+        "score": 0.3801
+      },
+      {
+        "sentence": "Leading zeros are ignored. - There is no reference count or storage overhead associated with an integer atom.",
+        "score": 0.3857
+      },
+      {
+        "sentence": "Atom Creation and Usage Count An application creates a local atom by calling the AddAtom function; it creates a global atom by calling the GlobalAddAtom function.",
+        "score": 0.4867
+      },
+      {
+        "sentence": "Both functions require a pointer to a string.",
+        "score": 0.4051
+      },
+      {
+        "sentence": "The system searches the appropriate atom table for the string and returns the corresponding atom to the application.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "In the case of a string atom, if the string already resides in the atom table, the system increments the reference count for the string during this process.",
+        "score": 0.4003
+      },
+      {
+        "sentence": "Repeated calls to add the same atom name return the same atom.",
+        "score": 0.3846
+      },
+      {
+        "sentence": "If the atom name does not exist in the table when AddAtom is called, the atom name is added to the table and a new atom is returned.",
+        "score": 0.4364
+      },
+      {
+        "sentence": "If it is a string atom, its reference count is also set to one.",
+        "score": 0.3359
+      },
+      {
+        "sentence": "An application should call the DeleteAtom function when it no longer needs to use a local atom; it should call the GlobalDeleteAtom function when it no longer needs a global atom.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "In the case of a string atom, either of these functions reduces the reference count of the corresponding atom by one.",
+        "score": 0.3469
+      },
+      {
+        "sentence": "When the reference count reaches zero, the system deletes the atom name from the table.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "The atom name of a string atom remains in the global atom table as long as its reference count is greater than zero, even after the application that placed it in the table terminates.",
+        "score": 0.4101
+      },
+      {
+        "sentence": "A local atom table is destroyed when the associated application terminates, regardless of the reference counts of the atoms in the table.",
+        "score": 0.4555
+      },
+      {
+        "sentence": "Atom-Table Queries An application can determine whether a particular string is already in an atom table by using the FindAtom or GlobalFindAtom function.",
+        "score": 0.3777
+      },
+      {
+        "sentence": "These functions search an atom table for the specified string and, if the string is there, return the corresponding atom.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "An application can use the GetAtomName or GlobalGetAtomName function to retrieve an atom-name string from an atom table, provided the application has the atom corresponding to the string being sought.",
+        "score": 0.4024
+      },
+      {
+        "sentence": "Both functions copy the atom-name string of the specified atom to a buffer and return the length of the string that was copied.",
+        "score": 0.4417
+      },
+      {
+        "sentence": "GetAtomName retrieves an atom-name string from a local atom table, and GlobalGetAtomName retrieves an atom-name string from the global atom table.",
+        "score": 0.3896
+      },
+      {
+        "sentence": "Atom String Formats The AddAtom, GlobalAddAtom, FindAtom, and GlobalFindAtom functions take a pointer to a null-terminated string.",
+        "score": 0.538
+      },
+      {
+        "sentence": "An application can specify this pointer in one of the following ways. | String format | Description | |---|---| | #dddd | An integer specified as a decimal string.",
+        "score": 0.4228
+      },
+      {
+        "sentence": "Used to create or find an integer atom. | | string atom name | A string atom name.",
+        "score": 0.3706
+      },
+      {
+        "sentence": "Used to add a string atom name to an atom table and receive an atom in return. |",
+        "score": 0.3655
+      }
+    ]
+  }
+}

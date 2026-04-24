@@ -1,0 +1,2273 @@
+{
+  "original_txt": "FortiGuard Labs Threat Research\nFortiGuard Labs Threat Research Report\nAffected platforms: Microsoft Windows\nImpacted parties: Windows Users\nImpact: Obtain sensitive data from the victim's device and deliver additional malware\nSeverity level: Critical\nAs we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect. The FortiGuard Labs team has identified yet another spear phishing campaign, this one targeting aviation companies. In this campaign, a malicious link that distributes an AsyncRAT payload is sent to aviation companies with a well-crafted message. AsyncRAT, an open-source remote administration tool, is used to steal credentials and other sensitive data. It also includes the capability to upload and download files on the compromised machine. This blog highlights the various stages of this spear phishing campaign and its newly adapted techniques.\nThe infection cycle begins with phishing emails sent to aviation companies that contain malicious links disguised as pdf attachments. The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered. The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader. The loader hollows and injects the final payload, AsyncRAT, into the victim process (RegSvcs.exe). AsyncRAT, also known as RevengeRAT, connects to its C2 server, takes control of the compromised machine, and introduces additional payload. I will now dive into each of these steps in a bit more detail.\nSpear phishing is a highly targeted attack resulting from extensive research on targeted users and their organizations conducted by threat actors. The phishing emails observed in this campaign were sent to multiple aviation companies. They all appear to be coming from the federal aviation authority using a spoofed sender address that matches with a “foreign operators affairs” email address for enquiries/approvals. The email goes through the extra step of having a signature and a logo to impersonate a federal authority. Also, the content is carefully crafted to create a sense of urgency by making it to look like a Reporting of Safety Incident (ROSI) from Air Traffic Control. In addition, the email contains malicious Google Drive links disguised as a pdf attachment. Most of the emails in this campaign contain the strings ROSI, AOP, Incident Report, as well as the attachment name “ROSI-AOP Incident Report Details, <date>”.pdf.\n(See Mitre ATT&CK technique – Spearphishing Link.)\nAs of the time of writing this blog, these emails had not been flagged as phishing or suspicious by any of the VirusTotal engines.\nThe IP address “192.145.239.18” is used to send all the emails in this campaign. This IP address is also associated with Snip3 Crypter, an aviation-themed campaign seen in April and May of 2021. A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.\nWhen you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site. This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.\nThe VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”. This payload is encoded using Server.URLEncode() and obfuscated to evade detection. Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload. After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe. If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed. It’s a trusted developer utility used to speed up the process of creating .NET applications. Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.)\nIn the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.\nOnce the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory. All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection. In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).\nWhen Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder. The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.)\nAfter achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application. The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes). The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.\nThe projFUD.dll, available in VirusTotal, is the RAT loader DLL in use. We observed that a few bytes of the file have been tweaked to avoid hash-based detection. The description and copyright mentions “VLC MEDIA PLAYER”. However, the file is not signed.\nAlthough the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different. It is likely to have come from a different author.\nAfter loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).\nThe .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process. RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload. RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.)\nCreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed. While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory. This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.\nNext, it allocates space for the payload using VirtualAllocEx, with size set to the payload length and page protection to PAGE_EXECUTE_READWRITE (0x40). It then injects the payload into the allocated space using WriteProcessMemory. The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.\nAfter successfully injecting and executing the AsyncRAT payload, the loader exits.\nAsyncRAT then takes command and control of the infected machine via a C2 server. As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection. It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.\nAsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed. Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis. In this case, the RAT retrieves the manufacturer via the WMI query “Select * from Win32 ComputerSystem” and looks for the strings \"VMware\" and \"VirtualBox”. It also checks for disk space because sandboxes and virtual machines typically have limited disk space. In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows. Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.)\nThe payload also includes a security software discovery technique. This technique is used to determine which security products are present on the compromised machine to shape the follow-on behaviors. Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.)\nwmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName”\nOnce the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.)\nThis RAT hosts resources and additional payloads on Pastebin, an online content hosting service. In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.)\nThe AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below. It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.\nTo maintain its foothold, it installs a scheduled task if the payload is running as an administrator. The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution. If the payload isn’t running as an administrator, it will add an entry to the Registry Run keys, causing the program to run every time the user logs in. (See Mitre ATT&CK technique – Persistence.)\nKeylogging is the most prevalent type of input capture, and it’s used to steal credentials. This is done by intercepting the user’s keystrokes using Hooking API callbacks. This technique works by hooking into the Windows native API functions intended for processing keystroke data, and the callback function is invoked every time the user types something. (See Mitre ATT&CK technique – Input Capture: Keylogging.)\nAfter successfully compromising the victim’s machine, the AsyncRAT payload connects to the RAT C2 server located at “franco.ddns.net” on port 2455 (79.134.225.18:2455). Since 2019, IP 79.134.225.18 has been linked to AsyncRAT / RevengeRAT, NanoCore, and BotNet attacks. It is associated with the ISP provider “ The PRIVACYFIRST Project”, which runs multiple VPN services and supports the TOR project.\nThe C2 domain “franco.ddns.net” used in this campaign is just few weeks old, hence the associated spike.\nThe campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same. But this one doesn’t use PowerShell script. Instead, it employs a new technique to compile and execute inline C# code contained in an XML. This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks. In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are. Learn more about Mitre Att&CK and how to test your defenses.\nFortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow:\nThe C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.\nThe VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”. The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.\nThe FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR. The Fortinet AntiVirus engine is a part of each of those solutions as well. As a result, customers who have these products with up-to-date protections are protected.\nFortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.\nFortinet’s Phishing Simulation Service, FortiPhish, can also be used to proactively test the susceptibility of your organization to these kinds of phishing attacks.\nT1566.002: Phishing: Spearphishing Link\nT1059.005: Command and Scripting Interpreter: Visual Basic\nT1027: Obfuscated Files\nT1127.001: Trusted Developer Utilities Proxy Execution: MSBuild\nT1218.009: Signed Binary Proxy Execution: Regsvcs\nT1055.012: Process Injection: Process Hollowing\nT1547.001: Registry Run Keys / Startup Folder\nT1056.001: Input Capture: Keylogging\nT1053.002: Scheduled Task\nT1041: Exfiltration Over C2 Channel\nT1518.001: Security Software Discovery\nT1497: Virtualization/Sandbox Evasion\n34646a93538a34c871e04a368c97637d1b7d1d4507bf210afd9349a61b25b35e\nef4b52c8f2c844b76534f583171d03a87cc195b0c3ae32754df0c01177792432\n04e93767d16a3e6ca68e45fea23434a9c9ed363c3f0d28b9653f74bbf405ef65\nVBS\nadf94da54bc49abc6fdb2a36523eb726f26dacd5598a0fdc64e61b8d500edad8\n34914c4af84888552bd7ef74d9a691918013766719881a042723001ef96f554c\nc16e5de09a78886dc972d26aeb0e9fe760b855eb157c7df308fad2116b860ef7\n65d3ff89602db4294fa2f585c472e566a3d72d2065e6bc4f493b02a3b08393ba\n4c6f832a85fbcf17308ab923b066577de859571a2743e99bf249398e19a00fb8\n0b56c16a28482cc0af81b93aff36d02610e30a8d65d7ea1ccd73f8242effbada\n9dd8a6725b9c881311501b79770e4f1c9aee2c3b42f59f7694d48b67939eede5\n59aafb3dd9c6cdb95ff662299e1faf3efb01d5ef8479dbbb8032b4b9cb3c3d91\na54f4ee320b21c1cfde3358a25131476127b9fb1fd5cad9fd03fa2be1f4fd0e2\n9297b0db717beea397aacf15e7ef081faf3b9e430002a1c1b4e150e56fb940f9\nGood.xml\nE7D60A25BF1D80C144919F5F112594793A12A8176F2000BD890E331234A26814\n8938838db8d16708692e80d170e0d8dc1522531e5a5ab5ae878a27a147780f44\nb45470aa79cc7acab448a65252c3c7ee840ce6d0e78c40ad2c6bc261a912d393\nf9bc8699f18b93cdb4b076dbf6f4baf2befd8c72eb26cefc28086f02a607f2f6\n.NET Loader\nB0DC46B5FC849DA9CC7A3FC4D8AA5EA8745D7E50869AC689BB956AAB3079EEB9\n814f21f8c2befba504e592e3396be7454f93013939325cc7fbad5c38f022b395\nAsyncRAT\n5344E8B1EF4939A3C9F84921B284DD6E0B98B2CF524D678116BEF6E58DC4A6C3\nPDB\nE:\\Hard Drives\\Local Disk (C)\\WIN 10 [ October Update ] FILES\\Sparta Project #Hope\\projFUD\\projFUD\\obj\\Debug\\projFUD.pdb\nMalicious IPs\n79.134.225.18 (C2)\n192.145.239.18\nLearn more about Fortinet’s FortiGuard Labs threat research and intelligence organization and the FortiGuard Security Subscriptions and Services portfolio.\nLearn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program. Learn more about FortiGuard Labs global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.",
+  "sanitized_txt": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect. The FortiGuard Labs team has identified yet another spear phishing campaign, this one targeting aviation companies. In this campaign, a malicious link that distributes an AsyncRAT payload is sent to aviation companies with a well-crafted message. AsyncRAT, an open-source remote administration tool, is used to steal credentials and other sensitive data. It also includes the capability to upload and download files on the compromised machine. This blog highlights the various stages of this spear phishing campaign and its newly adapted techniques.\nThe infection cycle begins with phishing emails sent to aviation companies that contain malicious links disguised as pdf attachments. The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered. The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader. The loader hollows and injects the final payload, AsyncRAT, into the victim process (RegSvcs.exe). AsyncRAT, also known as RevengeRAT, connects to its C2 server, takes control of the compromised machine, and introduces additional payload. I will now dive into each of these steps in a bit more detail.\nSpear phishing is a highly targeted attack resulting from extensive research on targeted users and their organizations conducted by threat actors. The phishing emails observed in this campaign were sent to multiple aviation companies. They all appear to be coming from the federal aviation authority using a spoofed sender address that matches with a “foreign operators affairs” email address for enquiries/approvals. The email goes through the extra step of having a signature and a logo to impersonate a federal authority. Also, the content is carefully crafted to create a sense of urgency by making it to look like a Reporting of Safety Incident (ROSI) from Air Traffic Control. In addition, the email contains malicious Google Drive links disguised as a pdf attachment. Most of the emails in this campaign contain the strings ROSI, AOP, Incident Report, as well as the attachment name “ROSI-AOP Incident Report Details, <date>”.pdf.\n(See Mitre ATT&CK technique – Spearphishing Link.) As of the time of writing this blog, these emails had not been flagged as phishing or suspicious by any of the VirusTotal engines.\nThe IP address “192.145.239.18” is used to send all the emails in this campaign. This IP address is also associated with Snip3 Crypter, an aviation-themed campaign seen in April and May of 2021. A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.\nWhen you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site. This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.\nThe VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”. This payload is encoded using Server.URLEncode() and obfuscated to evade detection. Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload. After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe. If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed. It’s a trusted developer utility used to speed up the process of creating .NET applications. Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.\nOnce the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory. All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection. In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).\nWhen Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder. The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application. The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes). The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.\nThe projFUD.dll, available in VirusTotal, is the RAT loader DLL in use. We observed that a few bytes of the file have been tweaked to avoid hash-based detection. The description and copyright mentions “VLC MEDIA PLAYER”. However, the file is not signed.\nAlthough the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different. It is likely to have come from a different author.\nAfter loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).\nThe .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process. RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload. RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed. While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory. This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.\nNext, it allocates space for the payload using VirtualAllocEx, with size set to the payload length and page protection to PAGE_EXECUTE_READWRITE (0x40). It then injects the payload into the allocated space using WriteProcessMemory. The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.\nAfter successfully injecting and executing the AsyncRAT payload, the loader exits.\nAsyncRAT then takes command and control of the infected machine via a C2 server. As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection. It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.\nAsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed. Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis. In this case, the RAT retrieves the manufacturer via the WMI query “Select * from Win32 ComputerSystem” and looks for the strings \"VMware\" and \"VirtualBox”. It also checks for disk space because sandboxes and virtual machines typically have limited disk space. In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows. Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique. This technique is used to determine which security products are present on the compromised machine to shape the follow-on behaviors. Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service. In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below. It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.\nTo maintain its foothold, it installs a scheduled task if the payload is running as an administrator. The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution. If the payload isn’t running as an administrator, it will add an entry to the Registry Run keys, causing the program to run every time the user logs in. (See Mitre ATT&CK technique – Persistence.) Keylogging is the most prevalent type of input capture, and it’s used to steal credentials. This is done by intercepting the user’s keystrokes using Hooking API callbacks. This technique works by hooking into the Windows native API functions intended for processing keystroke data, and the callback function is invoked every time the user types something. (See Mitre ATT&CK technique – Input Capture: Keylogging.) After successfully compromising the victim’s machine, the AsyncRAT payload connects to the RAT C2 server located at “franco.ddns.net” on port 2455 (79.134.225.18:2455). Since 2019, IP 79.134.225.18 has been linked to AsyncRAT / RevengeRAT, NanoCore, and BotNet attacks. It is associated with the ISP provider “ The PRIVACYFIRST Project”, which runs multiple VPN services and supports the TOR project.\nThe C2 domain “franco.ddns.net” used in this campaign is just few weeks old, hence the associated spike.\nThe campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same. But this one doesn’t use PowerShell script. Instead, it employs a new technique to compile and execute inline C# code contained in an XML. This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks. In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are. Learn more about Mitre Att&CK and how to test your defenses.\nFortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow:\nThe C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.\nThe VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”. The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.\nThe FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR. The Fortinet AntiVirus engine is a part of each of those solutions as well. As a result, customers who have these products with up-to-date protections are protected.\nFortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.\nFortinet’s Phishing Simulation Service, FortiPhish, can also be used to proactively test the susceptibility of your organization to these kinds of phishing attacks.\nLearn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program. Learn more about FortiGuard Labs global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.",
+  "ID_list": [
+    "T1027",
+    "T1041",
+    "T1053.002",
+    "T1055.012",
+    "T1056.001",
+    "T1059.005",
+    "T1127.001",
+    "T1218.009",
+    "T1497",
+    "T1518.001",
+    "T1547.001",
+    "T1566.002"
+  ],
+  "Name_list": [
+    "Command and Control",
+    "Discovery",
+    "Execution",
+    "Hooking",
+    "Input Capture",
+    "Persistence",
+    "Phishing",
+    "Process Hollowing",
+    "Security Software Discovery",
+    "Software Discovery",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1027": [
+      {
+        "sentence": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect.",
+        "score": 0.4291
+      },
+      {
+        "sentence": "The FortiGuard Labs team has identified yet another spear phishing campaign, this one targeting aviation companies.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "In this campaign, a malicious link that distributes an AsyncRAT payload is sent to aviation companies with a well-crafted message.",
+        "score": 0.4402
+      },
+      {
+        "sentence": "AsyncRAT, an open-source remote administration tool, is used to steal credentials and other sensitive data.",
+        "score": 0.3416
+      },
+      {
+        "sentence": "This blog highlights the various stages of this spear phishing campaign and its newly adapted techniques.",
+        "score": 0.3732
+      },
+      {
+        "sentence": "The infection cycle begins with phishing emails sent to aviation companies that contain malicious links disguised as pdf attachments.",
+        "score": 0.3863
+      },
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.5919
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.6835
+      },
+      {
+        "sentence": "The loader hollows and injects the final payload, AsyncRAT, into the victim process (RegSvcs.exe).",
+        "score": 0.4263
+      },
+      {
+        "sentence": "AsyncRAT, also known as RevengeRAT, connects to its C2 server, takes control of the compromised machine, and introduces additional payload.",
+        "score": 0.3958
+      },
+      {
+        "sentence": "I will now dive into each of these steps in a bit more detail.",
+        "score": 0.4789
+      },
+      {
+        "sentence": "Spear phishing is a highly targeted attack resulting from extensive research on targeted users and their organizations conducted by threat actors.",
+        "score": 0.3699
+      },
+      {
+        "sentence": "The phishing emails observed in this campaign were sent to multiple aviation companies.",
+        "score": 0.3087
+      },
+      {
+        "sentence": "Also, the content is carefully crafted to create a sense of urgency by making it to look like a Reporting of Safety Incident (ROSI) from Air Traffic Control.",
+        "score": 0.4026
+      },
+      {
+        "sentence": "In addition, the email contains malicious Google Drive links disguised as a pdf attachment.",
+        "score": 0.4722
+      },
+      {
+        "sentence": "Most of the emails in this campaign contain the strings ROSI, AOP, Incident Report, as well as the attachment name “ROSI-AOP Incident Report Details, <date>”.pdf. (See Mitre ATT&CK technique – Spearphishing Link.) As of the time of writing this blog, these emails had not been flagged as phishing or suspicious by any of the VirusTotal engines.",
+        "score": 0.4415
+      },
+      {
+        "sentence": "The IP address “192.145.239.18” is used to send all the emails in this campaign.",
+        "score": 0.3124
+      },
+      {
+        "sentence": "This IP address is also associated with Snip3 Crypter, an aviation-themed campaign seen in April and May of 2021.",
+        "score": 0.3622
+      },
+      {
+        "sentence": "A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.",
+        "score": 0.3629
+      },
+      {
+        "sentence": "When you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site.",
+        "score": 0.5247
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.4918
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.6489
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.7984
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.6012
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.5936
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.5299
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.4909
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.7366
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.6611
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.7412
+      },
+      {
+        "sentence": "In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).",
+        "score": 0.5225
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.4685
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.5745
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.5729
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.4465
+      },
+      {
+        "sentence": "The projFUD.dll, available in VirusTotal, is the RAT loader DLL in use.",
+        "score": 0.5593
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.7574
+      },
+      {
+        "sentence": "The description and copyright mentions “VLC MEDIA PLAYER”.",
+        "score": 0.4215
+      },
+      {
+        "sentence": "However, the file is not signed.",
+        "score": 0.5367
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.6058
+      },
+      {
+        "sentence": "It is likely to have come from a different author.",
+        "score": 0.4676
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.5399
+      },
+      {
+        "sentence": "The .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process.",
+        "score": 0.4876
+      },
+      {
+        "sentence": "RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload.",
+        "score": 0.5572
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.4244
+      },
+      {
+        "sentence": "While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory.",
+        "score": 0.5872
+      },
+      {
+        "sentence": "This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.",
+        "score": 0.5067
+      },
+      {
+        "sentence": "Next, it allocates space for the payload using VirtualAllocEx, with size set to the payload length and page protection to PAGE_EXECUTE_READWRITE (0x40).",
+        "score": 0.4755
+      },
+      {
+        "sentence": "It then injects the payload into the allocated space using WriteProcessMemory.",
+        "score": 0.4016
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.4271
+      },
+      {
+        "sentence": "After successfully injecting and executing the AsyncRAT payload, the loader exits.",
+        "score": 0.428
+      },
+      {
+        "sentence": "As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.5204
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.711
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.6139
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.4321
+      },
+      {
+        "sentence": "Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique.",
+        "score": 0.3713
+      },
+      {
+        "sentence": "Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.4167
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.6655
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.3997
+      },
+      {
+        "sentence": "The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution.",
+        "score": 0.3842
+      },
+      {
+        "sentence": "Since 2019, IP 79.134.225.18 has been linked to AsyncRAT / RevengeRAT, NanoCore, and BotNet attacks.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "The C2 domain “franco.ddns.net” used in this campaign is just few weeks old, hence the associated spike.",
+        "score": 0.3552
+      },
+      {
+        "sentence": "The campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same.",
+        "score": 0.4882
+      },
+      {
+        "sentence": "But this one doesn’t use PowerShell script.",
+        "score": 0.4613
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.6684
+      },
+      {
+        "sentence": "This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks.",
+        "score": 0.5899
+      },
+      {
+        "sentence": "In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are.",
+        "score": 0.4039
+      },
+      {
+        "sentence": "Learn more about Mitre Att&CK and how to test your defenses.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "Fortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow: The C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.",
+        "score": 0.4083
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.5862
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.5263
+      },
+      {
+        "sentence": "The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR.",
+        "score": 0.3208
+      },
+      {
+        "sentence": "The Fortinet AntiVirus engine is a part of each of those solutions as well.",
+        "score": 0.3731
+      },
+      {
+        "sentence": "As a result, customers who have these products with up-to-date protections are protected.",
+        "score": 0.4283
+      },
+      {
+        "sentence": "FortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.",
+        "score": 0.4905
+      },
+      {
+        "sentence": "Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program.",
+        "score": 0.3833
+      },
+      {
+        "sentence": "Learn more about FortiGuard Labs global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.",
+        "score": 0.3896
+      }
+    ],
+    "T1041": [
+      {
+        "sentence": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect.",
+        "score": 0.3679
+      },
+      {
+        "sentence": "AsyncRAT, an open-source remote administration tool, is used to steal credentials and other sensitive data.",
+        "score": 0.4249
+      },
+      {
+        "sentence": "It also includes the capability to upload and download files on the compromised machine.",
+        "score": 0.4799
+      },
+      {
+        "sentence": "AsyncRAT, also known as RevengeRAT, connects to its C2 server, takes control of the compromised machine, and introduces additional payload.",
+        "score": 0.5499
+      },
+      {
+        "sentence": "I will now dive into each of these steps in a bit more detail.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "The IP address “192.145.239.18” is used to send all the emails in this campaign.",
+        "score": 0.4403
+      },
+      {
+        "sentence": "A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.",
+        "score": 0.337
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.3165
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.3696
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.4325
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.345
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.3346
+      },
+      {
+        "sentence": "It then injects the payload into the allocated space using WriteProcessMemory.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.3485
+      },
+      {
+        "sentence": "AsyncRAT then takes command and control of the infected machine via a C2 server.",
+        "score": 0.6574
+      },
+      {
+        "sentence": "As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection.",
+        "score": 0.497
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.3089
+      },
+      {
+        "sentence": "Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service.",
+        "score": 0.5702
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.4729
+      },
+      {
+        "sentence": "This technique works by hooking into the Windows native API functions intended for processing keystroke data, and the callback function is invoked every time the user types something. (See Mitre ATT&CK technique – Input Capture: Keylogging.) After successfully compromising the victim’s machine, the AsyncRAT payload connects to the RAT C2 server located at “franco.ddns.net” on port 2455 (79.134.225.18:2455).",
+        "score": 0.3921
+      },
+      {
+        "sentence": "The C2 domain “franco.ddns.net” used in this campaign is just few weeks old, hence the associated spike.",
+        "score": 0.4856
+      },
+      {
+        "sentence": "The campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same.",
+        "score": 0.4969
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.3369
+      },
+      {
+        "sentence": "FortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.",
+        "score": 0.4626
+      }
+    ],
+    "T1056.001": [
+      {
+        "sentence": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "AsyncRAT, an open-source remote administration tool, is used to steal credentials and other sensitive data.",
+        "score": 0.3797
+      },
+      {
+        "sentence": "It also includes the capability to upload and download files on the compromised machine.",
+        "score": 0.3557
+      },
+      {
+        "sentence": "AsyncRAT, also known as RevengeRAT, connects to its C2 server, takes control of the compromised machine, and introduces additional payload.",
+        "score": 0.3285
+      },
+      {
+        "sentence": "A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.308
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.3115
+      },
+      {
+        "sentence": "As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection.",
+        "score": 0.3714
+      },
+      {
+        "sentence": "In this case, the RAT retrieves the manufacturer via the WMI query “Select * from Win32 ComputerSystem” and looks for the strings \"VMware\" and \"VirtualBox”.",
+        "score": 0.3716
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique.",
+        "score": 0.3358
+      },
+      {
+        "sentence": "Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service.",
+        "score": 0.3454
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "If the payload isn’t running as an administrator, it will add an entry to the Registry Run keys, causing the program to run every time the user logs in. (See Mitre ATT&CK technique – Persistence.) Keylogging is the most prevalent type of input capture, and it’s used to steal credentials.",
+        "score": 0.686
+      },
+      {
+        "sentence": "This is done by intercepting the user’s keystrokes using Hooking API callbacks.",
+        "score": 0.8308
+      },
+      {
+        "sentence": "This technique works by hooking into the Windows native API functions intended for processing keystroke data, and the callback function is invoked every time the user types something. (See Mitre ATT&CK technique – Input Capture: Keylogging.) After successfully compromising the victim’s machine, the AsyncRAT payload connects to the RAT C2 server located at “franco.ddns.net” on port 2455 (79.134.225.18:2455).",
+        "score": 0.8477
+      }
+    ],
+    "T1059.005": [
+      {
+        "sentence": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect.",
+        "score": 0.392
+      },
+      {
+        "sentence": "In this campaign, a malicious link that distributes an AsyncRAT payload is sent to aviation companies with a well-crafted message.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "AsyncRAT, an open-source remote administration tool, is used to steal credentials and other sensitive data.",
+        "score": 0.3445
+      },
+      {
+        "sentence": "It also includes the capability to upload and download files on the compromised machine.",
+        "score": 0.3142
+      },
+      {
+        "sentence": "This blog highlights the various stages of this spear phishing campaign and its newly adapted techniques.",
+        "score": 0.328
+      },
+      {
+        "sentence": "The infection cycle begins with phishing emails sent to aviation companies that contain malicious links disguised as pdf attachments.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.5324
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.5739
+      },
+      {
+        "sentence": "The loader hollows and injects the final payload, AsyncRAT, into the victim process (RegSvcs.exe).",
+        "score": 0.3063
+      },
+      {
+        "sentence": "AsyncRAT, also known as RevengeRAT, connects to its C2 server, takes control of the compromised machine, and introduces additional payload.",
+        "score": 0.3928
+      },
+      {
+        "sentence": "I will now dive into each of these steps in a bit more detail.",
+        "score": 0.4215
+      },
+      {
+        "sentence": "Spear phishing is a highly targeted attack resulting from extensive research on targeted users and their organizations conducted by threat actors.",
+        "score": 0.3434
+      },
+      {
+        "sentence": "In addition, the email contains malicious Google Drive links disguised as a pdf attachment.",
+        "score": 0.3484
+      },
+      {
+        "sentence": "Most of the emails in this campaign contain the strings ROSI, AOP, Incident Report, as well as the attachment name “ROSI-AOP Incident Report Details, <date>”.pdf. (See Mitre ATT&CK technique – Spearphishing Link.) As of the time of writing this blog, these emails had not been flagged as phishing or suspicious by any of the VirusTotal engines.",
+        "score": 0.3899
+      },
+      {
+        "sentence": "The IP address “192.145.239.18” is used to send all the emails in this campaign.",
+        "score": 0.3179
+      },
+      {
+        "sentence": "This IP address is also associated with Snip3 Crypter, an aviation-themed campaign seen in April and May of 2021.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.",
+        "score": 0.3587
+      },
+      {
+        "sentence": "When you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site.",
+        "score": 0.4715
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.4231
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.5691
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.5573
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.4518
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.5095
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.5792
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.5178
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.5111
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.5698
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.4879
+      },
+      {
+        "sentence": "In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).",
+        "score": 0.5789
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.5164
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.5644
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.5079
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.4258
+      },
+      {
+        "sentence": "The projFUD.dll, available in VirusTotal, is the RAT loader DLL in use.",
+        "score": 0.4157
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.4705
+      },
+      {
+        "sentence": "The description and copyright mentions “VLC MEDIA PLAYER”.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "However, the file is not signed.",
+        "score": 0.3555
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.4266
+      },
+      {
+        "sentence": "It is likely to have come from a different author.",
+        "score": 0.4007
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.4948
+      },
+      {
+        "sentence": "The .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload.",
+        "score": 0.4488
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.4458
+      },
+      {
+        "sentence": "While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory.",
+        "score": 0.4412
+      },
+      {
+        "sentence": "This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.",
+        "score": 0.4036
+      },
+      {
+        "sentence": "Next, it allocates space for the payload using VirtualAllocEx, with size set to the payload length and page protection to PAGE_EXECUTE_READWRITE (0x40).",
+        "score": 0.4409
+      },
+      {
+        "sentence": "It then injects the payload into the allocated space using WriteProcessMemory.",
+        "score": 0.3608
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.4738
+      },
+      {
+        "sentence": "After successfully injecting and executing the AsyncRAT payload, the loader exits.",
+        "score": 0.3829
+      },
+      {
+        "sentence": "AsyncRAT then takes command and control of the infected machine via a C2 server.",
+        "score": 0.3034
+      },
+      {
+        "sentence": "As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.4613
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.476
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.4696
+      },
+      {
+        "sentence": "In this case, the RAT retrieves the manufacturer via the WMI query “Select * from Win32 ComputerSystem” and looks for the strings \"VMware\" and \"VirtualBox”.",
+        "score": 0.316
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique.",
+        "score": 0.338
+      },
+      {
+        "sentence": "Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service.",
+        "score": 0.3741
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.4699
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.456
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.4095
+      },
+      {
+        "sentence": "The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "If the payload isn’t running as an administrator, it will add an entry to the Registry Run keys, causing the program to run every time the user logs in. (See Mitre ATT&CK technique – Persistence.) Keylogging is the most prevalent type of input capture, and it’s used to steal credentials.",
+        "score": 0.4019
+      },
+      {
+        "sentence": "This is done by intercepting the user’s keystrokes using Hooking API callbacks.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "This technique works by hooking into the Windows native API functions intended for processing keystroke data, and the callback function is invoked every time the user types something. (See Mitre ATT&CK technique – Input Capture: Keylogging.) After successfully compromising the victim’s machine, the AsyncRAT payload connects to the RAT C2 server located at “franco.ddns.net” on port 2455 (79.134.225.18:2455).",
+        "score": 0.42
+      },
+      {
+        "sentence": "Since 2019, IP 79.134.225.18 has been linked to AsyncRAT / RevengeRAT, NanoCore, and BotNet attacks.",
+        "score": 0.3127
+      },
+      {
+        "sentence": "The C2 domain “franco.ddns.net” used in this campaign is just few weeks old, hence the associated spike.",
+        "score": 0.3027
+      },
+      {
+        "sentence": "The campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same.",
+        "score": 0.3642
+      },
+      {
+        "sentence": "But this one doesn’t use PowerShell script.",
+        "score": 0.5356
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.6106
+      },
+      {
+        "sentence": "This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks.",
+        "score": 0.4231
+      },
+      {
+        "sentence": "In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are.",
+        "score": 0.3368
+      },
+      {
+        "sentence": "Learn more about Mitre Att&CK and how to test your defenses.",
+        "score": 0.3224
+      },
+      {
+        "sentence": "Fortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow: The C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.",
+        "score": 0.3841
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.6129
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.3998
+      },
+      {
+        "sentence": "As a result, customers who have these products with up-to-date protections are protected.",
+        "score": 0.3221
+      },
+      {
+        "sentence": "FortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.",
+        "score": 0.3652
+      },
+      {
+        "sentence": "Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program.",
+        "score": 0.3496
+      },
+      {
+        "sentence": "Learn more about FortiGuard Labs global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.",
+        "score": 0.3007
+      }
+    ],
+    "T1497": [
+      {
+        "sentence": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect.",
+        "score": 0.3585
+      },
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.3214
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.3585
+      },
+      {
+        "sentence": "Spear phishing is a highly targeted attack resulting from extensive research on targeted users and their organizations conducted by threat actors.",
+        "score": 0.3457
+      },
+      {
+        "sentence": "Most of the emails in this campaign contain the strings ROSI, AOP, Incident Report, as well as the attachment name “ROSI-AOP Incident Report Details, <date>”.pdf. (See Mitre ATT&CK technique – Spearphishing Link.) As of the time of writing this blog, these emails had not been flagged as phishing or suspicious by any of the VirusTotal engines.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "When you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site.",
+        "score": 0.3017
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.3643
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.3713
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.3176
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.4916
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.4931
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.3529
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.4065
+      },
+      {
+        "sentence": "In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).",
+        "score": 0.3843
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.4106
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.3903
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.3999
+      },
+      {
+        "sentence": "The projFUD.dll, available in VirusTotal, is the RAT loader DLL in use.",
+        "score": 0.4153
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.5297
+      },
+      {
+        "sentence": "The description and copyright mentions “VLC MEDIA PLAYER”.",
+        "score": 0.3533
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.3519
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.4219
+      },
+      {
+        "sentence": "The .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process.",
+        "score": 0.313
+      },
+      {
+        "sentence": "RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload.",
+        "score": 0.4146
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.4512
+      },
+      {
+        "sentence": "While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory.",
+        "score": 0.4431
+      },
+      {
+        "sentence": "This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.",
+        "score": 0.446
+      },
+      {
+        "sentence": "As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection.",
+        "score": 0.3398
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.4009
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.6012
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.7236
+      },
+      {
+        "sentence": "In this case, the RAT retrieves the manufacturer via the WMI query “Select * from Win32 ComputerSystem” and looks for the strings \"VMware\" and \"VirtualBox”.",
+        "score": 0.5855
+      },
+      {
+        "sentence": "It also checks for disk space because sandboxes and virtual machines typically have limited disk space.",
+        "score": 0.5753
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.7091
+      },
+      {
+        "sentence": "Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique.",
+        "score": 0.7739
+      },
+      {
+        "sentence": "This technique is used to determine which security products are present on the compromised machine to shape the follow-on behaviors.",
+        "score": 0.6175
+      },
+      {
+        "sentence": "Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service.",
+        "score": 0.6118
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.3543
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.5371
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.337
+      },
+      {
+        "sentence": "The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution.",
+        "score": 0.3859
+      },
+      {
+        "sentence": "This technique works by hooking into the Windows native API functions intended for processing keystroke data, and the callback function is invoked every time the user types something. (See Mitre ATT&CK technique – Input Capture: Keylogging.) After successfully compromising the victim’s machine, the AsyncRAT payload connects to the RAT C2 server located at “franco.ddns.net” on port 2455 (79.134.225.18:2455).",
+        "score": 0.3193
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.365
+      },
+      {
+        "sentence": "This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks.",
+        "score": 0.4019
+      },
+      {
+        "sentence": "In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are.",
+        "score": 0.484
+      },
+      {
+        "sentence": "Learn more about Mitre Att&CK and how to test your defenses.",
+        "score": 0.3862
+      },
+      {
+        "sentence": "Fortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow: The C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.",
+        "score": 0.4335
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.4698
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.4556
+      },
+      {
+        "sentence": "The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR.",
+        "score": 0.447
+      },
+      {
+        "sentence": "The Fortinet AntiVirus engine is a part of each of those solutions as well.",
+        "score": 0.5262
+      },
+      {
+        "sentence": "As a result, customers who have these products with up-to-date protections are protected.",
+        "score": 0.3574
+      },
+      {
+        "sentence": "FortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "Learn more about FortiGuard Labs global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.",
+        "score": 0.4045
+      }
+    ],
+    "T1518.001": [
+      {
+        "sentence": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect.",
+        "score": 0.3921
+      },
+      {
+        "sentence": "The infection cycle begins with phishing emails sent to aviation companies that contain malicious links disguised as pdf attachments.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "Spear phishing is a highly targeted attack resulting from extensive research on targeted users and their organizations conducted by threat actors.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "Most of the emails in this campaign contain the strings ROSI, AOP, Incident Report, as well as the attachment name “ROSI-AOP Incident Report Details, <date>”.pdf. (See Mitre ATT&CK technique – Spearphishing Link.) As of the time of writing this blog, these emails had not been flagged as phishing or suspicious by any of the VirusTotal engines.",
+        "score": 0.3744
+      },
+      {
+        "sentence": "A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.3656
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.3887
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.3034
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.3927
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.5238
+      },
+      {
+        "sentence": "In this case, the RAT retrieves the manufacturer via the WMI query “Select * from Win32 ComputerSystem” and looks for the strings \"VMware\" and \"VirtualBox”.",
+        "score": 0.5674
+      },
+      {
+        "sentence": "It also checks for disk space because sandboxes and virtual machines typically have limited disk space.",
+        "score": 0.4375
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.563
+      },
+      {
+        "sentence": "Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique.",
+        "score": 0.7272
+      },
+      {
+        "sentence": "This technique is used to determine which security products are present on the compromised machine to shape the follow-on behaviors.",
+        "score": 0.8162
+      },
+      {
+        "sentence": "Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service.",
+        "score": 0.6585
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are.",
+        "score": 0.5169
+      },
+      {
+        "sentence": "Learn more about Mitre Att&CK and how to test your defenses.",
+        "score": 0.3961
+      },
+      {
+        "sentence": "Fortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow: The C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.",
+        "score": 0.4615
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.3576
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.4346
+      },
+      {
+        "sentence": "The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR.",
+        "score": 0.5911
+      },
+      {
+        "sentence": "The Fortinet AntiVirus engine is a part of each of those solutions as well.",
+        "score": 0.6227
+      },
+      {
+        "sentence": "As a result, customers who have these products with up-to-date protections are protected.",
+        "score": 0.4492
+      },
+      {
+        "sentence": "Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program.",
+        "score": 0.363
+      },
+      {
+        "sentence": "Learn more about FortiGuard Labs global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.",
+        "score": 0.4415
+      }
+    ],
+    "T1566.002": [
+      {
+        "sentence": "FortiGuard Labs Threat Research FortiGuard Labs Threat Research Report Affected platforms: Microsoft Windows Impacted parties: Windows Users Impact: Obtain sensitive data from the victim's device and deliver additional malware Severity level: Critical As we are all aware, spear phishing attacks are far more successful than untargeted ones and are most difficult to detect.",
+        "score": 0.6449
+      },
+      {
+        "sentence": "The FortiGuard Labs team has identified yet another spear phishing campaign, this one targeting aviation companies.",
+        "score": 0.6005
+      },
+      {
+        "sentence": "In this campaign, a malicious link that distributes an AsyncRAT payload is sent to aviation companies with a well-crafted message.",
+        "score": 0.8026
+      },
+      {
+        "sentence": "This blog highlights the various stages of this spear phishing campaign and its newly adapted techniques.",
+        "score": 0.6492
+      },
+      {
+        "sentence": "The infection cycle begins with phishing emails sent to aviation companies that contain malicious links disguised as pdf attachments.",
+        "score": 0.8376
+      },
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.7459
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.4625
+      },
+      {
+        "sentence": "AsyncRAT, also known as RevengeRAT, connects to its C2 server, takes control of the compromised machine, and introduces additional payload.",
+        "score": 0.3272
+      },
+      {
+        "sentence": "I will now dive into each of these steps in a bit more detail.",
+        "score": 0.3991
+      },
+      {
+        "sentence": "Spear phishing is a highly targeted attack resulting from extensive research on targeted users and their organizations conducted by threat actors.",
+        "score": 0.5502
+      },
+      {
+        "sentence": "The phishing emails observed in this campaign were sent to multiple aviation companies.",
+        "score": 0.6715
+      },
+      {
+        "sentence": "They all appear to be coming from the federal aviation authority using a spoofed sender address that matches with a “foreign operators affairs” email address for enquiries/approvals.",
+        "score": 0.487
+      },
+      {
+        "sentence": "The email goes through the extra step of having a signature and a logo to impersonate a federal authority.",
+        "score": 0.5239
+      },
+      {
+        "sentence": "Also, the content is carefully crafted to create a sense of urgency by making it to look like a Reporting of Safety Incident (ROSI) from Air Traffic Control.",
+        "score": 0.412
+      },
+      {
+        "sentence": "In addition, the email contains malicious Google Drive links disguised as a pdf attachment.",
+        "score": 0.7605
+      },
+      {
+        "sentence": "Most of the emails in this campaign contain the strings ROSI, AOP, Incident Report, as well as the attachment name “ROSI-AOP Incident Report Details, <date>”.pdf. (See Mitre ATT&CK technique – Spearphishing Link.) As of the time of writing this blog, these emails had not been flagged as phishing or suspicious by any of the VirusTotal engines.",
+        "score": 0.7607
+      },
+      {
+        "sentence": "The IP address “192.145.239.18” is used to send all the emails in this campaign.",
+        "score": 0.4227
+      },
+      {
+        "sentence": "A three-month review of its telemetry reveals a spike in the last few weeks, with the majority of visitors coming from the UAE, Canada, Argentina, Djibouti, and Fiji.",
+        "score": 0.3841
+      },
+      {
+        "sentence": "When you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site.",
+        "score": 0.7484
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.4732
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.4235
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.3985
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.3528
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.4208
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.3134
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.4028
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.3975
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.3525
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.3065
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.4033
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.3652
+      },
+      {
+        "sentence": "However, the file is not signed.",
+        "score": 0.3806
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.4069
+      },
+      {
+        "sentence": "It is likely to have come from a different author.",
+        "score": 0.45
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.3342
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.4538
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.3097
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.3725
+      },
+      {
+        "sentence": "This technique is used to determine which security products are present on the compromised machine to shape the follow-on behaviors.",
+        "score": 0.3186
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.4239
+      },
+      {
+        "sentence": "The campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "But this one doesn’t use PowerShell script.",
+        "score": 0.4264
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.4027
+      },
+      {
+        "sentence": "This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks.",
+        "score": 0.4079
+      },
+      {
+        "sentence": "In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are.",
+        "score": 0.3741
+      },
+      {
+        "sentence": "Learn more about Mitre Att&CK and how to test your defenses.",
+        "score": 0.3026
+      },
+      {
+        "sentence": "Fortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow: The C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.",
+        "score": 0.4239
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.3685
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.3359
+      },
+      {
+        "sentence": "The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR.",
+        "score": 0.3316
+      },
+      {
+        "sentence": "The Fortinet AntiVirus engine is a part of each of those solutions as well.",
+        "score": 0.3486
+      },
+      {
+        "sentence": "As a result, customers who have these products with up-to-date protections are protected.",
+        "score": 0.5155
+      },
+      {
+        "sentence": "Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "Learn more about FortiGuard Labs global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.",
+        "score": 0.3568
+      }
+    ],
+    "T1127.001": [
+      {
+        "sentence": "In this campaign, a malicious link that distributes an AsyncRAT payload is sent to aviation companies with a well-crafted message.",
+        "score": 0.3385
+      },
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.4749
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.5678
+      },
+      {
+        "sentence": "The loader hollows and injects the final payload, AsyncRAT, into the victim process (RegSvcs.exe).",
+        "score": 0.506
+      },
+      {
+        "sentence": "I will now dive into each of these steps in a bit more detail.",
+        "score": 0.3351
+      },
+      {
+        "sentence": "Also, the content is carefully crafted to create a sense of urgency by making it to look like a Reporting of Safety Incident (ROSI) from Air Traffic Control.",
+        "score": 0.3019
+      },
+      {
+        "sentence": "In addition, the email contains malicious Google Drive links disguised as a pdf attachment.",
+        "score": 0.3034
+      },
+      {
+        "sentence": "This IP address is also associated with Snip3 Crypter, an aviation-themed campaign seen in April and May of 2021.",
+        "score": 0.3028
+      },
+      {
+        "sentence": "When you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site.",
+        "score": 0.4203
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.4398
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.4587
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.5028
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.4506
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.6663
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.5476
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.6056
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.6391
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.5838
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.4562
+      },
+      {
+        "sentence": "In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).",
+        "score": 0.753
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.5018
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.5446
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.5047
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.4468
+      },
+      {
+        "sentence": "The projFUD.dll, available in VirusTotal, is the RAT loader DLL in use.",
+        "score": 0.5658
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.4496
+      },
+      {
+        "sentence": "The description and copyright mentions “VLC MEDIA PLAYER”.",
+        "score": 0.3452
+      },
+      {
+        "sentence": "However, the file is not signed.",
+        "score": 0.3422
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.4559
+      },
+      {
+        "sentence": "It is likely to have come from a different author.",
+        "score": 0.3344
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.5543
+      },
+      {
+        "sentence": "The .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process.",
+        "score": 0.5829
+      },
+      {
+        "sentence": "RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload.",
+        "score": 0.5371
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.4893
+      },
+      {
+        "sentence": "While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory.",
+        "score": 0.472
+      },
+      {
+        "sentence": "This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.",
+        "score": 0.4747
+      },
+      {
+        "sentence": "Next, it allocates space for the payload using VirtualAllocEx, with size set to the payload length and page protection to PAGE_EXECUTE_READWRITE (0x40).",
+        "score": 0.3968
+      },
+      {
+        "sentence": "It then injects the payload into the allocated space using WriteProcessMemory.",
+        "score": 0.3926
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.4739
+      },
+      {
+        "sentence": "After successfully injecting and executing the AsyncRAT payload, the loader exits.",
+        "score": 0.4675
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.459
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.4137
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.465
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.3897
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.402
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.4909
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.4901
+      },
+      {
+        "sentence": "The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "The campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same.",
+        "score": 0.3545
+      },
+      {
+        "sentence": "But this one doesn’t use PowerShell script.",
+        "score": 0.4754
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.602
+      },
+      {
+        "sentence": "This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks.",
+        "score": 0.3848
+      },
+      {
+        "sentence": "Fortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow: The C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.",
+        "score": 0.3386
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.4384
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.4225
+      },
+      {
+        "sentence": "FortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.",
+        "score": 0.4492
+      }
+    ],
+    "T1053.002": [
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.3454
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.4156
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.386
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.3327
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.3371
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.3759
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.4145
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.363
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.3934
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.4366
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.3823
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.3198
+      },
+      {
+        "sentence": "In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).",
+        "score": 0.3657
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.433
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.5127
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.3627
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.3425
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "The description and copyright mentions “VLC MEDIA PLAYER”.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.3863
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.3237
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.3471
+      },
+      {
+        "sentence": "While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory.",
+        "score": 0.3056
+      },
+      {
+        "sentence": "This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.",
+        "score": 0.3025
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.3416
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.508
+      },
+      {
+        "sentence": "In this case, the RAT retrieves the manufacturer via the WMI query “Select * from Win32 ComputerSystem” and looks for the strings \"VMware\" and \"VirtualBox”.",
+        "score": 0.3345
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.3066
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.7854
+      },
+      {
+        "sentence": "The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution.",
+        "score": 0.5261
+      },
+      {
+        "sentence": "If the payload isn’t running as an administrator, it will add an entry to the Registry Run keys, causing the program to run every time the user logs in. (See Mitre ATT&CK technique – Persistence.) Keylogging is the most prevalent type of input capture, and it’s used to steal credentials.",
+        "score": 0.3136
+      },
+      {
+        "sentence": "The C2 domain “franco.ddns.net” used in this campaign is just few weeks old, hence the associated spike.",
+        "score": 0.3001
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.3882
+      },
+      {
+        "sentence": "This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks.",
+        "score": 0.31
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.3458
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.3194
+      }
+    ],
+    "T1055.012": [
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.3559
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.4449
+      },
+      {
+        "sentence": "The loader hollows and injects the final payload, AsyncRAT, into the victim process (RegSvcs.exe).",
+        "score": 0.7945
+      },
+      {
+        "sentence": "I will now dive into each of these steps in a bit more detail.",
+        "score": 0.4273
+      },
+      {
+        "sentence": "Also, the content is carefully crafted to create a sense of urgency by making it to look like a Reporting of Safety Incident (ROSI) from Air Traffic Control.",
+        "score": 0.3171
+      },
+      {
+        "sentence": "This IP address is also associated with Snip3 Crypter, an aviation-themed campaign seen in April and May of 2021.",
+        "score": 0.3015
+      },
+      {
+        "sentence": "When you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site.",
+        "score": 0.3249
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.3414
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.5227
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.4699
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.4626
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.3561
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.3041
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.5482
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.506
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.4623
+      },
+      {
+        "sentence": "In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).",
+        "score": 0.604
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.3115
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.5448
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.6727
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.6659
+      },
+      {
+        "sentence": "The projFUD.dll, available in VirusTotal, is the RAT loader DLL in use.",
+        "score": 0.4507
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.4611
+      },
+      {
+        "sentence": "The description and copyright mentions “VLC MEDIA PLAYER”.",
+        "score": 0.3904
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.4318
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.6909
+      },
+      {
+        "sentence": "The .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process.",
+        "score": 0.82
+      },
+      {
+        "sentence": "RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload.",
+        "score": 0.3581
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.7876
+      },
+      {
+        "sentence": "While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory.",
+        "score": 0.8123
+      },
+      {
+        "sentence": "This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.",
+        "score": 0.6886
+      },
+      {
+        "sentence": "Next, it allocates space for the payload using VirtualAllocEx, with size set to the payload length and page protection to PAGE_EXECUTE_READWRITE (0x40).",
+        "score": 0.7546
+      },
+      {
+        "sentence": "It then injects the payload into the allocated space using WriteProcessMemory.",
+        "score": 0.7604
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.7338
+      },
+      {
+        "sentence": "After successfully injecting and executing the AsyncRAT payload, the loader exits.",
+        "score": 0.6593
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.3792
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.4614
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.5299
+      },
+      {
+        "sentence": "It also checks for disk space because sandboxes and virtual machines typically have limited disk space.",
+        "score": 0.3182
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.4572
+      },
+      {
+        "sentence": "Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique.",
+        "score": 0.4923
+      },
+      {
+        "sentence": "Below is the command-line query used to enumerate the installed antivirus products. (See Mitre ATT&CK technique – Defense Evasion.) wmic.exe /Namespace:\\\\root\\SecurityCenter2 Path AntiVirusProduct Get displayName” Once the information is gathered, it then sends the following information about the infected machine to the C2 RAT server. (See Mitre ATT&CK technique – Exfiltration Over C2 Channel.) This RAT hosts resources and additional payloads on Pastebin, an online content hosting service.",
+        "score": 0.3343
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.5101
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.5293
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "This is done by intercepting the user’s keystrokes using Hooking API callbacks.",
+        "score": 0.3174
+      },
+      {
+        "sentence": "This technique works by hooking into the Windows native API functions intended for processing keystroke data, and the callback function is invoked every time the user types something. (See Mitre ATT&CK technique – Input Capture: Keylogging.) After successfully compromising the victim’s machine, the AsyncRAT payload connects to the RAT C2 server located at “franco.ddns.net” on port 2455 (79.134.225.18:2455).",
+        "score": 0.3932
+      },
+      {
+        "sentence": "Since 2019, IP 79.134.225.18 has been linked to AsyncRAT / RevengeRAT, NanoCore, and BotNet attacks.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "The campaign analyzed in this blog is likely part of Snip3 Crypter-as-a-service, as some of the artifacts (i.e., Sender IP, C2 IP address, and the final payload) are the same.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "But this one doesn’t use PowerShell script.",
+        "score": 0.3702
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.582
+      },
+      {
+        "sentence": "This is yet another example of threat actors quickly adopting and evolving techniques to create more sophisticated and difficult-to-detect attacks.",
+        "score": 0.3658
+      },
+      {
+        "sentence": "In addition to the Fortinet protections below, I would encourage you to review the Mitre attack techniques and measure how effective your current security controls are.",
+        "score": 0.3302
+      },
+      {
+        "sentence": "Fortinet customers are already protected from this RAT variant with FortiGuard’s Web Filtering and AntiVirus services, as follow: The C2 IP address is rated as \"Malicious\" by the FortiGuard Web Filtering service.",
+        "score": 0.3659
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.3695
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.4044
+      },
+      {
+        "sentence": "The Fortinet AntiVirus engine is a part of each of those solutions as well.",
+        "score": 0.306
+      },
+      {
+        "sentence": "FortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.",
+        "score": 0.6593
+      },
+      {
+        "sentence": "Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or about the Fortinet Network Security Expert program, Security Academy program, and Veterans program.",
+        "score": 0.3534
+      }
+    ],
+    "T1218.009": [
+      {
+        "sentence": "The link in the email directs the user to VB Script hosting sites, from which the initial payload (.vbs) is delivered.",
+        "score": 0.3068
+      },
+      {
+        "sentence": "The .vbs script then drops the second stage payload, an xml file containing inline C# .NET assembly code that acts as a RAT loader.",
+        "score": 0.465
+      },
+      {
+        "sentence": "The loader hollows and injects the final payload, AsyncRAT, into the victim process (RegSvcs.exe).",
+        "score": 0.483
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.3037
+      },
+      {
+        "sentence": "The VB script “ROSI-AOP Incident Report Details,May 31st.vbs“ contains the next stage payload, “Good.xml”.",
+        "score": 0.3645
+      },
+      {
+        "sentence": "This payload is encoded using Server.URLEncode() and obfuscated to evade detection.",
+        "score": 0.4206
+      },
+      {
+        "sentence": "Antonin Foller's VBS decode function from PSTRUH Software (http://www.motobit.com) is used to decrypt the payload.",
+        "score": 0.3282
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.4169
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.402
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.3949
+      },
+      {
+        "sentence": "Because it is a trusted utility, adversaries use the tool in an effort to evade detection. (See Mitre ATT&CK technique – Trusted Developer Utilities Proxy Execution: MSBuild.) In the script below, the payload bytes are first substituted for de-obfuscation, then decoded before being written to the Temp directory.",
+        "score": 0.5284
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.4591
+      },
+      {
+        "sentence": "All the files are saved as an ASCII byte array, and the RAT payload is also reversed to avoid signature-based detection.",
+        "score": 0.4239
+      },
+      {
+        "sentence": "In this case, the adversary employs the method discovered by Casey Smith to compile and execute the inline C# code using the native Windows binary (MSBuild.exe).",
+        "score": 0.5585
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.3681
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.4864
+      },
+      {
+        "sentence": "The .NET RAT loader is contained in the byte array sBytes in the XML, which is loaded using the method Thread.GetDomain.Load(sBytes).",
+        "score": 0.4839
+      },
+      {
+        "sentence": "The method Thread.GetDomain() returns the domain of the current running thread, while Load() dynamically loads the byte array assembly into the current application domain during runtime.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "The projFUD.dll, available in VirusTotal, is the RAT loader DLL in use.",
+        "score": 0.5589
+      },
+      {
+        "sentence": "We observed that a few bytes of the file have been tweaked to avoid hash-based detection.",
+        "score": 0.3762
+      },
+      {
+        "sentence": "The description and copyright mentions “VLC MEDIA PLAYER”.",
+        "score": 0.3002
+      },
+      {
+        "sentence": "However, the file is not signed.",
+        "score": 0.3468
+      },
+      {
+        "sentence": "Although the namespace and class name “ProjFUD.PA” in the loader is same as the one reported in the snip3 campaign, the PDB string retrieved from the loader DLL is different.",
+        "score": 0.4036
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.669
+      },
+      {
+        "sentence": "The .NET assembly ProjFUD.dll acts as a RunPE loader as it hollows and injects the final payload, AsyncRAT, into the victim process.",
+        "score": 0.5416
+      },
+      {
+        "sentence": "RegSvcs, a Windows command line utility for registering .NET Component Object Model (COM) assemblies, is used by an adversary to hide malicious payload.",
+        "score": 0.7123
+      },
+      {
+        "sentence": "RegSvcs.exe is digitally signed by Microsoft and can be used to help bypass a process-based whitelist. (See Mitre ATT&CK technique – Process Injection: Process Hollowing.) CreateProcessA is first called to create the victim process RegSvcs.exe in a suspended state, with flags set to 134217732U (0x08000004) (i.e., CREATE_SUSPENDED and CREATE_NO_WINDOW are set to True.) This process does not run until the thread is resumed.",
+        "score": 0.5589
+      },
+      {
+        "sentence": "While the process is suspended, ZwUnmapViewOfSection is called to unmap (hollow) the code from the process memory.",
+        "score": 0.4348
+      },
+      {
+        "sentence": "This routine unmaps the entire view of the section containing buffer1 from the virtual address space, and on successful return, the virtual-address region occupied by the view is no longer reserved and available to map other views.",
+        "score": 0.4185
+      },
+      {
+        "sentence": "Next, it allocates space for the payload using VirtualAllocEx, with size set to the payload length and page protection to PAGE_EXECUTE_READWRITE (0x40).",
+        "score": 0.35
+      },
+      {
+        "sentence": "It then injects the payload into the allocated space using WriteProcessMemory.",
+        "score": 0.3344
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.4115
+      },
+      {
+        "sentence": "After successfully injecting and executing the AsyncRAT payload, the loader exits.",
+        "score": 0.438
+      },
+      {
+        "sentence": "As mentioned in the introduction, the AsyncRAT is an open-source Remote Access Tool (RAT) designed to remotely monitor and control other computers through a secure encrypted connection.",
+        "score": 0.3115
+      },
+      {
+        "sentence": "It performs a variety of malicious tasks, and if you want to learn more about it, the GitHub AsyncRAT-C-Sharp link can help.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "AsyncRAT uses the following anti-analysis techniques to protect itself from being analyzed.",
+        "score": 0.4467
+      },
+      {
+        "sentence": "Because Virtual Machines (VM) and sandboxes are used for the majority of dynamic analysis within the security community, many payloads, including this one, will try to evade dynamic analysis.",
+        "score": 0.4209
+      },
+      {
+        "sentence": "In addition, it loads the module SbieDll to detect “sandboxie”, an open-source sandboxing program for Windows.",
+        "score": 0.4185
+      },
+      {
+        "sentence": "Lastly, it checks if the process is being debugged by calling IsDebuggerPresent(). (See Mitre ATT&CK technique – Virtualization/Sandbox Evasion.) The payload also includes a security software discovery technique.",
+        "score": 0.318
+      },
+      {
+        "sentence": "In the below code snippet, the RAT client grabs an IP address from the pastebin website using WebClient.DownloadString() and connects to it. (See Mitre ATT&CK technique – Acquire Infrastructure: Web Services.) The AsyncRAT client requests that the RAT server send additional plugins and payloads, which are then executed in memory, as shown below.",
+        "score": 0.3607
+      },
+      {
+        "sentence": "It employs a fileless technique to execute payloads in memory, reducing its footprint and avoiding traditional defenses that scan the disk for malicious files.",
+        "score": 0.4268
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.3515
+      },
+      {
+        "sentence": "The reason it checks for admin rights is that a task created with elevated privileges does not prompt the user to allow execution.",
+        "score": 0.3758
+      },
+      {
+        "sentence": "If the payload isn’t running as an administrator, it will add an entry to the Registry Run keys, causing the program to run every time the user logs in. (See Mitre ATT&CK technique – Persistence.) Keylogging is the most prevalent type of input capture, and it’s used to steal credentials.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "But this one doesn’t use PowerShell script.",
+        "score": 0.3732
+      },
+      {
+        "sentence": "Instead, it employs a new technique to compile and execute inline C# code contained in an XML.",
+        "score": 0.4313
+      },
+      {
+        "sentence": "The VB script is detected as “VBS/Agent.OQP!tr” and the xml file is detected as “VBS/Agent.AK!tr”.",
+        "score": 0.3526
+      },
+      {
+        "sentence": "The RAT loader and the final payload AsyncRAT are detected as “W32/PossibleThreat”.",
+        "score": 0.3833
+      },
+      {
+        "sentence": "FortiEDR’s real time protection detects process hollowing during execution and blocks the RAT from connecting to the C2 server.",
+        "score": 0.4118
+      }
+    ],
+    "T1547.001": [
+      {
+        "sentence": "When you click on the link (the fake pdf attachment), the user’s default browser is launched and directed to a VB Script hosting site.",
+        "score": 0.3083
+      },
+      {
+        "sentence": "This site delivers the initial payload (.vbs), which, once executed, drops subsequent payloads and establishes persistence.",
+        "score": 0.3137
+      },
+      {
+        "sentence": "After decryption, \"Good.xml\" is written to the victim's Temp directory, where it is launched using MSBuild.exe.",
+        "score": 0.4695
+      },
+      {
+        "sentence": "If you’re not aware of this executable, it is present on all Windows machines with the .NET framework installed.",
+        "score": 0.3357
+      },
+      {
+        "sentence": "It’s a trusted developer utility used to speed up the process of creating .NET applications.",
+        "score": 0.3107
+      },
+      {
+        "sentence": "Once the VB script executes successfully, the Good.xml file, which contains inline C# assembly code, a loader dll, and the RAT payload, is dropped into the victim's Temp directory.",
+        "score": 0.3775
+      },
+      {
+        "sentence": "When Good.xml is executed, it first creates a file named \"Startups32.vbs\" in the system startup folder.",
+        "score": 0.6229
+      },
+      {
+        "sentence": "The .vbs script contains code to run Good.xml file after each system startup to maintain persistence. (See Mitre ATT&CK technique – Persistence.) After achieving persistence, Good.xml retrieves the .NET Rat loader from the byte array and loads it into the current application.",
+        "score": 0.4485
+      },
+      {
+        "sentence": "After loading the .NET loader assembly, the function Execute() of the class ProjFUD.PA is called with the arguments payloadBytes (RAT payload) and RegSvcs.exe (the path of the victim process).",
+        "score": 0.3384
+      },
+      {
+        "sentence": "The thread context is changed to point to the payload by calling SetThreadContext and the thread is finally resumed via ResumeThread to execute the payload AsyncRAT.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "To maintain its foothold, it installs a scheduled task if the payload is running as an administrator.",
+        "score": 0.3479
+      },
+      {
+        "sentence": "If the payload isn’t running as an administrator, it will add an entry to the Registry Run keys, causing the program to run every time the user logs in. (See Mitre ATT&CK technique – Persistence.) Keylogging is the most prevalent type of input capture, and it’s used to steal credentials.",
+        "score": 0.6931
+      }
+    ]
+  }
+}

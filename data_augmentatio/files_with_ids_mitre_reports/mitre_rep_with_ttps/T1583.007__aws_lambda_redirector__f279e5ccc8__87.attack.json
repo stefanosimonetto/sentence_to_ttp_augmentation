@@ -1,0 +1,127 @@
+{
+  "original_txt": "AWS Lambda Redirector\nA while back I posted a tweet showing AWS Lambda being used as a redirector for Cobalt Strike. At the time I planned on blogging just how this was done, but recently while migrating this blog to a more suitable stack I found the drafted post that was never finished. So I thought I’d dust it off, check that the theory still worked, and make it available… better late than never!\nFor those who haven’t encountered AWS Lambda, this technology allows you to deploy event driven code to AWS. The deployed function will be invoked by a trigger, for example a file being uploaded to S3, an SMS message being received, or in our case, a HTTP request being received by a gateway. All of the underlying infrastructure responsible for executing this code is abstracted away, meaning that we don’t have to deal with configuring an EC2 instance or rolling out Terraform scripts to get things to work. Lambda also supports development in a number of languages, from Python and NodeJS, to everyone’s favourite… GoLang, which is what we will be using today.\nTo make life a bit easier we will be leveraging the Serverless framework, which provides a nice environment for developing and deploying our Serverless applications and is something that we’re a fan of at MDSec.\nServerless - AWS Lambda\nA number of resources have discussed AWS Lambda and we have seen just how useful this technology has been over the years. Having used this service for a while, one of its benefits is just how quick it is to spin up a new HTTP endpoint, with the added benefit of never having to see the underlying infrastructure or touch a HTTP server configuration.\nTo demonstrate just how we can deploy an AWS Lambda function, let’s create a simple HTTP “hello world” API in Go using the Serverless framework:\nbrew install serverless\nserverless create -t aws-go\nmake\nsls deploy\nOnce executed, you will see something like this:\nProvided with our endpoint URL, we can make our HTTP request to ensure that our newly created Lambda function is responding as we expect:\nNow we can see just how easy it is to create a new Lambda function using the Serverless framework, let’s move on to constructing a service which can front our C2 communication.\nServerless Proxy\nBefore we begin to proxy requests via AWS Lambda, there is a caveat that we need to consider and will affect our ability to push our C2 traffic via the service. In the above “hello-world” example you may have seen the /dev/\npart of the path. In Lambda, this identifies the stage of deployment, such as dev, production, pre-prod etc. We can name this anything we want, but we cannot remove it, meaning that our Cobalt Strike malleable profile will need to consider this when making HTTP requests.\nSo just how will our infrastructure look once deployed. Well the 2 components we will be leveraging are AWS Lambda, and AWS API Gateway, which will mean that our deployment would have the following structure:\nTo make this available, we will construct our serverless.yml\nto be as follows:\nservice: lambda-front\nframeworkVersion: \">=1.28.0 <2.0.0\"\nprovider:\nname: aws\nruntime: go1.x\nstage: api\nregion: eu-west-2\nenvironment:\nTEAMSERVER: ${opt:teamserver}\npackage:\nexclude:\n- ./**\ninclude:\n- ./bin/**\nfunctions:\nredirector:\nhandler: bin/redirector\nevents:\n- http:\npath: /{all+}\nmethod: any\nThere are a few things worthy of noting here. First is the HTTP path /{all+}\n. This allows our Go Lambda function to be called upon any URL being called on our HTTP endpoint. Also note the ${opt:teamserver}\nvalue for our TEAMSERVER\nvariable. This allows us to specify a value on the command line during deployment to make life a bit easier.\nNow we have a way to bring up our infrastructure, let’s move onto some code.\nServerless Code\nLet’s begin by updating the “hello-world” template code to meet our requirements.\nTo proxy the request from beacon to our team server, we will take the following steps:\n- Read the full HTTP request sent from beacon, including any POST body.\n- Build a new HTTP request ensuring that the received HTTP headers, query string parameters, and POST body (if included) received from the beacon are used.\n- Forward the HTTP request to the team server and receive the response.\n- Add the received HTTP headers and body (if included) to the API gateway response.\n- Forward the response to beacon.\nOnce created, our code will look like this:\nOnce our code is compiled via make\n, we can then do a sls deploy\nto push our function to AWS.\nServerless Malleable Profile\nOnce we have our code deployed, we need to configure Cobalt Strike to work with our endpoint. Now we could of course have gone with something like External-C2, but given that we are dealing with a simple HTTP relay with only a few minor tweaks required such as the stage path, we can just create a malleable profile to accommodate this. Specifically, we need to ensure that both our http-get\nand http-post\nblocks contain a uri\nparameter beginning with /[stage]/\n.\nFor example, we could set our GET requests to be sent using:\nhttp-get {\nset uri \"/api/abc\";\nclient {\nmetadata {\nbase64url;\nnetbios;\nbase64url;\nparameter \"auth\";\n}\n}\n...\nA simple minimal malleable profile which will work with our sample Lambda code would look like this:\nServerless in action\nOnce we have all of our components ready, we can test that everything works. For testing locally I normally use ngrok which will let me expose a local web server which is perfect for providing our Lambda function with an internal teamserver endpoint.\nTo spin up ngrok on MacOS, we just use:\nngrok http 443\nNote that ngrok rate limits for non-paying customers, so you’ll need to sleep 10\nany sessions to avoid your endpoint from being blocked.\nOnce we have our ngrok host, we will deploy our Serverless configuration using:\nsls deploy --teamserver d27658bf.ngrok.io\nNow all that remains is to fire our your listener pointing to your Lambda URL:\nThrow in a few other Lambda URL’s if you wish, it appears that fronting via Lambda URLs works perfectly fine:\nAnd then when the listener is started and with a beacon executed, we will be greeted with a session flowing through Lambda:",
+  "sanitized_txt": "AWS Lambda Redirector A while back I posted a tweet showing AWS Lambda being used as a redirector for Cobalt Strike. At the time I planned on blogging just how this was done, but recently while migrating this blog to a more suitable stack I found the drafted post that was never finished. So I thought I’d dust it off, check that the theory still worked, and make it available… better late than never!\nFor those who haven’t encountered AWS Lambda, this technology allows you to deploy event driven code to AWS. The deployed function will be invoked by a trigger, for example a file being uploaded to S3, an SMS message being received, or in our case, a HTTP request being received by a gateway. All of the underlying infrastructure responsible for executing this code is abstracted away, meaning that we don’t have to deal with configuring an EC2 instance or rolling out Terraform scripts to get things to work. Lambda also supports development in a number of languages, from Python and NodeJS, to everyone’s favourite… GoLang, which is what we will be using today.\nTo make life a bit easier we will be leveraging the Serverless framework, which provides a nice environment for developing and deploying our Serverless applications and is something that we’re a fan of at MDSec.\nServerless - AWS Lambda A number of resources have discussed AWS Lambda and we have seen just how useful this technology has been over the years. Having used this service for a while, one of its benefits is just how quick it is to spin up a new HTTP endpoint, with the added benefit of never having to see the underlying infrastructure or touch a HTTP server configuration.\nTo demonstrate just how we can deploy an AWS Lambda function, let’s create a simple HTTP “hello world” API in Go using the Serverless framework:\nbrew install serverless serverless create -t aws-go make sls deploy Once executed, you will see something like this:\nProvided with our endpoint URL, we can make our HTTP request to ensure that our newly created Lambda function is responding as we expect:\nNow we can see just how easy it is to create a new Lambda function using the Serverless framework, let’s move on to constructing a service which can front our C2 communication.\nServerless Proxy Before we begin to proxy requests via AWS Lambda, there is a caveat that we need to consider and will affect our ability to push our C2 traffic via the service. In the above “hello-world” example you may have seen the /dev/ part of the path. In Lambda, this identifies the stage of deployment, such as dev, production, pre-prod etc. We can name this anything we want, but we cannot remove it, meaning that our Cobalt Strike malleable profile will need to consider this when making HTTP requests.\nSo just how will our infrastructure look once deployed. Well the 2 components we will be leveraging are AWS Lambda, and AWS API Gateway, which will mean that our deployment would have the following structure:\nTo make this available, we will construct our serverless.yml to be as follows:\nservice: lambda-front frameworkVersion: \">=1.28.0 <2.0.0\" provider:\nname: aws runtime: go1.x stage: api region: eu-west-2 environment:\nTEAMSERVER: ${opt:teamserver} package:\nexclude:\n- ./** include:\n- ./bin/** functions:\nredirector:\nhandler: bin/redirector events:\n- http:\npath: /{all+} method: any There are a few things worthy of noting here. First is the HTTP path /{all+} . This allows our Go Lambda function to be called upon any URL being called on our HTTP endpoint. Also note the ${opt:teamserver} value for our TEAMSERVER variable. This allows us to specify a value on the command line during deployment to make life a bit easier.\nNow we have a way to bring up our infrastructure, let’s move onto some code.\nServerless Code Let’s begin by updating the “hello-world” template code to meet our requirements.\nTo proxy the request from beacon to our team server, we will take the following steps:\n- Read the full HTTP request sent from beacon, including any POST body.\n- Build a new HTTP request ensuring that the received HTTP headers, query string parameters, and POST body (if included) received from the beacon are used.\n- Forward the HTTP request to the team server and receive the response.\n- Add the received HTTP headers and body (if included) to the API gateway response.\n- Forward the response to beacon.\nOnce created, our code will look like this:\nOnce our code is compiled via make , we can then do a sls deploy to push our function to AWS.\nServerless Malleable Profile Once we have our code deployed, we need to configure Cobalt Strike to work with our endpoint. Now we could of course have gone with something like External-C2, but given that we are dealing with a simple HTTP relay with only a few minor tweaks required such as the stage path, we can just create a malleable profile to accommodate this. Specifically, we need to ensure that both our http-get and http-post blocks contain a uri parameter beginning with /[stage]/ .\nFor example, we could set our GET requests to be sent using:\nhttp-get { set uri \"/api/abc\";\nclient { metadata { base64url;\nnetbios;\nbase64url;\nparameter \"auth\";\n} } ...\nA simple minimal malleable profile which will work with our sample Lambda code would look like this:\nServerless in action Once we have all of our components ready, we can test that everything works. For testing locally I normally use ngrok which will let me expose a local web server which is perfect for providing our Lambda function with an internal teamserver endpoint.\nTo spin up ngrok on MacOS, we just use:\nngrok http 443 Note that ngrok rate limits for non-paying customers, so you’ll need to sleep 10 any sessions to avoid your endpoint from being blocked.\nOnce we have our ngrok host, we will deploy our Serverless configuration using:\nsls deploy --teamserver d27658bf.ngrok.io Now all that remains is to fire our your listener pointing to your Lambda URL:\nThrow in a few other Lambda URL’s if you wish, it appears that fronting via Lambda URLs works perfectly fine:\nAnd then when the listener is started and with a beacon executed, we will be greeted with a session flowing through Lambda:",
+  "ID_list": [
+    "T1583.007"
+  ],
+  "Name_list": [
+    "Proxy",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1583.007": [
+      {
+        "sentence": "AWS Lambda Redirector A while back I posted a tweet showing AWS Lambda being used as a redirector for Cobalt Strike.",
+        "score": 0.6708
+      },
+      {
+        "sentence": "At the time I planned on blogging just how this was done, but recently while migrating this blog to a more suitable stack I found the drafted post that was never finished.",
+        "score": 0.4236
+      },
+      {
+        "sentence": "So I thought I’d dust it off, check that the theory still worked, and make it available… better late than never!",
+        "score": 0.467
+      },
+      {
+        "sentence": "For those who haven’t encountered AWS Lambda, this technology allows you to deploy event driven code to AWS.",
+        "score": 0.6144
+      },
+      {
+        "sentence": "The deployed function will be invoked by a trigger, for example a file being uploaded to S3, an SMS message being received, or in our case, a HTTP request being received by a gateway.",
+        "score": 0.3371
+      },
+      {
+        "sentence": "All of the underlying infrastructure responsible for executing this code is abstracted away, meaning that we don’t have to deal with configuring an EC2 instance or rolling out Terraform scripts to get things to work.",
+        "score": 0.6038
+      },
+      {
+        "sentence": "Lambda also supports development in a number of languages, from Python and NodeJS, to everyone’s favourite… GoLang, which is what we will be using today.",
+        "score": 0.3768
+      },
+      {
+        "sentence": "To make life a bit easier we will be leveraging the Serverless framework, which provides a nice environment for developing and deploying our Serverless applications and is something that we’re a fan of at MDSec.",
+        "score": 0.5767
+      },
+      {
+        "sentence": "Serverless - AWS Lambda A number of resources have discussed AWS Lambda and we have seen just how useful this technology has been over the years.",
+        "score": 0.6846
+      },
+      {
+        "sentence": "Having used this service for a while, one of its benefits is just how quick it is to spin up a new HTTP endpoint, with the added benefit of never having to see the underlying infrastructure or touch a HTTP server configuration.",
+        "score": 0.6287
+      },
+      {
+        "sentence": "Serverless Proxy Before we begin to proxy requests via AWS Lambda, there is a caveat that we need to consider and will affect our ability to push our C2 traffic via the service.",
+        "score": 0.6679
+      },
+      {
+        "sentence": "In Lambda, this identifies the stage of deployment, such as dev, production, pre-prod etc.",
+        "score": 0.4607
+      },
+      {
+        "sentence": "We can name this anything we want, but we cannot remove it, meaning that our Cobalt Strike malleable profile will need to consider this when making HTTP requests.",
+        "score": 0.5131
+      },
+      {
+        "sentence": "So just how will our infrastructure look once deployed.",
+        "score": 0.4603
+      },
+      {
+        "sentence": "First is the HTTP path /{all+} .",
+        "score": 0.3925
+      },
+      {
+        "sentence": "This allows our Go Lambda function to be called upon any URL being called on our HTTP endpoint.",
+        "score": 0.5618
+      },
+      {
+        "sentence": "Also note the ${opt:teamserver} value for our TEAMSERVER variable.",
+        "score": 0.3517
+      },
+      {
+        "sentence": "Now we have a way to bring up our infrastructure, let’s move onto some code.",
+        "score": 0.4802
+      },
+      {
+        "sentence": "Serverless Code Let’s begin by updating the “hello-world” template code to meet our requirements.",
+        "score": 0.4905
+      },
+      {
+        "sentence": "Once created, our code will look like this: Once our code is compiled via make , we can then do a sls deploy to push our function to AWS.",
+        "score": 0.5479
+      },
+      {
+        "sentence": "Serverless Malleable Profile Once we have our code deployed, we need to configure Cobalt Strike to work with our endpoint.",
+        "score": 0.5563
+      },
+      {
+        "sentence": "Now we could of course have gone with something like External-C2, but given that we are dealing with a simple HTTP relay with only a few minor tweaks required such as the stage path, we can just create a malleable profile to accommodate this.",
+        "score": 0.6096
+      },
+      {
+        "sentence": "Specifically, we need to ensure that both our http-get and http-post blocks contain a uri parameter beginning with /[stage]/ .",
+        "score": 0.4395
+      },
+      {
+        "sentence": "For example, we could set our GET requests to be sent using: http-get { set uri \"/api/abc\"; client { metadata { base64url; netbios; base64url; parameter \"auth\"; } } ...",
+        "score": 0.4016
+      },
+      {
+        "sentence": "A simple minimal malleable profile which will work with our sample Lambda code would look like this: Serverless in action Once we have all of our components ready, we can test that everything works.",
+        "score": 0.5836
+      },
+      {
+        "sentence": "For testing locally I normally use ngrok which will let me expose a local web server which is perfect for providing our Lambda function with an internal teamserver endpoint.",
+        "score": 0.577
+      },
+      {
+        "sentence": "To spin up ngrok on MacOS, we just use: ngrok http 443 Note that ngrok rate limits for non-paying customers, so you’ll need to sleep 10 any sessions to avoid your endpoint from being blocked.",
+        "score": 0.4848
+      },
+      {
+        "sentence": "Once we have our ngrok host, we will deploy our Serverless configuration using: sls deploy --teamserver d27658bf.ngrok.io Now all that remains is to fire our your listener pointing to your Lambda URL: Throw in a few other Lambda URL’s if you wish, it appears that fronting via Lambda URLs works perfectly fine: And then when the listener is started and with a beacon executed, we will be greeted with a session flowing through Lambda:",
+        "score": 0.7279
+      }
+    ]
+  }
+}

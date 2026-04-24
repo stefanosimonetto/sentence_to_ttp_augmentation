@@ -1,0 +1,257 @@
+{
+  "original_txt": "The Advanced Threat Research team performs vulnerability research to help Intel Security lead the way in developing secure technology.\nIncreasingly, people around the world depend on technology for their daily activities. Making this technology trustworthy involves a deep understanding of how attacks work. By researching security vulnerabilities, the Advanced Threat Research (ATR) team in Intel Security discovers opportunities to drive toward more secure technology.\nLast updated: 2015-07-16\nThe examination of commercial malware developed by Hacking Team has revealed much to the security community. Of particular interest to platform security researchers at Intel's Advanced Threat Research team (ATR) is the presence of what appears to be a UEFI-based persistent infection mechanism. ATR has been researching vulnerabilities related to system firmware and working with a community of firmware developers and platform manufacturers to mitigate these threats. Others have also posted good information about this issue. Here, we will provide some preliminary analysis of the firmware threat.\nFinding a Persistent Rootkit\nThe trail begins with the mysterious file \"Z5WE1X64.fd\" which was attached to one of the leaked emails into \"Uefi_windows_persistent.zip\" compressed file.\nA deeper look into the binary reveals some string constants which point toward firmware image update for UEFI BIOS platforms:\nThis binary appears to be a firmware update image packed by InsydeH2O tools for UEFI firmware. These tools are applicable to many (though not all) common platforms. Inside the image, we (along with Nikolaj Schlej) found some unexpected sections:\nSome suspicious entries are \"Ntfs\", \"rkloader\" and a nameless UEFI application (highlighted above). The developers did not hide the real name of the modules, which has a hint about module functionality and enables detection.\nThe \"rkloader\" executable image name suggests a rootkit. In the same leaked archive we find the source code directory \"vector-edk\" which contains the code of a UEFI-based rootkit.\nMore than a PoC\nThe leaked source code goes beyond a research proof-of-concept, revealing a commercial rootkit platform called \"]HackingTeam[ UEFI Vector\" and using real attacks as a part of Hacking Team? RCS malware platform. According to the leaked code and emails, this hacking platform may have already been already sold to some HackingTeam customers. Some of the emails point to specific modes on which the persistent rootkit was tested.\nUpdating the SPI flash, where system firmware is usually stored, is usually accomplished either through physically attaching a programmer to the chip or through a signed update mechanism built into the firmware. One of the leaked emails contains a presentation (presumably for potential customers) that describes this:\nHere is screenshot of slide which describing infection way with phisical access to the target n machine:\nBoth \"agent\" and \"soldier\" are the names of trojan horse applications also found in the leaks. The rootkit reinstalls these applications automatically, from infected firmware. Another slide describes options to modify firmware:\nBased on the information we have reviewed so far, we have not identified any new vulnerability used to bypass SPI flash protections. Some of the leaked messages clearly discuss using physical access and a SPI programmer to program the infected image to the SPI flash. There is also mention of a USB image that installs the malware using a UEFI application. This application (which appears to have been ported from an old and modified version of chipsec) erases and re-programs the SPI flash image from software. This method should only work on a system that is not configured to protect writes to the SPI flash. This serious configuration issue has been discussed by multiple researchers over many years, including A Tale of One Software Bypass of Windows 8 Secure Boot, Defeating Signed BIOS Enforcement, and Speed Racer. It is possible that HackingTeam (or others) could have other vulnerabilities that can be used to bypass protections and infect the SPI flash, but so far we have not seen it. This means that physical access and insecure configuration are the most likely attack vectors.\nNow that we can see the threat posed by this firmware rootkit, we begin to examine the technical details of its implementation.\nWhat does this malware do?\nThe infected BIOS image contains a DXE driver named \"rkloader\". As mentioned earlier, source code (which someone appears to have posted to GitHub) also appears in the leaked archive. During the DXE phase of UEFI firmware execution, modules are enumerated and executed automatically. The main routine of this \"rkloader\" module just registers a callback to execute the malicious payload.\nThe first parameter of gBootServices->CreateEventEx() routine indicates (EFI_EVENT_GROUP_READY_TO_BOOT), which is an event that occurs before the OS boot loader has been executed. This allows the malicious payload to gain execution before and OS (or even the boot loader) has had a chance to run.\nThe callback then loads another UEFI application, which is hard coded into rkloader source code (GUID named LAUNCH_APP).\nThis GUID identifies a UEFI application module with the name \"fsbg\". This application contains the main malicious functionality for stealth operations with an NTFS file system.\nHere is full list of functions contained in \"fsbg.c\" module:\nThe main workflow of fsbg dropper module is:\nAn important note, which we will use for detection, is the use of the UEFI variable \"fTA\" to mark an infected system.\nThe EFI_GLOBAL_FILE_VARIABLE_GUID is defined as follows:\nThe \"fsbg\" module implements file system operations. However the low-level code for interacting specifically with NTFS is factored into a separate module called \"Ntfs\" which is based on modified open-source implementations of NTFS file system drivers for UEFI. The \"fsbg\" module loads the \"Ntfs\" module as a system protocol driver.\nThe \"fsbg\" module references locations for malicious OS applications in the file system:\nFrom the above, it is easy to see how the this rootkit fulfills the attacker? goals of persistent infection. Even if the OS is reinstalled or the hard drive is replaced, the malicious DXE module continues to execute automatically and drops additional malicious files into the file system. While this appears to be Windows-specific, the modular architecture would allow for other file systems or applications to be used with a different OS. (Though, so far, we have not seen an implementation for any other OS.)\nFirmware Rootkit Detection\nWe released CHIPSEC framework, which contains various tests and tools for platform security assessment, including some forensic capabilities. We leverage CHIPSEC in our examples below, but other tools can also be used to accomplish the same thing.\nTesting UEFI Firmware Protections in Flash Memory\nInstalling this firmware rootkit involves rewriting SPI flash. The system firmware is responsible for securely configuring the protections on SPI flash in order to prevent this. CHIPSEC contains configuration checks that users can easily run:\npython chipsec_main.py -m common.bios_wp\nIf this test fails, it may be possible for software running on the system to modify the BIOS in the SPI flash due to insecure configuration of the hardware protections. This does not mean that the system is infected, but it would be harder to infect a system that passes this test than one that fails.\nSigns of Infection\nAs we will detail in our next posthave explained above, the rootkit creates a UEFI variable called \"fTA\" and even uses this to check if it has already been installed. A user can list the UEFI variables on a system and search for this variable.\npython chipsec_util.py uefi var-list\npython chipsec_util.py uefi var-find fTA\nAfter running the var-list command, users should look in the file efi_variables.lst for a variable with the name \"fTA\" and GUID 8BE4DF61-93CA-11d2-aa0d-00e098302288. The var-find command in chipsec will specifically look for this variable. Presence of the \"fTA\" variable indicates a system that might have been infected.\nAlso, a user can read the entire image from the SPI flash and look inside it for unexpected changes. Ideally, a hardware programmer should be attached to independently capture an image of SPI flash from a suspect system. This should avoid advanced hiding techniques. (While not recommended, the image can be read from software using the chipsec command python chipsec_util.py spi dump spi.bin)\nAfter an image has been captured from a suspect system and a known-good system of the same model, offline analysis that compares both images can begin. It helps to parse the firmware volumes and NVRAM variables that make up the image. With CHIPSEC, this can be done using the following command:\npython chipsec_util.py decode spi.bin [fw type]\nNote that NVRAM variables often change between platforms and even between reboots of the same platform. UEFI-based firmware Experience is recommended for this analysis. However, by comparing a suspect image with a known-good one, it is possible to find the extra modules added by the rootkit.\nFinally, on an infected Windows system, malicious files (particularly scoute.exe or soldier.exe) may be stored in the following locations:\nThis should be a good start for finding persistently infected systems.",
+  "sanitized_txt": "The Advanced Threat Research team performs vulnerability research to help Intel Security lead the way in developing secure technology.\nIncreasingly, people around the world depend on technology for their daily activities. Making this technology trustworthy involves a deep understanding of how attacks work. By researching security vulnerabilities, the Advanced Threat Research (ATR) team in Intel Security discovers opportunities to drive toward more secure technology.\nLast updated: 2015-07-16 The examination of commercial malware developed by Hacking Team has revealed much to the security community. Of particular interest to platform security researchers at Intel's Advanced Threat Research team (ATR) is the presence of what appears to be a UEFI-based persistent infection mechanism. ATR has been researching vulnerabilities related to system firmware and working with a community of firmware developers and platform manufacturers to mitigate these threats. Others have also posted good information about this issue. Here, we will provide some preliminary analysis of the firmware threat.\nFinding a Persistent Rootkit The trail begins with the mysterious file \"Z5WE1X64.fd\" which was attached to one of the leaked emails into \"Uefi_windows_persistent.zip\" compressed file.\nA deeper look into the binary reveals some string constants which point toward firmware image update for UEFI BIOS platforms:\nThis binary appears to be a firmware update image packed by InsydeH2O tools for UEFI firmware. These tools are applicable to many (though not all) common platforms. Inside the image, we (along with Nikolaj Schlej) found some unexpected sections:\nSome suspicious entries are \"Ntfs\", \"rkloader\" and a nameless UEFI application (highlighted above). The developers did not hide the real name of the modules, which has a hint about module functionality and enables detection.\nThe \"rkloader\" executable image name suggests a rootkit. In the same leaked archive we find the source code directory \"vector-edk\" which contains the code of a UEFI-based rootkit.\nMore than a PoC The leaked source code goes beyond a research proof-of-concept, revealing a commercial rootkit platform called \"]HackingTeam[ UEFI Vector\" and using real attacks as a part of Hacking Team? RCS malware platform. According to the leaked code and emails, this hacking platform may have already been already sold to some HackingTeam customers. Some of the emails point to specific modes on which the persistent rootkit was tested.\nUpdating the SPI flash, where system firmware is usually stored, is usually accomplished either through physically attaching a programmer to the chip or through a signed update mechanism built into the firmware. One of the leaked emails contains a presentation (presumably for potential customers) that describes this:\nHere is screenshot of slide which describing infection way with phisical access to the target n machine:\nBoth \"agent\" and \"soldier\" are the names of trojan horse applications also found in the leaks. The rootkit reinstalls these applications automatically, from infected firmware. Another slide describes options to modify firmware:\nBased on the information we have reviewed so far, we have not identified any new vulnerability used to bypass SPI flash protections. Some of the leaked messages clearly discuss using physical access and a SPI programmer to program the infected image to the SPI flash. There is also mention of a USB image that installs the malware using a UEFI application. This application (which appears to have been ported from an old and modified version of chipsec) erases and re-programs the SPI flash image from software. This method should only work on a system that is not configured to protect writes to the SPI flash. This serious configuration issue has been discussed by multiple researchers over many years, including A Tale of One Software Bypass of Windows 8 Secure Boot, Defeating Signed BIOS Enforcement, and Speed Racer. It is possible that HackingTeam (or others) could have other vulnerabilities that can be used to bypass protections and infect the SPI flash, but so far we have not seen it. This means that physical access and insecure configuration are the most likely attack vectors.\nNow that we can see the threat posed by this firmware rootkit, we begin to examine the technical details of its implementation.\nWhat does this malware do?\nThe infected BIOS image contains a DXE driver named \"rkloader\". As mentioned earlier, source code (which someone appears to have posted to GitHub) also appears in the leaked archive. During the DXE phase of UEFI firmware execution, modules are enumerated and executed automatically. The main routine of this \"rkloader\" module just registers a callback to execute the malicious payload.\nThe first parameter of gBootServices->CreateEventEx() routine indicates (EFI_EVENT_GROUP_READY_TO_BOOT), which is an event that occurs before the OS boot loader has been executed. This allows the malicious payload to gain execution before and OS (or even the boot loader) has had a chance to run.\nThe callback then loads another UEFI application, which is hard coded into rkloader source code (GUID named LAUNCH_APP).\nThis GUID identifies a UEFI application module with the name \"fsbg\". This application contains the main malicious functionality for stealth operations with an NTFS file system.\nHere is full list of functions contained in \"fsbg.c\" module:\nThe main workflow of fsbg dropper module is:\nAn important note, which we will use for detection, is the use of the UEFI variable \"fTA\" to mark an infected system.\nThe EFI_GLOBAL_FILE_VARIABLE_GUID is defined as follows:\nThe \"fsbg\" module implements file system operations. However the low-level code for interacting specifically with NTFS is factored into a separate module called \"Ntfs\" which is based on modified open-source implementations of NTFS file system drivers for UEFI. The \"fsbg\" module loads the \"Ntfs\" module as a system protocol driver.\nThe \"fsbg\" module references locations for malicious OS applications in the file system:\nFrom the above, it is easy to see how the this rootkit fulfills the attacker? goals of persistent infection. Even if the OS is reinstalled or the hard drive is replaced, the malicious DXE module continues to execute automatically and drops additional malicious files into the file system. While this appears to be Windows-specific, the modular architecture would allow for other file systems or applications to be used with a different OS. (Though, so far, we have not seen an implementation for any other OS.) Firmware Rootkit Detection We released CHIPSEC framework, which contains various tests and tools for platform security assessment, including some forensic capabilities. We leverage CHIPSEC in our examples below, but other tools can also be used to accomplish the same thing.\nTesting UEFI Firmware Protections in Flash Memory Installing this firmware rootkit involves rewriting SPI flash. The system firmware is responsible for securely configuring the protections on SPI flash in order to prevent this. CHIPSEC contains configuration checks that users can easily run:\npython chipsec_main.py -m common.bios_wp If this test fails, it may be possible for software running on the system to modify the BIOS in the SPI flash due to insecure configuration of the hardware protections. This does not mean that the system is infected, but it would be harder to infect a system that passes this test than one that fails.\nSigns of Infection As we will detail in our next posthave explained above, the rootkit creates a UEFI variable called \"fTA\" and even uses this to check if it has already been installed. A user can list the UEFI variables on a system and search for this variable.\npython chipsec_util.py uefi var-list python chipsec_util.py uefi var-find fTA After running the var-list command, users should look in the file efi_variables.lst for a variable with the name \"fTA\" and GUID 8BE4DF61-93CA-11d2-aa0d-00e098302288. The var-find command in chipsec will specifically look for this variable. Presence of the \"fTA\" variable indicates a system that might have been infected.\nAlso, a user can read the entire image from the SPI flash and look inside it for unexpected changes. Ideally, a hardware programmer should be attached to independently capture an image of SPI flash from a suspect system. This should avoid advanced hiding techniques. (While not recommended, the image can be read from software using the chipsec command python chipsec_util.py spi dump spi.bin) After an image has been captured from a suspect system and a known-good system of the same model, offline analysis that compares both images can begin. It helps to parse the firmware volumes and NVRAM variables that make up the image. With CHIPSEC, this can be done using the following command:\npython chipsec_util.py decode spi.bin [fw type] Note that NVRAM variables often change between platforms and even between reboots of the same platform. UEFI-based firmware Experience is recommended for this analysis. However, by comparing a suspect image with a known-good one, it is possible to find the extra modules added by the rootkit.\nFinally, on an infected Windows system, malicious files (particularly scoute.exe or soldier.exe) may be stored in the following locations:\nThis should be a good start for finding persistently infected systems.",
+  "ID_list": [
+    "T1542.001"
+  ],
+  "Name_list": [
+    "Execution",
+    "Rootkit",
+    "Source",
+    "System Firmware"
+  ],
+  "TTP_sentences": {
+    "T1542.001": [
+      {
+        "sentence": "The Advanced Threat Research team performs vulnerability research to help Intel Security lead the way in developing secure technology.",
+        "score": 0.3452
+      },
+      {
+        "sentence": "Increasingly, people around the world depend on technology for their daily activities.",
+        "score": 0.3473
+      },
+      {
+        "sentence": "Making this technology trustworthy involves a deep understanding of how attacks work.",
+        "score": 0.4246
+      },
+      {
+        "sentence": "By researching security vulnerabilities, the Advanced Threat Research (ATR) team in Intel Security discovers opportunities to drive toward more secure technology.",
+        "score": 0.3218
+      },
+      {
+        "sentence": "Last updated: 2015-07-16 The examination of commercial malware developed by Hacking Team has revealed much to the security community.",
+        "score": 0.4456
+      },
+      {
+        "sentence": "Of particular interest to platform security researchers at Intel's Advanced Threat Research team (ATR) is the presence of what appears to be a UEFI-based persistent infection mechanism.",
+        "score": 0.5326
+      },
+      {
+        "sentence": "ATR has been researching vulnerabilities related to system firmware and working with a community of firmware developers and platform manufacturers to mitigate these threats.",
+        "score": 0.5563
+      },
+      {
+        "sentence": "Here, we will provide some preliminary analysis of the firmware threat.",
+        "score": 0.5179
+      },
+      {
+        "sentence": "Finding a Persistent Rootkit The trail begins with the mysterious file \"Z5WE1X64.fd\" which was attached to one of the leaked emails into \"Uefi_windows_persistent.zip\" compressed file.",
+        "score": 0.373
+      },
+      {
+        "sentence": "A deeper look into the binary reveals some string constants which point toward firmware image update for UEFI BIOS platforms: This binary appears to be a firmware update image packed by InsydeH2O tools for UEFI firmware.",
+        "score": 0.6478
+      },
+      {
+        "sentence": "These tools are applicable to many (though not all) common platforms.",
+        "score": 0.3814
+      },
+      {
+        "sentence": "Inside the image, we (along with Nikolaj Schlej) found some unexpected sections: Some suspicious entries are \"Ntfs\", \"rkloader\" and a nameless UEFI application (highlighted above).",
+        "score": 0.5334
+      },
+      {
+        "sentence": "The developers did not hide the real name of the modules, which has a hint about module functionality and enables detection.",
+        "score": 0.3811
+      },
+      {
+        "sentence": "The \"rkloader\" executable image name suggests a rootkit.",
+        "score": 0.5008
+      },
+      {
+        "sentence": "In the same leaked archive we find the source code directory \"vector-edk\" which contains the code of a UEFI-based rootkit.",
+        "score": 0.548
+      },
+      {
+        "sentence": "More than a PoC The leaked source code goes beyond a research proof-of-concept, revealing a commercial rootkit platform called \"]HackingTeam[ UEFI Vector\" and using real attacks as a part of Hacking Team?",
+        "score": 0.4805
+      },
+      {
+        "sentence": "RCS malware platform.",
+        "score": 0.5264
+      },
+      {
+        "sentence": "Some of the emails point to specific modes on which the persistent rootkit was tested.",
+        "score": 0.369
+      },
+      {
+        "sentence": "Updating the SPI flash, where system firmware is usually stored, is usually accomplished either through physically attaching a programmer to the chip or through a signed update mechanism built into the firmware.",
+        "score": 0.7116
+      },
+      {
+        "sentence": "One of the leaked emails contains a presentation (presumably for potential customers) that describes this: Here is screenshot of slide which describing infection way with phisical access to the target n machine: Both \"agent\" and \"soldier\" are the names of trojan horse applications also found in the leaks.",
+        "score": 0.3885
+      },
+      {
+        "sentence": "The rootkit reinstalls these applications automatically, from infected firmware.",
+        "score": 0.6205
+      },
+      {
+        "sentence": "Another slide describes options to modify firmware: Based on the information we have reviewed so far, we have not identified any new vulnerability used to bypass SPI flash protections.",
+        "score": 0.6258
+      },
+      {
+        "sentence": "Some of the leaked messages clearly discuss using physical access and a SPI programmer to program the infected image to the SPI flash.",
+        "score": 0.46
+      },
+      {
+        "sentence": "There is also mention of a USB image that installs the malware using a UEFI application.",
+        "score": 0.6202
+      },
+      {
+        "sentence": "This application (which appears to have been ported from an old and modified version of chipsec) erases and re-programs the SPI flash image from software.",
+        "score": 0.6037
+      },
+      {
+        "sentence": "This method should only work on a system that is not configured to protect writes to the SPI flash.",
+        "score": 0.408
+      },
+      {
+        "sentence": "This serious configuration issue has been discussed by multiple researchers over many years, including A Tale of One Software Bypass of Windows 8 Secure Boot, Defeating Signed BIOS Enforcement, and Speed Racer.",
+        "score": 0.5397
+      },
+      {
+        "sentence": "It is possible that HackingTeam (or others) could have other vulnerabilities that can be used to bypass protections and infect the SPI flash, but so far we have not seen it.",
+        "score": 0.4677
+      },
+      {
+        "sentence": "Now that we can see the threat posed by this firmware rootkit, we begin to examine the technical details of its implementation.",
+        "score": 0.5782
+      },
+      {
+        "sentence": "What does this malware do?",
+        "score": 0.4015
+      },
+      {
+        "sentence": "The infected BIOS image contains a DXE driver named \"rkloader\".",
+        "score": 0.678
+      },
+      {
+        "sentence": "During the DXE phase of UEFI firmware execution, modules are enumerated and executed automatically.",
+        "score": 0.4187
+      },
+      {
+        "sentence": "The main routine of this \"rkloader\" module just registers a callback to execute the malicious payload.",
+        "score": 0.3542
+      },
+      {
+        "sentence": "The first parameter of gBootServices->CreateEventEx() routine indicates (EFI_EVENT_GROUP_READY_TO_BOOT), which is an event that occurs before the OS boot loader has been executed.",
+        "score": 0.4847
+      },
+      {
+        "sentence": "This allows the malicious payload to gain execution before and OS (or even the boot loader) has had a chance to run.",
+        "score": 0.5342
+      },
+      {
+        "sentence": "The callback then loads another UEFI application, which is hard coded into rkloader source code (GUID named LAUNCH_APP).",
+        "score": 0.6116
+      },
+      {
+        "sentence": "This GUID identifies a UEFI application module with the name \"fsbg\".",
+        "score": 0.5328
+      },
+      {
+        "sentence": "This application contains the main malicious functionality for stealth operations with an NTFS file system.",
+        "score": 0.4647
+      },
+      {
+        "sentence": "Here is full list of functions contained in \"fsbg.c\" module: The main workflow of fsbg dropper module is: An important note, which we will use for detection, is the use of the UEFI variable \"fTA\" to mark an infected system.",
+        "score": 0.5565
+      },
+      {
+        "sentence": "The EFI_GLOBAL_FILE_VARIABLE_GUID is defined as follows: The \"fsbg\" module implements file system operations.",
+        "score": 0.3902
+      },
+      {
+        "sentence": "However the low-level code for interacting specifically with NTFS is factored into a separate module called \"Ntfs\" which is based on modified open-source implementations of NTFS file system drivers for UEFI.",
+        "score": 0.5496
+      },
+      {
+        "sentence": "The \"fsbg\" module loads the \"Ntfs\" module as a system protocol driver.",
+        "score": 0.3766
+      },
+      {
+        "sentence": "The \"fsbg\" module references locations for malicious OS applications in the file system: From the above, it is easy to see how the this rootkit fulfills the attacker? goals of persistent infection.",
+        "score": 0.4483
+      },
+      {
+        "sentence": "Even if the OS is reinstalled or the hard drive is replaced, the malicious DXE module continues to execute automatically and drops additional malicious files into the file system.",
+        "score": 0.6543
+      },
+      {
+        "sentence": "While this appears to be Windows-specific, the modular architecture would allow for other file systems or applications to be used with a different OS. (Though, so far, we have not seen an implementation for any other OS.) Firmware Rootkit Detection We released CHIPSEC framework, which contains various tests and tools for platform security assessment, including some forensic capabilities.",
+        "score": 0.5711
+      },
+      {
+        "sentence": "Testing UEFI Firmware Protections in Flash Memory Installing this firmware rootkit involves rewriting SPI flash.",
+        "score": 0.6066
+      },
+      {
+        "sentence": "The system firmware is responsible for securely configuring the protections on SPI flash in order to prevent this.",
+        "score": 0.6222
+      },
+      {
+        "sentence": "CHIPSEC contains configuration checks that users can easily run: python chipsec_main.py -m common.bios_wp If this test fails, it may be possible for software running on the system to modify the BIOS in the SPI flash due to insecure configuration of the hardware protections.",
+        "score": 0.6966
+      },
+      {
+        "sentence": "This does not mean that the system is infected, but it would be harder to infect a system that passes this test than one that fails.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "Signs of Infection As we will detail in our next posthave explained above, the rootkit creates a UEFI variable called \"fTA\" and even uses this to check if it has already been installed.",
+        "score": 0.4959
+      },
+      {
+        "sentence": "A user can list the UEFI variables on a system and search for this variable. python chipsec_util.py uefi var-list python chipsec_util.py uefi var-find fTA After running the var-list command, users should look in the file efi_variables.lst for a variable with the name \"fTA\" and GUID 8BE4DF61-93CA-11d2-aa0d-00e098302288.",
+        "score": 0.38
+      },
+      {
+        "sentence": "Presence of the \"fTA\" variable indicates a system that might have been infected.",
+        "score": 0.3595
+      },
+      {
+        "sentence": "Also, a user can read the entire image from the SPI flash and look inside it for unexpected changes.",
+        "score": 0.4403
+      },
+      {
+        "sentence": "Ideally, a hardware programmer should be attached to independently capture an image of SPI flash from a suspect system.",
+        "score": 0.3439
+      },
+      {
+        "sentence": "This should avoid advanced hiding techniques. (While not recommended, the image can be read from software using the chipsec command python chipsec_util.py spi dump spi.bin) After an image has been captured from a suspect system and a known-good system of the same model, offline analysis that compares both images can begin.",
+        "score": 0.3582
+      },
+      {
+        "sentence": "It helps to parse the firmware volumes and NVRAM variables that make up the image.",
+        "score": 0.4815
+      },
+      {
+        "sentence": "With CHIPSEC, this can be done using the following command: python chipsec_util.py decode spi.bin [fw type] Note that NVRAM variables often change between platforms and even between reboots of the same platform.",
+        "score": 0.4944
+      },
+      {
+        "sentence": "UEFI-based firmware Experience is recommended for this analysis.",
+        "score": 0.593
+      },
+      {
+        "sentence": "However, by comparing a suspect image with a known-good one, it is possible to find the extra modules added by the rootkit.",
+        "score": 0.4806
+      },
+      {
+        "sentence": "Finally, on an infected Windows system, malicious files (particularly scoute.exe or soldier.exe) may be stored in the following locations: This should be a good start for finding persistently infected systems.",
+        "score": 0.4433
+      }
+    ]
+  }
+}

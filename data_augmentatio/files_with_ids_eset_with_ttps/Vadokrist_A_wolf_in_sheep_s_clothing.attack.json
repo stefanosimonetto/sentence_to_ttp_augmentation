@@ -1,0 +1,3247 @@
+{
+  "original_txt": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil. In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.\nVadokrist shares several important features with families we have described earlier in the series, namely\nAmavaldo\n,\nCasbaneiro\n,\nGrandoreiro\nand\nMekotio\n. We recently published a\nwhite paper\ndedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.\nCharacteristics\nVadokrist is written in Delphi. One of the most notable characteristics is the unusually large amount of unused code in the binaries. After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis. We were able to link some of the code to existing Delphi projects, such as\nQuickReport\n.\nVadokrist stores strings inside string tables. It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).\nFigure 1. String table implementation in earlier Vadokrist binaries\nThe vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run. The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.\nTo ensure persistence, Vadokrist utilizes either a Run key or it creates a LNK file in the startup folder.\nIts backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine. It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites. We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.\nCryptography\nThe majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey. Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later). For clarity, we have implemented the algorithm in Python, as seen in Figure 2.\ndef decrypt_payload(data_enc, key1, key2, key3):\r\n    data_dec = str()\r\n\r\n    for c in data_enc:\r\n\t\tx = data_enc[i] ^ (key3 >> 8) & 0xFF\r\n\t\tdata_dec += chr(x)\r\n\t\tkey3 = ((x + key3) & 0xFF) * key1 + key2\r\n\r\n    return data_dec\r\n\r\ndef decrypt_string(data_enc, key1, key2, key3):\r\n    data_dec = str()\r\n\r\n    for c in data_enc:\r\n\t\tx = data_enc[i] ^ (key3 >> 8) & 0xFF\r\n\t\tdata_dec += chr(x)\r\n\t\tkey3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2\r\n\r\n    return data_dec\nFigure 2. TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations\nBesides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well. This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.\nDistribution\nMSI overload\nRecent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive. If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk. It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup. Finally, the script restarts the machine. On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan. The whole process is illustrated in Figure 3. Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.\nFigure 3. Execution chain recently used by Vadokrist\nThe JavaScript file is worth mentioning because of its obfuscation. It leverages\nhow the comma operator (,) works in JavaScript\nand abuses it to greatly reduce readability and possibly to bypass emulation. It obfuscates conditions using the logical AND operator (&&) in a similar manner. See an example in Figure 4.\nFigure 4. JavaScript installer used by Vadokrist. The bottom part shows the script with transformed operators for better readability.\nOlder distribution & execution techniques\nWe observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain. We won’t cover all of them, but two are worth mentioning. We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our\nblogpost about Mekotio\n.\nVadokrist occasionally relies on DLL side-loading with a specific injector to decrypt and execute the banking trojan. This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.\nRemote configuration\nVadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.\nThe configuration file is usually encrypted, either by TripleKey or RC4. In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password. In the case of the latter, the encrypted data is further encoded by base64.\nThe delimiter also changes from time to time. So far, we have seen three different characters used: “|”, “!” and “/”.\nFigure 5. Encrypted remote configuration files used by Vadokrist\nNow that we know how to decrypt the configuration file, let’s examine its contents. In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server. For downloaders, the format is a bit more complex, as illustrated in Figure 6.\nFigure 6. Different formats of remote configuration used by Vadokrist downloaders\nTo simplify, we recognize a configuration with an optional ID and six fields:\n[mandatory] The URL to download the banking trojan from\n[optional] Special folder (first part of the installation path)\n[optional] Installation flag (described below)\n[optional] Path (second part of the installation path)\n[optional] Filename (third and final part of the installation path)\n[mandatory] Notification URL\nTwo of these fields may require further explanation. If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored. The only thing that is sent to the\nnotification\nURL is whether an application\nCore.exe\nis running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.\nYou can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields. The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry. Additionally, you can see that the delimiters change here as well.\nThe dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.\nConclusion\nIn this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil. We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions. Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.\nWe have covered its encryption schemes, distribution and execution methods and remote configuration formats. Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.\nFor any inquiries, contact us at threatintel@eset.com. Indicators of Compromise can also be found in\nour GitHub repository\n.\nIndicators of Compromise (IoCs)\nHashes\nCampaign “MSI overload”\nSHA-1\nDescription\nESET detection name\nD8C6DDACC42645DF0F760489C5A4C3AA686998A1\nMSI installer\nJS/TrojanDownloader.Banload.ABD\n01ECACF490F303891118893242F5600EF9154184\nMSI loader\nWin32/Spy.Vadokrist.T\nF81A58C11AF26BDAFAC1EB2DD1D468C5A80F8F28\nVadokrist banking trojan\nWin32/Spy.Vadokrist.T\nOther\nSHA-1\nDescription\nESET detection name\n8D7E133530E4CCECE9CD4FD8C544E0913D26FE4B\nVadokrist banking trojan\nWin32/Spy.Vadokrist.AF\nAD4289E61642A4A724C9F44356540DF76A35B741\nVadokrist banking trojan\nWin32/Spy.Vadokrist.T\nBD71A9D09F7E445BE5ACDF412657C8CFCE0F717D\nVadokrist banking trojan\nWin32/Spy.Vadokrist.AD\n06C0A039DEDBEF4B9013F8A35AACD7F33CD47524\nDownloader (MSI/JS)\nJS/TrojanDownloader.Banload.AAO\nFADA4C27B78DDE798F1E917F82226B983C5B74D8\nDownloader (Delphi)\nWin32/Spy.Vadokrist.Y\n525FCAA13E3867B58E442B4B1B612664AFB5A5C0\nInjector shared with Amavaldo\nWin32/Spy.Amavaldo.L\nRecent C&C servers\n104.41.26[.]216\n104.41.41[.]216\n104.41.47[.]53\n191.232.212[.]242\n191.232.243[.]100\n191.235.78[.]249\n191.237.255[.]155\n191.239.244[.]141\n191.239.245[.]87\n191.239.255[.]102\nMITRE ATT&CK techniques\nNote: This table was built using\nversion 8\nof the MITRE ATT&CK framework.\nTactic\nID\nName\nDescription\nResource Development\nT1583.001\nAcquire Infrastructure: Domains\nVadokrist registers its own domains to be used as C&C servers.\nT1587.001\nDevelop Capabilities: Malware\nVadokrist is operated by the same group that develops it.\nInitial Access\nT1566.001\nPhishing: Spearphishing Attachment\nVadokrist is distributed as a spam attachment.\nExecution\nT1059.001\nCommand and Scripting Interpreter: PowerShell\nVadokrist uses PowerShell in some distribution chains.\nT1059.005\nCommand and Scripting Interpreter: Visual Basic\nVadokrist uses VBScript in some distribution chains.\nT1059.007\nCommand and Scripting Interpreter: JavaScript/JScript\nVadokrist uses JavaScript in its recent distribution chains.\nT1204.002\nUser Execution: Malicious File\nVadokrist relies on the user to execute the malicious binary.\nPersistence\nT1547.001\nBoot or Logon Autostart Execution: Registry Run Keys / Startup Folder\nVadokrist ensures persistence via Run key or LNK file in the startup folder.\nDefense Evasion\nT1140\nDeobfuscate/Decode Files or Information\nVadokrist is often distributed encrypted and encrypts its remote configuration.\nT1574.002\nHijack Execution Flow: DLL Side-Loading\nVadokrist is sometimes executed by this technique.\nT1036.005\nMasquerading: Match Legitimate Name or Location\nVadokrist masquerades as legitimate software.\nT1218.007\nSigned Binary Proxy Execution: Msiexec\nVadokrist uses the MSI format for execution.\nCredential Access\nT1056.001\nInput Capture: Keylogging\nVadokrist can capture keystrokes.\nDiscovery\nT1010\nApplication Window Discovery\nVadokrist looks for bank-related windows based on their names.\nT1057\nProcess Discovery\nVadokrist tries to discover anti-fraud software by process name.\nT1082\nSystem Information Discovery\nVadokrist discovers victim’s username.\nT1113\nScreen Capture\nVadokrist can take screenshots.\nCommand and Control\nT1132.002\nData Encoding: Non-Standard Encoding\nVadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.\nExfiltration\nT1041\nExfiltration Over C2 Channel\nVadokrist exfiltrates data via C&C server.",
+  "sanitized_txt": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil. In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.\nVadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio . We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.\nCharacteristics Vadokrist is written in Delphi. One of the most notable characteristics is the unusually large amount of unused code in the binaries. After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis. We were able to link some of the code to existing Delphi projects, such as QuickReport .\nVadokrist stores strings inside string tables. It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).\nFigure 1. String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run. The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.\nTo ensure persistence, Vadokrist utilizes either a Run key or it creates a LNK file in the startup folder.\nIts backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine. It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites. We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.\nCryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey. Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later). For clarity, we have implemented the algorithm in Python, as seen in Figure 2.\ndef decrypt_payload(data_enc, key1, key2, key3):\ndata_dec = str()\nfor c in data_enc:\nx = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2\nreturn data_dec\ndef decrypt_string(data_enc, key1, key2, key3):\ndata_dec = str()\nfor c in data_enc:\nx = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2\nreturn data_dec Figure 2. TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well. This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.\nDistribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive. If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk. It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup. Finally, the script restarts the machine. On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan. The whole process is illustrated in Figure 3. Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.\nFigure 3. Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation. It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation. It obfuscates conditions using the logical AND operator (&&) in a similar manner. See an example in Figure 4.\nFigure 4. JavaScript installer used by Vadokrist. The bottom part shows the script with transformed operators for better readability.\nOlder distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain. We won’t cover all of them, but two are worth mentioning. We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .\nVadokrist occasionally relies on DLL side-loading with a specific injector to decrypt and execute the banking trojan. This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.\nRemote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.\nThe configuration file is usually encrypted, either by TripleKey or RC4. In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password. In the case of the latter, the encrypted data is further encoded by base64.\nThe delimiter also changes from time to time. So far, we have seen three different characters used: “|”, “!” and “/”.\nFigure 5. Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents. In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server. For downloaders, the format is a bit more complex, as illustrated in Figure 6.\nFigure 6. Different formats of remote configuration used by Vadokrist downloaders To simplify, we recognize a configuration with an optional ID and six fields:\n[mandatory] The URL to download the banking trojan from [optional] Special folder (first part of the installation path) [optional] Installation flag (described below) [optional] Path (second part of the installation path) [optional] Filename (third and final part of the installation path) [mandatory] Notification URL Two of these fields may require further explanation. If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored. The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.\nYou can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields. The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry. Additionally, you can see that the delimiters change here as well.\nThe dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.\nConclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil. We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions. Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.\nWe have covered its encryption schemes, distribution and execution methods and remote configuration formats. Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.\nFor any inquiries, contact us at threatintel@eset.com. Indicators of Compromise can also be found in our GitHub repository .\nIndicators of Compromise (IoCs) Hashes Campaign “MSI overload” SHA-1 Description ESET detection name D8C6DDACC42645DF0F760489C5A4C3AA686998A1 MSI installer JS/TrojanDownloader.Banload.ABD 01ECACF490F303891118893242F5600EF9154184 MSI loader Win32/Spy.Vadokrist.T F81A58C11AF26BDAFAC1EB2DD1D468C5A80F8F28 Vadokrist banking trojan Win32/Spy.Vadokrist.T Other SHA-1 Description ESET detection name 8D7E133530E4CCECE9CD4FD8C544E0913D26FE4B Vadokrist banking trojan Win32/Spy.Vadokrist.AF AD4289E61642A4A724C9F44356540DF76A35B741 Vadokrist banking trojan Win32/Spy.Vadokrist.T BD71A9D09F7E445BE5ACDF412657C8CFCE0F717D Vadokrist banking trojan Win32/Spy.Vadokrist.AD 06C0A039DEDBEF4B9013F8A35AACD7F33CD47524 Downloader (MSI/JS) JS/TrojanDownloader.Banload.AAO FADA4C27B78DDE798F1E917F82226B983C5B74D8 Downloader (Delphi) Win32/Spy.Vadokrist.Y 525FCAA13E3867B58E442B4B1B612664AFB5A5C0 Injector shared with Amavaldo Win32/Spy.Amavaldo.L Recent C&C servers 104.41.26[.]216 104.41.41[.]216 104.41.47[.]53 191.232.212[.]242 191.232.243[.]100 191.235.78[.]249 191.237.255[.]155 191.239.244[.]141 191.239.245[.]87 191.239.255[.]102 MITRE ATT&CK techniques Note: This table was built using version 8 of the MITRE ATT&CK framework.",
+  "ID_list": [
+    "T1010",
+    "T1036.005",
+    "T1041",
+    "T1056.001",
+    "T1057",
+    "T1059.001",
+    "T1059.005",
+    "T1059.007",
+    "T1082",
+    "T1113",
+    "T1132.002",
+    "T1140",
+    "T1204.002",
+    "T1218.007",
+    "T1547.001",
+    "T1566.001",
+    "T1574.002",
+    "T1583.001",
+    "T1587.001"
+  ],
+  "Name_list": [
+    "Execution",
+    "Persistence",
+    "Phishing",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1056.001": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.3411
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.3005
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.3404
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.3783
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3844
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.6839
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.3466
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.3194
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.304
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.3951
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.3025
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.3075
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.3291
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.4587
+      },
+      {
+        "sentence": "Credential Access Input Capture: Keylogging Vadokrist can capture keystrokes.",
+        "score": 0.8695
+      },
+      {
+        "sentence": "System Information Discovery Vadokrist discovers victim’s username.",
+        "score": 0.3053
+      },
+      {
+        "sentence": "Screen Capture Vadokrist can take screenshots.",
+        "score": 0.4575
+      }
+    ],
+    "T1059.001": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.3125
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.363
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3498
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.3417
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.338
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.4309
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.4018
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.3287
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4146
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.4068
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3661
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.3193
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3137
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.4003
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.4371
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.3701
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.4033
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.3872
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.4104
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.4834
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.4237
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.4426
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.4412
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.4158
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.3038
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.3386
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.4823
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.4199
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.3899
+      },
+      {
+        "sentence": "Remote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.",
+        "score": 0.3704
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.3692
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.3861
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.4486
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.399
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.3987
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.4391
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.3927
+      },
+      {
+        "sentence": "The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.",
+        "score": 0.34
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.3081
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.3051
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.3954
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.3609
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.4504
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.3253
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.3046
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.3879
+      },
+      {
+        "sentence": "Initial Access Phishing: Spearphishing Attachment Vadokrist is distributed as a spam attachment.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.6897
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.6017
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.5103
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.405
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3707
+      },
+      {
+        "sentence": "System Information Discovery Vadokrist discovers victim’s username.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.3212
+      }
+    ],
+    "T1059.005": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.4139
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.417
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.4437
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.4226
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.5661
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.5299
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.4234
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.4262
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4549
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3405
+      },
+      {
+        "sentence": "To ensure persistence, Vadokrist utilizes either a Run key or it creates a LNK file in the startup folder.",
+        "score": 0.3202
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.3772
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.351
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3426
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.5523
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.4658
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.4686
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.5001
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.5099
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4192
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.368
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.4945
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.4398
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.4286
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.4059
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.5861
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.5895
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.4712
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.3624
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.4252
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.5587
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.3918
+      },
+      {
+        "sentence": "We won’t cover all of them, but two are worth mentioning.",
+        "score": 0.318
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.474
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.467
+      },
+      {
+        "sentence": "Remote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.4907
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.45
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.5418
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3212
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.4938
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.465
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.3912
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.4934
+      },
+      {
+        "sentence": "The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.",
+        "score": 0.3539
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.3475
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.4418
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.4056
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.5111
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.4401
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.5366
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.3148
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.4398
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.4188
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.3494
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.3123
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.4609
+      },
+      {
+        "sentence": "Initial Access Phishing: Spearphishing Attachment Vadokrist is distributed as a spam attachment.",
+        "score": 0.3288
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.5849
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.6879
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.6797
+      },
+      {
+        "sentence": "Persistence Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder Vadokrist ensures persistence via Run key or LNK file in the startup folder.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.5077
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3073
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.4058
+      }
+    ],
+    "T1059.007": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.4118
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.4212
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.4542
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.421
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.5693
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.518
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.4588
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.4444
+      },
+      {
+        "sentence": "Vadokrist stores strings inside string tables.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4535
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.3508
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.4504
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3501
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.5076
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.4518
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.4483
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.4579
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.4901
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4019
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.4048
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.4876
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.4854
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.4643
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.4572
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.4147
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.6768
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.6679
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.5181
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.3995
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.4732
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.631
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.3748
+      },
+      {
+        "sentence": "We won’t cover all of them, but two are worth mentioning.",
+        "score": 0.3476
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.5004
+      },
+      {
+        "sentence": "Vadokrist occasionally relies on DLL side-loading with a specific injector to decrypt and execute the banking trojan.",
+        "score": 0.3229
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.5144
+      },
+      {
+        "sentence": "Remote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.",
+        "score": 0.3714
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.4651
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.4199
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.5535
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.4815
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.5031
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.3984
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.5098
+      },
+      {
+        "sentence": "If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored.",
+        "score": 0.3069
+      },
+      {
+        "sentence": "The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.3864
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.4744
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.4677
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.4971
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.4451
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.4969
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.3836
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.4113
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.3435
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.4655
+      },
+      {
+        "sentence": "Initial Access Phishing: Spearphishing Attachment Vadokrist is distributed as a spam attachment.",
+        "score": 0.3306
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.5845
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.6798
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.7523
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.5074
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3319
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.3602
+      }
+    ],
+    "T1132.002": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.3105
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.3316
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3713
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.3569
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.3745
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.3906
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.4201
+      },
+      {
+        "sentence": "Vadokrist stores strings inside string tables.",
+        "score": 0.309
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4925
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.3605
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3132
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.3118
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.5026
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.6808
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.5872
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.7107
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.4764
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.3594
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.328
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.3031
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.3689
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.393
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.3923
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.4439
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.4216
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.6049
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.3044
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.5311
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.3873
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.4067
+      },
+      {
+        "sentence": "Vadokrist occasionally relies on DLL side-loading with a specific injector to decrypt and execute the banking trojan.",
+        "score": 0.3432
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.5838
+      },
+      {
+        "sentence": "Remote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.",
+        "score": 0.3631
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.7255
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.599
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.7546
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.5073
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.5741
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.5908
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.5963
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.6258
+      },
+      {
+        "sentence": "If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored.",
+        "score": 0.3456
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.4727
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.4889
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.4216
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.4703
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.312
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.3791
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.3379
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.5394
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.3011
+      },
+      {
+        "sentence": "For any inquiries, contact us at threatintel@eset.com.",
+        "score": 0.3442
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.4159
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.3643
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.3636
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.4408
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.3912
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.6551
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3237
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.8524
+      },
+      {
+        "sentence": "Exfiltration Exfiltration Over C2 Channel Vadokrist exfiltrates data via C&C server.",
+        "score": 0.5099
+      }
+    ],
+    "T1566.001": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.3667
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.4031
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3587
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.429
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.324
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.3302
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.4238
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3035
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3366
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.355
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.3948
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.372
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.3566
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.3971
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.6282
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.4366
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.3299
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.3264
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3337
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.7027
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.408
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.3327
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.3073
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.4056
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.331
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.5227
+      },
+      {
+        "sentence": "We won’t cover all of them, but two are worth mentioning.",
+        "score": 0.3255
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.4399
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.3494
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.3957
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.4063
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.366
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.4176
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.3209
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.4016
+      },
+      {
+        "sentence": "The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.3093
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.313
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.4157
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.3423
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.3766
+      },
+      {
+        "sentence": "For any inquiries, contact us at threatintel@eset.com.",
+        "score": 0.3413
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.4322
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.3437
+      },
+      {
+        "sentence": "Initial Access Phishing: Spearphishing Attachment Vadokrist is distributed as a spam attachment.",
+        "score": 0.8542
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.408
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.4395
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "User Execution: Malicious File Vadokrist relies on the user to execute the malicious binary.",
+        "score": 0.4627
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.3584
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.3079
+      }
+    ],
+    "T1574.002": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.4356
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.463
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3263
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.4411
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.3231
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.3563
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.3472
+      },
+      {
+        "sentence": "Vadokrist stores strings inside string tables.",
+        "score": 0.376
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4309
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.3363
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3263
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3105
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.4513
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.3269
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.4192
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4311
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.3952
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.312
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.6563
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3244
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.365
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.475
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.3866
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.4781
+      },
+      {
+        "sentence": "We won’t cover all of them, but two are worth mentioning.",
+        "score": 0.3037
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.4892
+      },
+      {
+        "sentence": "Vadokrist occasionally relies on DLL side-loading with a specific injector to decrypt and execute the banking trojan.",
+        "score": 0.791
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.4039
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.3833
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.373
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.332
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.3898
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.3271
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored.",
+        "score": 0.3334
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.3505
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.3074
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.3098
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.4699
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.4385
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.399
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.3771
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.381
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.3777
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.3065
+      },
+      {
+        "sentence": "Hijack Execution Flow: DLL Side-Loading Vadokrist is sometimes executed by this technique.",
+        "score": 0.8026
+      },
+      {
+        "sentence": "Masquerading: Match Legitimate Name or Location Vadokrist masquerades as legitimate software.",
+        "score": 0.3139
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "Discovery Application Window Discovery Vadokrist looks for bank-related windows based on their names.",
+        "score": 0.3068
+      }
+    ],
+    "T1583.001": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.3401
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.393
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.4156
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.3888
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.4042
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.3532
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.3861
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.3619
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4064
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.3349
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3149
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.4315
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.4024
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.3445
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.3824
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.4026
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.3916
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.3058
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.3286
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.4035
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3238
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.4448
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.4343
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.4395
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.3564
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.393
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.4545
+      },
+      {
+        "sentence": "We won’t cover all of them, but two are worth mentioning.",
+        "score": 0.3156
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.4235
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.3506
+      },
+      {
+        "sentence": "Remote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.",
+        "score": 0.3778
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.3495
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.333
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.4174
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3478
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.4469
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.4098
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.503
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.4279
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.4402
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.3619
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.3626
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.3977
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.3813
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.3958
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.4014
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.3398
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.329
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.6003
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.479
+      },
+      {
+        "sentence": "Initial Access Phishing: Spearphishing Attachment Vadokrist is distributed as a spam attachment.",
+        "score": 0.3507
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.4154
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.4134
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.4193
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.454
+      },
+      {
+        "sentence": "Masquerading: Match Legitimate Name or Location Vadokrist masquerades as legitimate software.",
+        "score": 0.3782
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3623
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.3546
+      }
+    ],
+    "T1587.001": [
+      {
+        "sentence": "Vadokrist is a Latin American banking trojan that ESET has been tracking since 2018 and that is active almost exclusively in Brazil.",
+        "score": 0.4559
+      },
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.5022
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.4978
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.4921
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.5096
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.5032
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.5177
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.4439
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4089
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.347
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3435
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.3188
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3415
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.5437
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.5815
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.465
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.5627
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.563
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4934
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.4217
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.3254
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.3324
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.4765
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3776
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.5196
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.4882
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.3903
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.4307
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.3063
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.4204
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.4297
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.5801
+      },
+      {
+        "sentence": "We won’t cover all of them, but two are worth mentioning.",
+        "score": 0.3126
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.6364
+      },
+      {
+        "sentence": "Vadokrist occasionally relies on DLL side-loading with a specific injector to decrypt and execute the banking trojan.",
+        "score": 0.3739
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.4894
+      },
+      {
+        "sentence": "Remote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.",
+        "score": 0.4918
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.5142
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.4565
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.527
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3382
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.4235
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.5375
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.4959
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.5168
+      },
+      {
+        "sentence": "If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored.",
+        "score": 0.3661
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.3307
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.3777
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.5928
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.4856
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.5614
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.5985
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.4342
+      },
+      {
+        "sentence": "For any inquiries, contact us at threatintel@eset.com.",
+        "score": 0.3304
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.3643
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.4402
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.7244
+      },
+      {
+        "sentence": "Initial Access Phishing: Spearphishing Attachment Vadokrist is distributed as a spam attachment.",
+        "score": 0.3717
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.4892
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.5211
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.4435
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.6238
+      },
+      {
+        "sentence": "Masquerading: Match Legitimate Name or Location Vadokrist masquerades as legitimate software.",
+        "score": 0.3196
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3858
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.5138
+      },
+      {
+        "sentence": "Exfiltration Exfiltration Over C2 Channel Vadokrist exfiltrates data via C&C server.",
+        "score": 0.367
+      }
+    ],
+    "T1082": [
+      {
+        "sentence": "In this installment of our series, we examine its main features and some connections to other Latin American banking trojan families.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.4336
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.3283
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.3183
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.3809
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4434
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.8513
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.578
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.3837
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.3973
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.3063
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.3508
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.3419
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.3419
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.3449
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.32
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.43
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.3219
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3724
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.3979
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.3131
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.4382
+      },
+      {
+        "sentence": "If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored.",
+        "score": 0.3151
+      },
+      {
+        "sentence": "The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.",
+        "score": 0.4793
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.39
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.3395
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.336
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.3609
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.5305
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.4025
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.3498
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.3264
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.3228
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.3459
+      },
+      {
+        "sentence": "Discovery Application Window Discovery Vadokrist looks for bank-related windows based on their names.",
+        "score": 0.4259
+      },
+      {
+        "sentence": "Process Discovery Vadokrist tries to discover anti-fraud software by process name.",
+        "score": 0.3596
+      },
+      {
+        "sentence": "System Information Discovery Vadokrist discovers victim’s username.",
+        "score": 0.6123
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.3624
+      }
+    ],
+    "T1010": [
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3214
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.3986
+      },
+      {
+        "sentence": "Vadokrist stores strings inside string tables.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.4287
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.6361
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.4144
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.3852
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3012
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.3225
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.3545
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.3463
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.4155
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3257
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.3266
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.358
+      },
+      {
+        "sentence": "The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.",
+        "score": 0.656
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.3464
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.3445
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.3192
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.4499
+      },
+      {
+        "sentence": "Credential Access Input Capture: Keylogging Vadokrist can capture keystrokes.",
+        "score": 0.3096
+      },
+      {
+        "sentence": "Discovery Application Window Discovery Vadokrist looks for bank-related windows based on their names.",
+        "score": 0.7534
+      },
+      {
+        "sentence": "Process Discovery Vadokrist tries to discover anti-fraud software by process name.",
+        "score": 0.6678
+      },
+      {
+        "sentence": "System Information Discovery Vadokrist discovers victim’s username.",
+        "score": 0.4678
+      },
+      {
+        "sentence": "Screen Capture Vadokrist can take screenshots.",
+        "score": 0.3396
+      }
+    ],
+    "T1036.005": [
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3127
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.3345
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.3562
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.4075
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.4206
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.315
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.3281
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4955
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.4197
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.3126
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.4183
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.32
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.3512
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.4598
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.3019
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.3767
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.3021
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.3983
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.324
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.3363
+      },
+      {
+        "sentence": "User Execution: Malicious File Vadokrist relies on the user to execute the malicious binary.",
+        "score": 0.3389
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.3323
+      },
+      {
+        "sentence": "Masquerading: Match Legitimate Name or Location Vadokrist masquerades as legitimate software.",
+        "score": 0.7706
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3519
+      }
+    ],
+    "T1041": [
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3056
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.3519
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.3114
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.3047
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.3644
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.3109
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.3499
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3159
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.3282
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.3311
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.3535
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.4109
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.3812
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.3974
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3077
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.5218
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.3894
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.3272
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.4868
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.3653
+      },
+      {
+        "sentence": "For any inquiries, contact us at threatintel@eset.com.",
+        "score": 0.3562
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.3831
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.6003
+      },
+      {
+        "sentence": "Exfiltration Exfiltration Over C2 Channel Vadokrist exfiltrates data via C&C server.",
+        "score": 0.8565
+      }
+    ],
+    "T1057": [
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3316
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.3482
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.354
+      },
+      {
+        "sentence": "String table implementation in earlier Vadokrist binaries The vast majority of Latin American banking trojans collect information about the victim machine (typically computer name and version of the Windows OS) when first run.",
+        "score": 0.4386
+      },
+      {
+        "sentence": "The only information Vadokrist collects is the victim’s username and it does so only after initiating an attack on a targeted financial institution, not, unlike most other Latin American banking trojans, at install time.",
+        "score": 0.3425
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.3329
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3502
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.355
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.3112
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.3148
+      },
+      {
+        "sentence": "The only thing that is sent to the notification URL is whether an application Core.exe is running – a check familiar from other Latin American banking trojans that try to detect the presence of anti-fraud software Warsaw GAS Tecnologia.",
+        "score": 0.5524
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.3868
+      },
+      {
+        "sentence": "Discovery Application Window Discovery Vadokrist looks for bank-related windows based on their names.",
+        "score": 0.4811
+      },
+      {
+        "sentence": "Process Discovery Vadokrist tries to discover anti-fraud software by process name.",
+        "score": 0.7577
+      },
+      {
+        "sentence": "System Information Discovery Vadokrist discovers victim’s username.",
+        "score": 0.3729
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.3196
+      }
+    ],
+    "T1140": [
+      {
+        "sentence": "Vadokrist shares several important features with families we have described earlier in the series, namely Amavaldo , Casbaneiro , Grandoreiro and Mekotio .",
+        "score": 0.3432
+      },
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.3345
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.4671
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.3948
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.493
+      },
+      {
+        "sentence": "We were able to link some of the code to existing Delphi projects, such as QuickReport .",
+        "score": 0.3864
+      },
+      {
+        "sentence": "Vadokrist stores strings inside string tables.",
+        "score": 0.443
+      },
+      {
+        "sentence": "It used to contain an implementation of a string table identical to Casbaneiro (illustrated in Figure 1); however, some recent versions of this banking trojan switched to using multiple string tables, each for a different purpose (list of targets, general configuration, backdoor command names, etc.).",
+        "score": 0.404
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.3547
+      },
+      {
+        "sentence": "We believe this technique is used to prevent the victims from accessing their online bank accounts once the attackers have compromised it, aiding them in retaining control.",
+        "score": 0.3332
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.4605
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.6269
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.6345
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.5263
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.4582
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4696
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.6361
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.3342
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.3681
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.513
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.4043
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.395
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.5416
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.5048
+      },
+      {
+        "sentence": "It obfuscates conditions using the logical AND operator (&&) in a similar manner.",
+        "score": 0.5942
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.3118
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.3785
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.5811
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.3485
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.4542
+      },
+      {
+        "sentence": "Vadokrist occasionally relies on DLL side-loading with a specific injector to decrypt and execute the banking trojan.",
+        "score": 0.5338
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.6959
+      },
+      {
+        "sentence": "Remote configuration Vadokrist utilizes remote configuration both in downloaders and the actual banking trojan, usually hosted on public storage services such as GitHub.",
+        "score": 0.3086
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.5613
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.6989
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.6563
+      },
+      {
+        "sentence": "The delimiter also changes from time to time.",
+        "score": 0.4267
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.422
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.8222
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.4063
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.5926
+      },
+      {
+        "sentence": "You can see that the first variant uses all the fields, the second one does not use the ID, and the third one only uses the two mandatory URL fields.",
+        "score": 0.3349
+      },
+      {
+        "sentence": "The delimiter usage here is a bit more complex, as one delimiter is used to separate different entries and a different one to separate fields of an entry.",
+        "score": 0.4896
+      },
+      {
+        "sentence": "Additionally, you can see that the delimiters change here as well.",
+        "score": 0.4152
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.491
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.3573
+      },
+      {
+        "sentence": "We have shown that it has typical characteristics of a Latin American banking trojan – it is written in Delphi, offers backdoor functionality and targets financial institutions.",
+        "score": 0.334
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.4356
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.3065
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.4124
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.3119
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.4359
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.3767
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.7753
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.3391
+      },
+      {
+        "sentence": "Command and Control Data Encoding: Non-Standard Encoding Vadokrist communicates via a custom protocol encrypted with the TripleKey algorithm.",
+        "score": 0.4867
+      }
+    ],
+    "T1204.002": [
+      {
+        "sentence": "We recently published a white paper dedicated to documenting the similarities between Latin American banking trojans, whereas this blogpost series focuses more on the detailed analysis of one family at a time.",
+        "score": 0.3171
+      },
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.3265
+      },
+      {
+        "sentence": "One of the most notable characteristics is the unusually large amount of unused code in the binaries.",
+        "score": 0.3481
+      },
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.4452
+      },
+      {
+        "sentence": "To ensure persistence, Vadokrist utilizes either a Run key or it creates a LNK file in the startup folder.",
+        "score": 0.3393
+      },
+      {
+        "sentence": "It is also able to prevent access to some websites, which it does in a rather clumsy way by killing the browser process when the victim attempts to visit such websites.",
+        "score": 0.3258
+      },
+      {
+        "sentence": "Cryptography The majority of Vadokrist binaries implement a cryptographic algorithm we have seen in other Latin American banking trojans (namely Amavaldo and Casbaneiro) that we have dubbed TripleKey.",
+        "score": 0.332
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.32
+      },
+      {
+        "sentence": "For clarity, we have implemented the algorithm in Python, as seen in Figure 2. def decrypt_payload(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((x + key3) & 0xFF) * key1 + key2 return data_dec def decrypt_string(data_enc, key1, key2, key3): data_dec = str() for c in data_enc: x = data_enc[i] ^ (key3 >> 8) & 0xFF data_dec += chr(x) key3 = ((data_enc[i] + key3) & 0xFFFF) * key1 + key2 return data_dec Figure 2.",
+        "score": 0.3066
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.3291
+      },
+      {
+        "sentence": "This is quite rare among Latin American banking trojans as most of them never use generally known cryptographic algorithms.",
+        "score": 0.3104
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.504
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.5062
+      },
+      {
+        "sentence": "Finally, the script restarts the machine.",
+        "score": 0.3132
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.389
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.4284
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.4352
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.4324
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.3135
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.3339
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.4786
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.3414
+      },
+      {
+        "sentence": "Older distribution & execution techniques We observed Vadokrist, like most other Latin American banking trojans, using several implementations of the typical distribution chain.",
+        "score": 0.4362
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.402
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.324
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.4026
+      },
+      {
+        "sentence": "So far, we have seen three different characters used: “|”, “!” and “/”.",
+        "score": 0.3527
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.3516
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.3875
+      },
+      {
+        "sentence": "If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored.",
+        "score": 0.3208
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.3661
+      },
+      {
+        "sentence": "Conclusion In this blogpost, we have dissected Vadokrist, a Latin American banking trojan that is focused on Brazil.",
+        "score": 0.3011
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.3372
+      },
+      {
+        "sentence": "Vadokrist seems to be connected to Amavaldo, Casbaneiro, Grandoreiro and Mekotio, other Latin American banking trojans described earlier in our series.",
+        "score": 0.3013
+      },
+      {
+        "sentence": "Indicators of Compromise can also be found in our GitHub repository .",
+        "score": 0.3289
+      },
+      {
+        "sentence": "Initial Access Phishing: Spearphishing Attachment Vadokrist is distributed as a spam attachment.",
+        "score": 0.4445
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.3382
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.4623
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "User Execution: Malicious File Vadokrist relies on the user to execute the malicious binary.",
+        "score": 0.8877
+      },
+      {
+        "sentence": "Persistence Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder Vadokrist ensures persistence via Run key or LNK file in the startup folder.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.3228
+      }
+    ],
+    "T1113": [
+      {
+        "sentence": "Characteristics Vadokrist is written in Delphi.",
+        "score": 0.3181
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.6861
+      },
+      {
+        "sentence": "Vadokrist uses this algorithm to protect its strings, and occasionally payloads and remote configurations as well (we dig deeper into this topic later).",
+        "score": 0.3008
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.3025
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.3099
+      },
+      {
+        "sentence": "The whole process is illustrated in Figure 3.",
+        "score": 0.3612
+      },
+      {
+        "sentence": "See an example in Figure 4.",
+        "score": 0.4256
+      },
+      {
+        "sentence": "In Figure 5, you can see that in both cases the data can be decrypted without any additional knowledge – in the case of the TripleKey method, we can extract all three keys from the end of the string and in the case of RC4, we can derive the key from the password.",
+        "score": 0.3022
+      },
+      {
+        "sentence": "In the case of the latter, the encrypted data is further encoded by base64.",
+        "score": 0.3091
+      },
+      {
+        "sentence": "In the case of the banking trojan, the result is easy to understand, as it is the IP address of a C&C server.",
+        "score": 0.3087
+      },
+      {
+        "sentence": "Its main deviation from the typical implementation is that it does not collect information about victims right after successfully compromising their machines.",
+        "score": 0.3327
+      },
+      {
+        "sentence": "Tactic ID Name Description Resource Development Acquire Infrastructure: Domains Vadokrist registers its own domains to be used as C&C servers.",
+        "score": 0.3016
+      },
+      {
+        "sentence": "Develop Capabilities: Malware Vadokrist is operated by the same group that develops it.",
+        "score": 0.3011
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.3493
+      },
+      {
+        "sentence": "Credential Access Input Capture: Keylogging Vadokrist can capture keystrokes.",
+        "score": 0.3686
+      },
+      {
+        "sentence": "Screen Capture Vadokrist can take screenshots.",
+        "score": 0.8919
+      }
+    ],
+    "T1218.007": [
+      {
+        "sentence": "After further examination, we believe this is an attempt to evade detection and dissuade or slow analysis.",
+        "score": 0.3443
+      },
+      {
+        "sentence": "Distribution MSI overload Recent spam emails distributing Vadokrist contain two nested ZIP archives that contain two files – an MSI installer and a CAB archive.",
+        "score": 0.4636
+      },
+      {
+        "sentence": "If a victim executes the MSI installer, it locates the CAB archive and extracts its contents (an MSI loader) to disk.",
+        "score": 0.5517
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.4561
+      },
+      {
+        "sentence": "Notice that no actual downloader is in place; the banking trojan is distributed directly by these spam emails.",
+        "score": 0.3704
+      },
+      {
+        "sentence": "It leverages how the comma operator (,) works in JavaScript and abuses it to greatly reduce readability and possibly to bypass emulation.",
+        "score": 0.3003
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.3489
+      },
+      {
+        "sentence": "The bottom part shows the script with transformed operators for better readability.",
+        "score": 0.3101
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.3523
+      },
+      {
+        "sentence": "This injector is identical to the one used by Amavaldo and implements the aforementioned TripleKey algorithm for data decryption.",
+        "score": 0.3213
+      },
+      {
+        "sentence": "Encrypted remote configuration files used by Vadokrist Now that we know how to decrypt the configuration file, let’s examine its contents.",
+        "score": 0.337
+      },
+      {
+        "sentence": "For downloaders, the format is a bit more complex, as illustrated in Figure 6.",
+        "score": 0.346
+      },
+      {
+        "sentence": "Execution Command and Scripting Interpreter: PowerShell Vadokrist uses PowerShell in some distribution chains.",
+        "score": 0.357
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.4002
+      },
+      {
+        "sentence": "User Execution: Malicious File Vadokrist relies on the user to execute the malicious binary.",
+        "score": 0.3059
+      },
+      {
+        "sentence": "Defense Evasion Deobfuscate/Decode Files or Information Vadokrist is often distributed encrypted and encrypts its remote configuration.",
+        "score": 0.3469
+      },
+      {
+        "sentence": "Masquerading: Match Legitimate Name or Location Vadokrist masquerades as legitimate software.",
+        "score": 0.3277
+      },
+      {
+        "sentence": "Signed Binary Proxy Execution: Msiexec Vadokrist uses the MSI format for execution.",
+        "score": 0.5929
+      }
+    ],
+    "T1547.001": [
+      {
+        "sentence": "To ensure persistence, Vadokrist utilizes either a Run key or it creates a LNK file in the startup folder.",
+        "score": 0.8554
+      },
+      {
+        "sentence": "Its backdoor capabilities are typical for this type of threat, being able to manipulate the mouse and simulate keyboard input, log keystrokes, take screenshots, and restart the machine.",
+        "score": 0.3061
+      },
+      {
+        "sentence": "TripleKey encryption scheme used by Vadokrist to protect strings, payloads and remote configurations Besides that, we have seen Vadokrist using RC4 in some of its recent binaries and, in the past, TwoFish as well.",
+        "score": 0.3294
+      },
+      {
+        "sentence": "It then executes an embedded JavaScript file that adds a Run key entry, making sure the MSI loader is executed on system startup.",
+        "score": 0.7789
+      },
+      {
+        "sentence": "On startup, the MSI loader executes an embedded DLL – the Vadokrist banking trojan.",
+        "score": 0.3771
+      },
+      {
+        "sentence": "Execution chain recently used by Vadokrist The JavaScript file is worth mentioning because of its obfuscation.",
+        "score": 0.3301
+      },
+      {
+        "sentence": "JavaScript installer used by Vadokrist.",
+        "score": 0.4123
+      },
+      {
+        "sentence": "We have seen Vadokrist sharing a Delphi downloader with Grandoreiro and a whole distribution chain with Mekotio – in fact, the one marked as Chain 1 in our blogpost about Mekotio .",
+        "score": 0.3311
+      },
+      {
+        "sentence": "The configuration file is usually encrypted, either by TripleKey or RC4.",
+        "score": 0.3261
+      },
+      {
+        "sentence": "If the installation flag is set to “T”, all three parts of the installation path will be used; otherwise the first one will be ignored.",
+        "score": 0.3209
+      },
+      {
+        "sentence": "The dynamically changing format of the configuration file indicates Vadokrist is under active and continuous development.",
+        "score": 0.3092
+      },
+      {
+        "sentence": "We have covered its encryption schemes, distribution and execution methods and remote configuration formats.",
+        "score": 0.3458
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: Visual Basic Vadokrist uses VBScript in some distribution chains.",
+        "score": 0.3175
+      },
+      {
+        "sentence": "Command and Scripting Interpreter: JavaScript/JScript Vadokrist uses JavaScript in its recent distribution chains.",
+        "score": 0.3645
+      },
+      {
+        "sentence": "User Execution: Malicious File Vadokrist relies on the user to execute the malicious binary.",
+        "score": 0.3195
+      },
+      {
+        "sentence": "Persistence Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder Vadokrist ensures persistence via Run key or LNK file in the startup folder.",
+        "score": 0.8715
+      }
+    ]
+  }
+}

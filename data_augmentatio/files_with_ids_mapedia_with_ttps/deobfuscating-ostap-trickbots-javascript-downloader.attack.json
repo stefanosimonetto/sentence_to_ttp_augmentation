@@ -1,0 +1,633 @@
+{
+  "original_txt": "Deobfuscating Ostap: TrickBot’s 34,000 Line JavaScript Downloader\nIntroduction\nFor a malicious actor to compromise a system, they need to avoid being detected at the point of entry into the target’s network. Commonly, phishing emails delivering malicious attachments (T1193) serve as the initial access vector.[1]\nAdversaries also need a way to execute code on target computers without tipping off automated tools and the monitoring efforts of security teams. One of the most common code execution techniques is to use interpreted scripting languages (T1064) that can run on an operating system without additional dependencies.[2] On Windows, popular interpreted languages that are abused by attackers include PowerShell, VBScript, JScript, VBA (Visual Basic for Applications), and commands interpreted by Command shell (cmd.exe).\nNetwork attackers and defenders are in a constant state of competition to out-do the other to gain an advantage that could determine the outcome of an intrusion attempt. Against this background, we regularly see malicious actors change their tooling to increase the chances of a successful intrusion, particularly the downloaders used to initially compromise systems.\nIn early August 2019, we noticed that high-volume malicious spam campaigns delivering TrickBot started using Ostap, a commodity JavaScript (or more specifically, JScript) downloader. Previously, TrickBot campaigns relied on downloaders that used obfuscated Command shell and later PowerShell commands that were triggered by VBA AutoOpen macros to download their payloads.\nIn this post, I explain how to deobfuscate Ostap and describe a Python script I wrote (deobfuscate_ostap.py) that automates the deobfuscation of this JScript malware. The tool is available to download on GitHub.[3]\nTrickBot, also known as The Trick, is a modular banking Trojan and dropper thought to be operated by at least three threat actors, tracked in the security community as TA505, Grim Spider and Wizard Spider.[4][5][6][7] While JavaScript-based downloaders aren’t new, TrickBot’s latest downloader is notable for its size, virtual machine detection and anti-analysis measures. For example, the Ostap samples analysed in this post generated incomplete traces in two different public sandboxes and neither downloaded their respective TrickBot payloads.[8][9] Moreover, a sample that was uploaded to VirusTotal had a low detection rate of 6/55 (11%) when it was first uploaded, suggesting that Ostap is effective at evading most anti-virus engines.\nFigure 1 – VirusTotal detection summary for one of the Ostap samples.\nOstap, TrickBot’s JScript Downloader\nDownloaders are a type of malware designed to retrieve and run secondary payloads from one or more remote servers. Their simple function means that downloaders are rarely more than several hundred lines of code, even when obfuscated. Ostap counters this trend in that it is very large, containing nearly 35,000 lines of obfuscated code once beautified. Historical TrickBot campaigns suggest that their operators prefer code obfuscation that is lengthier than most other e-crime actors to bypass detection, as seen, for example in campaigns in August 2018.[10]\nFigure 2 – Line, word and byte count of a sample of Ostap used to deliver TrickBot after being beautified. The downloader is 34,757 lines long.\nMacro Analysis\nThe downloader is delivered as a Microsoft Word 2007 macro-enabled document (.DOCM) that contains the two components of the downloader: a VBA macro and the JScript (figure 3). The emails and samples analysed were themed as purchase orders, suggesting that the campaigns were likely intended to target businesses rather than individuals.\nFigure 3 – Lure document of the downloader.\nThe JScript component of the downloader is stored in the body of the document as white text, resulting in a high word and page count.\nFigure 4 – JScript in lure document.\nThe VBA macro is saved in a project called “Sorry”. When the document is opened, it first copies the JScript to files named 2angola.dot and 2angola.dotu in the user’s default Word template directory (%AppData%\\Microsoft\\Templates). The procedure is triggered by a Document.Open event.[11]\nFigure 5 – Annotated VBA code that runs when the document is opened.\nThe rest of the macro only runs if the document is closed, which is achieved by monitoring for a Document.Close event (figure 6).[12] This is an anti-sandbox measure used to defeat behavioural analysis by sandboxes that don’t imitate user activity such as closing documents.\nFigure 6 – Annotated VBA code that runs when the document is closed.\nIf the document is closed, the macro renames 2angola.dot to 2angola.Jse and then runs it:\n- The macro calls the Create method from the Win32_Process WMI class to run a new Explorer.exe process with 2angola.Jse as its command line argument (figure 7).[13]\n- When a new Explorer.exe process is created where one is already running, the new process is created with the /factory,{75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding command-line arguments (figure 8). The CLSID corresponds to the ProgID called “CLSID_SeparateMultipleProcessExplorerHost”.[14]\n- Explorer runs 2angola.Jse using Windows Script Host (WScript.exe), the default file handler for JScript Encoded Files (.JSE), as shown in figure 9. The file extension of 2angola.dot is renamed to .Jse ensure that the JScript is opened using WScript.exe. Relying on default file associations means that the macro can evade detection by indirectly referencing WScript, a program commonly used for malicious purposes in the context of macros.\nFigure 7 – Sysmon event showing an Explorer.exe process running the JScript file after being launched by WMI Provider Host (WmiPrvSE.exe).\nFigure 8 – Sysmon event showing the new Explorer.exe process being created with the arguments /factory,CLSID {75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding.\nFigure 9 – Sysmon event showing WScript.exe running the JScript file.\nAnti-Analysis Measures\nInterestingly, the Ostap includes a fake Windows Script Host runtime error that occurs shortly after the script is run. It’s likely that the fake error was included to discourage manual examination of the downloader.\nFigure 10 – Fake error message displayed early during the runtime of the downloader.\nFigure 11 – Variable storing the fake error message in TrickBot’s downloader.\nSome samples of the downloader contain the characters **/ at the beginning on the JSE file. This is another anti-analysis measure that is used to trip up automated JavaScript analysis tools which may interpret the rest of the script as being part of a comment block, rather than executable code.\nOnce deobfuscated, several other anti-analysis measures are revealed. For example, Ostap queries WMI to check if it is running in a virtual machine by looking for a blacklist of running processes:\n- AgentSimulator.exe\n- anti-virus.EXE\n- BehaviorDumper\n- BennyDB.exe\n- ctfmon.exe\n- fakepos_bin\n- FrzState2k\n- gemu-ga.exe (Possible misspelling of Qemu hypervisor’s guest agent, qemu-ga.exe)\n- ImmunityDebugger.exe\n- KMS Server Service.exe\n- ProcessHacker\n- procexp\n- Proxifier.exe\n- python\n- tcpdump\n- VBoxService\n- VBoxTray.exe\n- VmRemoteGuest\n- vmtoolsd\n- VMware2B.exe\n- VzService.exe\n- winace\n- Wireshark\nMany sandboxes run these processes in their guest images, such as Cuckoo Sandbox and its derivatives which use a Python agent. The script also checks for a blacklist of host and user names.\n- Emily\n- HANSPETER-PC\n- HAPUBWS\n- Hong Lee\n- IT-ADMIN\n- JOHN-PC\n- Johnson\n- Miller\n- MUELLER-PC\n- Peter Wilson\n- SystemIT | admin\n- Timmy\n- WIN7-TRAPS\nBeautifying the JScript\nThe JScript that is written to disk is one line, making it difficult to analyse manually. To make it more readable, you can reformat and add indentations to the code using Einar Lielmanis’s JS Beautifier tool, which also works for JScript because they share a similar syntax.[15]\njs-beautify 2angola.Jse > 2angola.Jse.beautified\nIdentifying Code Structure, Key Variables and Functions\nNow that the code is readable, we can begin analysing the script’s structure, variables and functions. Our aim here is to identify the functions responsible for deobfuscating the downloader.\nThe script includes many junk variables that aren’t used anywhere else in the script. We can simply remove these variables. It is often possible to distinguish the variables that have been automatically generated by an obfuscator from meaningful ones because their naming convention will differ.\nFor example, in figure 12 you can see some of the variable assignments in the script. All of them are junk code, except the variable called gunsder, which looks interesting because it contains the string “from”. It’s also referenced 2,515 times, which is promising.\nFigure 12 – Some of the variables in the script.\nIn figure 13, you can see at line 15 a function called xxqneol. The variable that we identified as interesting, gunsder, is concatenated with other strings. After concatenation, you can see that the returned string is a reference to the fromCharCode() method which converts a Unicode character code into a character.[16] This function is supplied a parameter called etsfhis. Before calling fromCharCode, the function checks that the second parameter, vqjpvi, is the character h. This function is also referenced 7,540 times, so it’s likely that this function is used in the deobfuscation of the script.\nNow that we understand what the function does, we can give it, its variables and parameters meaningful names (figure 14).\nFigure 13 – Function xxqneol before deobfuscation.\nFigure 14 – Renamed xxqneol function.\nAnalysis of Character Code Calculation Functions\nNext, we can look at the functions where fromCharCode is referenced to understand how it is used. After cleaning up the code in figure 15, you can see that the function uses arithmetic operators to calculate a Unicode character code from the values stored in an array called pkkwrit4. The Unicode character code and the character h are then supplied to the fromCharCode function, which returns a Unicode character. In this case, the character returned is f. Each character in the downloader has its own function to calculate its character code. This particular sample has 7,540 functions that are used to calculate all the characters codes.\nFigure 15 – One of the many functions used to calculate Unicode character codes.\nFigure 16 – Cleaned up function.\nWriting a Python Script (deobfuscate_ostap.py) to Automate Deobfuscation\nSince we don’t want to have to manually calculate and decode 7,540 Unicode character codes, let’s write a Python script to do this for us.\nBy looking for code similarities we can work out what actions we need the script to perform. In the functions that calculate the Unicode character codes, the final character code value is always calculated using the elements at index 0 and 1 of an array. Some arithmetic is performed on these elements before they are supplied to the fromCharCode function. So far we’ve seen addition and subtraction used in Ostap samples in the wild.\nWe can use Python’s re module to write regular expressions that match the elements in each array at index 0 and 1 and store them in lists.[17] Next, we’ll clean up the matches using the re.sub() function and then convert them into integers. We can then use Python’s zip() function to perform the arithmetic on the values in the index 0 and 1 lists.[18] The script tries subtraction and addition operations to deobfuscate the downloader. Finally, the script converts the character codes into Unicode characters, removes line breaks and prints the result.\nThe script is available on GitHub to download and can be modified to support automated analysis pipelines.[3] To test the script, a YARA rule was written to detect Ostap and then run against 100 samples from August 2019. The extracted and deduplicated URLs are at the end of the report.\nAnalysis of the Deobfuscated Downloader\nAfter running the script, we can examine the deobfuscated strings from the downloader, including the URL where the TrickBot payload is hosted:\n- hxxps://185.180.199[.]102/angola/mabutu.php?min=14b\nFigure 17 – Deobfuscated strings of Ostap sample using deobfuscate_ostap.py.\nThe strings are very similar to older Ostap samples from 2018 onwards, enabling us to make a high confidence assessment that the downloaders used to deliver TrickBot in August 2019 belong to this family of malware. Public reporting shows that this malware has been used in campaigns unrelated to TrickBot since 2016, delivering various financial malware families.[19][20] The variety of malware delivered by Ostap suggests that it is commodity malware that is popular among different threat actors, including now TrickBot’s operators.\nOstap’s aggressive anti-analysis features and low detection rate compared to downloaders that use other interpreted scripting languages make it an attractive choice for malware operators seeking a downloader.\nYARA Rule\nrule win_ostap_jse { meta: author = \"Alex Holland @cryptogramfan (Bromium Labs)\" date = \"2019-08-29\" sample_1 = \"F3E03E40F00EA10592F20D83E3C5E922A1CE6EA36FC326511C38F45B9C9B6586\" sample_2 = \"38E2B6F06C2375A955BEA0337F087625B4E6E49F6E4246B50ECB567158B3717B\" strings: $comment = { 2A 2A 2F 3B } // Matches on **/; $array_0 = /\\w{5,8}\\[\\d+\\]=\\d{1,3};/ $array_1 = /\\w{5,8}\\[\\d+\\]=\\d{1,3};/ condition: ((($comment at 0) and (#array_0 > 100) and (#array_1 > 100)) or ((#array_0 > 100) and (#array_1 > 100))) and (filesize > 500KB and filesize < 1500KB) }\nHashes (SHA-256)\n- F3E03E40F00EA10592F20D83E3C5E922A1CE6EA36FC326511C38F45B9C9B6586 – Last_order_specification_1217492.docm\n- 38E2B6F06C2375A955BEA0337F087625B4E6E49F6E4246B50ECB567158B3717B – Heiress_Documents_id18598.docm\nExtracted URLs\n- hxxps://185.130.104[.]149/odr/updateme.php?oxx=p\n- hxxps://185.130.104[.]149/odr/updateme.php?oxx=up\n- hxxps://185.130.104[.]149/odr/updateme.php?oxx=z\n- hxxps://185.130.104[.]236/deerhunter/inputok.php?min=29h\n- hxxps://185.130.104[.]236/deerhunter/inputok.php?min=up3\n- hxxps://185.130.104[.]236/deerhunter2/inputok.php?min=6h\n- hxxps://185.130.104[.]236/deerhunter2/inputok.php?min=8h\n- hxxps://185.130.104[.]236/deerhunter2/inputok.php?min=9a\n- hxxps://185.130.104[.]236/deerhunter2/inputok.php?min=9h\n- hxxps://185.130.104[.]236/targ/inputok.php?min=13s\n- hxxps://185.130.107[.]236/deerhunter3/inputok.php?min=12a\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=up\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=17ha\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=18h\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=19a\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=19h\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=a\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=m\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=m2\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=t2\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=tu\n- hxxps://185.159.82[.]15/hollyhole/c644.php?min=w\n- hxxps://185.159.82[.]15/hollyhole2/c644.php?min=19h\n- hxxps://185.159.82[.]15/hollyhole2/c644.php?min=79\n- hxxps://185.159.82[.]20/t-30/x644.php?min=m\n- hxxps://185.159.82[.]20/t-34/x644.php?min=24\n- hxxps://185.159.82[.]20/t-34/x644.php?min=f\n- hxxps://185.159.82[.]20/t-34/x66744.php?min=u2\n- hxxps://185.180.199[.]102/angola/mabutu.php?min=14b\n- hxxps://189.130.104[.]236/deerhunter3/inputok.php?min=13h\nReferences\n[1] MITRE ATT&CK technique T1193 “Spearphishing Attachment”, https://attack.mitre.org/techniques/T1193/\n[2] MITRE ATT&CK technique T1064 “Scripting”, https://attack.mitre.org/techniques/T1064/\n[3] https://github.com/cryptogramfan/Malware-Analysis-Scripts/blob/master/deobfuscate_ostap.py\n[4] “Security Primer: TrickBot”, Multi-State Information Sharing and Analysis Center, March 2019, https://www.cisecurity.org/wp-content/uploads/2019/03/MS-ISAC-Security-Primer-Trickbot-11March2019-mtw.pdf\n[5] “Threat Group Cards: A Threat Actor Encyclopedia”, ThaiCERT, p. 226, https://www.thaicert.or.th/downloads/files/A_Threat_Actor_Encyclopedia.pdf\n[6] “Threat Group Cards: A Threat Actor Encyclopedia”, ThaiCERT, p. 259\n[7] “Threat Group Cards: A Threat Actor Encyclopedia”, ThaiCERT, p. 272\n[8] https://app.any.run/tasks/dc86fb23-b8ac-49db-8c22-a53b88236676/\n[11] https://docs.microsoft.com/en-us/office/vba/api/word.document.open\n[12] https://docs.microsoft.com/en-us/office/vba/api/word.document.close(even)\n[13] https://docs.microsoft.com/en-us/windows/win32/cimwin32prov/create-method-in-class-win32-process\n[14] https://en.wikipedia.org/wiki/ProgID\n[15] https://github.com/beautify-web/js-beautify\n[16] https://www.w3schools.com/jsref/jsref_fromcharcode.asp\n[17] https://docs.python.org/3/library/re.html\n[18] https://docs.python.org/3.3/library/functions.html#zip\n[19] https://www.cert.pl/en/news/single/ostap-malware-analysis-backswap-dropper/\nLeave A Comment",
+  "sanitized_txt": "Network attackers and defenders are in a constant state of competition to out-do the other to gain an advantage that could determine the outcome of an intrusion attempt. Against this background, we regularly see malicious actors change their tooling to increase the chances of a successful intrusion, particularly the downloaders used to initially compromise systems.\nIn early August 2019, we noticed that high-volume malicious spam campaigns delivering TrickBot started using Ostap, a commodity JavaScript (or more specifically, JScript) downloader. Previously, TrickBot campaigns relied on downloaders that used obfuscated Command shell and later PowerShell commands that were triggered by VBA AutoOpen macros to download their payloads.\nIn this post, I explain how to deobfuscate Ostap and describe a Python script I wrote (deobfuscate_ostap.py) that automates the deobfuscation of this JScript malware. The tool is available to download on GitHub.[3] TrickBot, also known as The Trick, is a modular banking Trojan and dropper thought to be operated by at least three threat actors, tracked in the security community as TA505, Grim Spider and Wizard Spider.[4][5][6][7] While JavaScript-based downloaders aren’t new, TrickBot’s latest downloader is notable for its size, virtual machine detection and anti-analysis measures. For example, the Ostap samples analysed in this post generated incomplete traces in two different public sandboxes and neither downloaded their respective TrickBot payloads.[8][9] Moreover, a sample that was uploaded to VirusTotal had a low detection rate of 6/55 (11%) when it was first uploaded, suggesting that Ostap is effective at evading most anti-virus engines.\nFigure 1 – VirusTotal detection summary for one of the Ostap samples.\nOstap, TrickBot’s JScript Downloader Downloaders are a type of malware designed to retrieve and run secondary payloads from one or more remote servers. Their simple function means that downloaders are rarely more than several hundred lines of code, even when obfuscated. Ostap counters this trend in that it is very large, containing nearly 35,000 lines of obfuscated code once beautified. Historical TrickBot campaigns suggest that their operators prefer code obfuscation that is lengthier than most other e-crime actors to bypass detection, as seen, for example in campaigns in August 2018.[10] Figure 2 – Line, word and byte count of a sample of Ostap used to deliver TrickBot after being beautified. The downloader is 34,757 lines long.\nMacro Analysis The downloader is delivered as a Microsoft Word 2007 macro-enabled document (.DOCM) that contains the two components of the downloader: a VBA macro and the JScript (figure 3). The emails and samples analysed were themed as purchase orders, suggesting that the campaigns were likely intended to target businesses rather than individuals.\nFigure 3 – Lure document of the downloader.\nThe JScript component of the downloader is stored in the body of the document as white text, resulting in a high word and page count.\nFigure 4 – JScript in lure document.\nThe VBA macro is saved in a project called “Sorry”. When the document is opened, it first copies the JScript to files named 2angola.dot and 2angola.dotu in the user’s default Word template directory (%AppData%\\Microsoft\\Templates). The procedure is triggered by a Document.Open event.[11] Figure 5 – Annotated VBA code that runs when the document is opened.\nThe rest of the macro only runs if the document is closed, which is achieved by monitoring for a Document.Close event (figure 6).[12] This is an anti-sandbox measure used to defeat behavioural analysis by sandboxes that don’t imitate user activity such as closing documents.\nFigure 6 – Annotated VBA code that runs when the document is closed.\nIf the document is closed, the macro renames 2angola.dot to 2angola.Jse and then runs it:\n- The macro calls the Create method from the Win32_Process WMI class to run a new Explorer.exe process with 2angola.Jse as its command line argument (figure 7).[13] - When a new Explorer.exe process is created where one is already running, the new process is created with the /factory,{75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding command-line arguments (figure 8). The CLSID corresponds to the ProgID called “CLSID_SeparateMultipleProcessExplorerHost”.[14] - Explorer runs 2angola.Jse using Windows Script Host (WScript.exe), the default file handler for JScript Encoded Files (.JSE), as shown in figure 9. The file extension of 2angola.dot is renamed to .Jse ensure that the JScript is opened using WScript.exe. Relying on default file associations means that the macro can evade detection by indirectly referencing WScript, a program commonly used for malicious purposes in the context of macros.\nFigure 7 – Sysmon event showing an Explorer.exe process running the JScript file after being launched by WMI Provider Host (WmiPrvSE.exe).\nFigure 8 – Sysmon event showing the new Explorer.exe process being created with the arguments /factory,CLSID {75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding.\nFigure 9 – Sysmon event showing WScript.exe running the JScript file.\nAnti-Analysis Measures Interestingly, the Ostap includes a fake Windows Script Host runtime error that occurs shortly after the script is run. It’s likely that the fake error was included to discourage manual examination of the downloader.\nFigure 10 – Fake error message displayed early during the runtime of the downloader.\nFigure 11 – Variable storing the fake error message in TrickBot’s downloader.\nSome samples of the downloader contain the characters **/ at the beginning on the JSE file. This is another anti-analysis measure that is used to trip up automated JavaScript analysis tools which may interpret the rest of the script as being part of a comment block, rather than executable code.\nOnce deobfuscated, several other anti-analysis measures are revealed. For example, Ostap queries WMI to check if it is running in a virtual machine by looking for a blacklist of running processes:\n- AgentSimulator.exe - anti-virus.EXE - BehaviorDumper - BennyDB.exe - ctfmon.exe - fakepos_bin - FrzState2k - gemu-ga.exe (Possible misspelling of Qemu hypervisor’s guest agent, qemu-ga.exe) - ImmunityDebugger.exe - KMS Server Service.exe - ProcessHacker - procexp - Proxifier.exe - python - tcpdump - VBoxService - VBoxTray.exe - VmRemoteGuest - vmtoolsd - VMware2B.exe - VzService.exe - winace - Wireshark Many sandboxes run these processes in their guest images, such as Cuckoo Sandbox and its derivatives which use a Python agent. The script also checks for a blacklist of host and user names.\n- Emily - HANSPETER-PC - HAPUBWS - Hong Lee - IT-ADMIN - JOHN-PC - Johnson - Miller - MUELLER-PC - Peter Wilson - SystemIT | admin - Timmy - WIN7-TRAPS Beautifying the JScript The JScript that is written to disk is one line, making it difficult to analyse manually. To make it more readable, you can reformat and add indentations to the code using Einar Lielmanis’s JS Beautifier tool, which also works for JScript because they share a similar syntax.[15] js-beautify 2angola.Jse > 2angola.Jse.beautified Identifying Code Structure, Key Variables and Functions Now that the code is readable, we can begin analysing the script’s structure, variables and functions. Our aim here is to identify the functions responsible for deobfuscating the downloader.\nThe script includes many junk variables that aren’t used anywhere else in the script. We can simply remove these variables. It is often possible to distinguish the variables that have been automatically generated by an obfuscator from meaningful ones because their naming convention will differ.\nFor example, in figure 12 you can see some of the variable assignments in the script. All of them are junk code, except the variable called gunsder, which looks interesting because it contains the string “from”. It’s also referenced 2,515 times, which is promising.\nFigure 12 – Some of the variables in the script.\nIn figure 13, you can see at line 15 a function called xxqneol. The variable that we identified as interesting, gunsder, is concatenated with other strings. After concatenation, you can see that the returned string is a reference to the fromCharCode() method which converts a Unicode character code into a character.[16] This function is supplied a parameter called etsfhis. Before calling fromCharCode, the function checks that the second parameter, vqjpvi, is the character h. This function is also referenced 7,540 times, so it’s likely that this function is used in the deobfuscation of the script.\nNow that we understand what the function does, we can give it, its variables and parameters meaningful names (figure 14).\nFigure 13 – Function xxqneol before deobfuscation.\nFigure 14 – Renamed xxqneol function.\nAnalysis of Character Code Calculation Functions Next, we can look at the functions where fromCharCode is referenced to understand how it is used. After cleaning up the code in figure 15, you can see that the function uses arithmetic operators to calculate a Unicode character code from the values stored in an array called pkkwrit4. The Unicode character code and the character h are then supplied to the fromCharCode function, which returns a Unicode character. In this case, the character returned is f. Each character in the downloader has its own function to calculate its character code. This particular sample has 7,540 functions that are used to calculate all the characters codes.\nFigure 15 – One of the many functions used to calculate Unicode character codes.\nFigure 16 – Cleaned up function.\nWriting a Python Script (deobfuscate_ostap.py) to Automate Deobfuscation Since we don’t want to have to manually calculate and decode 7,540 Unicode character codes, let’s write a Python script to do this for us.\nBy looking for code similarities we can work out what actions we need the script to perform. In the functions that calculate the Unicode character codes, the final character code value is always calculated using the elements at index 0 and 1 of an array. Some arithmetic is performed on these elements before they are supplied to the fromCharCode function. So far we’ve seen addition and subtraction used in Ostap samples in the wild.\nWe can use Python’s re module to write regular expressions that match the elements in each array at index 0 and 1 and store them in lists.[17] Next, we’ll clean up the matches using the re.sub() function and then convert them into integers. We can then use Python’s zip() function to perform the arithmetic on the values in the index 0 and 1 lists.[18] The script tries subtraction and addition operations to deobfuscate the downloader. Finally, the script converts the character codes into Unicode characters, removes line breaks and prints the result.\nThe script is available on GitHub to download and can be modified to support automated analysis pipelines.[3] To test the script, a YARA rule was written to detect Ostap and then run against 100 samples from August 2019. The extracted and deduplicated URLs are at the end of the report.\nAnalysis of the Deobfuscated Downloader After running the script, we can examine the deobfuscated strings from the downloader, including the URL where the TrickBot payload is hosted:\n- hxxps://185.180.199[.]102/angola/mabutu.php?min=14b Figure 17 – Deobfuscated strings of Ostap sample using deobfuscate_ostap.py.\nThe strings are very similar to older Ostap samples from 2018 onwards, enabling us to make a high confidence assessment that the downloaders used to deliver TrickBot in August 2019 belong to this family of malware. Public reporting shows that this malware has been used in campaigns unrelated to TrickBot since 2016, delivering various financial malware families.[19][20] The variety of malware delivered by Ostap suggests that it is commodity malware that is popular among different threat actors, including now TrickBot’s operators.\nOstap’s aggressive anti-analysis features and low detection rate compared to downloaders that use other interpreted scripting languages make it an attractive choice for malware operators seeking a downloader.",
+  "ID_list": [
+    "T1064",
+    "T1193"
+  ],
+  "Name_list": [
+    "Execution",
+    "Hypervisor",
+    "Initial Access",
+    "Phishing",
+    "Scripting"
+  ],
+  "TTP_sentences": {
+    "T1064": [
+      {
+        "sentence": "Deobfuscating Ostap: TrickBot’s 34,000 Line JavaScript Downloader Introduction For a malicious actor to compromise a system, they need to avoid being detected at the point of entry into the target’s network.",
+        "score": 0.6114
+      },
+      {
+        "sentence": "Commonly, phishing emails delivering malicious attachments () serve as the initial access vector.[1] Adversaries also need a way to execute code on target computers without tipping off automated tools and the monitoring efforts of security teams.",
+        "score": 0.6588
+      },
+      {
+        "sentence": "One of the most common code execution techniques is to use interpreted scripting languages () that can run on an operating system without additional dependencies.[2] On Windows, popular interpreted languages that are abused by attackers include PowerShell, VBScript, JScript, VBA (Visual Basic for Applications), and commands interpreted by Command shell (cmd.exe).",
+        "score": 0.8079
+      },
+      {
+        "sentence": "Network attackers and defenders are in a constant state of competition to out-do the other to gain an advantage that could determine the outcome of an intrusion attempt.",
+        "score": 0.3163
+      },
+      {
+        "sentence": "Against this background, we regularly see malicious actors change their tooling to increase the chances of a successful intrusion, particularly the downloaders used to initially compromise systems.",
+        "score": 0.5749
+      },
+      {
+        "sentence": "In early August 2019, we noticed that high-volume malicious spam campaigns delivering TrickBot started using Ostap, a commodity JavaScript (or more specifically, JScript) downloader.",
+        "score": 0.5902
+      },
+      {
+        "sentence": "Previously, TrickBot campaigns relied on downloaders that used obfuscated Command shell and later PowerShell commands that were triggered by VBA AutoOpen macros to download their payloads.",
+        "score": 0.7223
+      },
+      {
+        "sentence": "In this post, I explain how to deobfuscate Ostap and describe a Python script I wrote (deobfuscate_ostap.py) that automates the deobfuscation of this JScript malware.",
+        "score": 0.5422
+      },
+      {
+        "sentence": "The tool is available to download on GitHub.[3] TrickBot, also known as The Trick, is a modular banking Trojan and dropper thought to be operated by at least three threat actors, tracked in the security community as TA505, Grim Spider and Wizard Spider.[4][5][6][7] While JavaScript-based downloaders aren’t new, TrickBot’s latest downloader is notable for its size, virtual machine detection and anti-analysis measures.",
+        "score": 0.6383
+      },
+      {
+        "sentence": "For example, the Ostap samples analysed in this post generated incomplete traces in two different public sandboxes and neither downloaded their respective TrickBot payloads.[8][9] Moreover, a sample that was uploaded to VirusTotal had a low detection rate of 6/55 (11%) when it was first uploaded, suggesting that Ostap is effective at evading most anti-virus engines.",
+        "score": 0.5082
+      },
+      {
+        "sentence": "Figure 1 – VirusTotal detection summary for one of the Ostap samples.",
+        "score": 0.3756
+      },
+      {
+        "sentence": "Ostap, TrickBot’s JScript Downloader Downloaders are a type of malware designed to retrieve and run secondary payloads from one or more remote servers.",
+        "score": 0.4761
+      },
+      {
+        "sentence": "Their simple function means that downloaders are rarely more than several hundred lines of code, even when obfuscated.",
+        "score": 0.6203
+      },
+      {
+        "sentence": "Ostap counters this trend in that it is very large, containing nearly 35,000 lines of obfuscated code once beautified.",
+        "score": 0.5432
+      },
+      {
+        "sentence": "Historical TrickBot campaigns suggest that their operators prefer code obfuscation that is lengthier than most other e-crime actors to bypass detection, as seen, for example in campaigns in August 2018.[10] Figure 2 – Line, word and byte count of a sample of Ostap used to deliver TrickBot after being beautified.",
+        "score": 0.5825
+      },
+      {
+        "sentence": "The downloader is 34,757 lines long.",
+        "score": 0.5541
+      },
+      {
+        "sentence": "Macro Analysis The downloader is delivered as a Microsoft Word 2007 macro-enabled document (.DOCM) that contains the two components of the downloader: a VBA macro and the JScript (figure 3).",
+        "score": 0.7632
+      },
+      {
+        "sentence": "The emails and samples analysed were themed as purchase orders, suggesting that the campaigns were likely intended to target businesses rather than individuals.",
+        "score": 0.4448
+      },
+      {
+        "sentence": "Figure 3 – Lure document of the downloader.",
+        "score": 0.5265
+      },
+      {
+        "sentence": "The JScript component of the downloader is stored in the body of the document as white text, resulting in a high word and page count.",
+        "score": 0.6159
+      },
+      {
+        "sentence": "Figure 4 – JScript in lure document.",
+        "score": 0.649
+      },
+      {
+        "sentence": "The VBA macro is saved in a project called “Sorry”.",
+        "score": 0.5499
+      },
+      {
+        "sentence": "When the document is opened, it first copies the JScript to files named 2angola.dot and 2angola.dotu in the user’s default Word template directory (%AppData%\\Microsoft\\Templates).",
+        "score": 0.6057
+      },
+      {
+        "sentence": "The procedure is triggered by a Document.Open event.[11] Figure 5 – Annotated VBA code that runs when the document is opened.",
+        "score": 0.6715
+      },
+      {
+        "sentence": "The rest of the macro only runs if the document is closed, which is achieved by monitoring for a Document.Close event (figure 6).[12] This is an anti-sandbox measure used to defeat behavioural analysis by sandboxes that don’t imitate user activity such as closing documents.",
+        "score": 0.5621
+      },
+      {
+        "sentence": "Figure 6 – Annotated VBA code that runs when the document is closed.",
+        "score": 0.6826
+      },
+      {
+        "sentence": "If the document is closed, the macro renames 2angola.dot to 2angola.Jse and then runs it: - The macro calls the Create method from the Win32_Process WMI class to run a new Explorer.exe process with 2angola.Jse as its command line argument (figure 7).[13] - When a new Explorer.exe process is created where one is already running, the new process is created with the /factory,{75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding command-line arguments (figure 8).",
+        "score": 0.5982
+      },
+      {
+        "sentence": "The CLSID corresponds to the ProgID called “CLSID_SeparateMultipleProcessExplorerHost”.[14] - Explorer runs 2angola.Jse using Windows Script Host (WScript.exe), the default file handler for JScript Encoded Files (.JSE), as shown in figure 9.",
+        "score": 0.5981
+      },
+      {
+        "sentence": "The file extension of 2angola.dot is renamed to .Jse ensure that the JScript is opened using WScript.exe.",
+        "score": 0.635
+      },
+      {
+        "sentence": "Relying on default file associations means that the macro can evade detection by indirectly referencing WScript, a program commonly used for malicious purposes in the context of macros.",
+        "score": 0.5952
+      },
+      {
+        "sentence": "Figure 7 – Sysmon event showing an Explorer.exe process running the JScript file after being launched by WMI Provider Host (WmiPrvSE.exe).",
+        "score": 0.5242
+      },
+      {
+        "sentence": "Figure 8 – Sysmon event showing the new Explorer.exe process being created with the arguments /factory,CLSID {75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding.",
+        "score": 0.4744
+      },
+      {
+        "sentence": "Figure 9 – Sysmon event showing WScript.exe running the JScript file.",
+        "score": 0.6094
+      },
+      {
+        "sentence": "Anti-Analysis Measures Interestingly, the Ostap includes a fake Windows Script Host runtime error that occurs shortly after the script is run.",
+        "score": 0.5695
+      },
+      {
+        "sentence": "It’s likely that the fake error was included to discourage manual examination of the downloader.",
+        "score": 0.5226
+      },
+      {
+        "sentence": "Figure 10 – Fake error message displayed early during the runtime of the downloader.",
+        "score": 0.5093
+      },
+      {
+        "sentence": "Figure 11 – Variable storing the fake error message in TrickBot’s downloader.",
+        "score": 0.4771
+      },
+      {
+        "sentence": "Some samples of the downloader contain the characters **/ at the beginning on the JSE file.",
+        "score": 0.57
+      },
+      {
+        "sentence": "This is another anti-analysis measure that is used to trip up automated JavaScript analysis tools which may interpret the rest of the script as being part of a comment block, rather than executable code.",
+        "score": 0.6437
+      },
+      {
+        "sentence": "Once deobfuscated, several other anti-analysis measures are revealed.",
+        "score": 0.4515
+      },
+      {
+        "sentence": "The script also checks for a blacklist of host and user names. - Emily - HANSPETER-PC - HAPUBWS - Hong Lee - IT-ADMIN - JOHN-PC - Johnson - Miller - MUELLER-PC - Peter Wilson - SystemIT | admin - Timmy - WIN7-TRAPS Beautifying the JScript The JScript that is written to disk is one line, making it difficult to analyse manually.",
+        "score": 0.5188
+      },
+      {
+        "sentence": "To make it more readable, you can reformat and add indentations to the code using Einar Lielmanis’s JS Beautifier tool, which also works for JScript because they share a similar syntax.[15] js-beautify 2angola.Jse > 2angola.Jse.beautified Identifying Code Structure, Key Variables and Functions Now that the code is readable, we can begin analysing the script’s structure, variables and functions.",
+        "score": 0.6686
+      },
+      {
+        "sentence": "Our aim here is to identify the functions responsible for deobfuscating the downloader.",
+        "score": 0.4457
+      },
+      {
+        "sentence": "The script includes many junk variables that aren’t used anywhere else in the script.",
+        "score": 0.538
+      },
+      {
+        "sentence": "We can simply remove these variables.",
+        "score": 0.3726
+      },
+      {
+        "sentence": "It is often possible to distinguish the variables that have been automatically generated by an obfuscator from meaningful ones because their naming convention will differ.",
+        "score": 0.4007
+      },
+      {
+        "sentence": "For example, in figure 12 you can see some of the variable assignments in the script.",
+        "score": 0.528
+      },
+      {
+        "sentence": "All of them are junk code, except the variable called gunsder, which looks interesting because it contains the string “from”.",
+        "score": 0.5183
+      },
+      {
+        "sentence": "It’s also referenced 2,515 times, which is promising.",
+        "score": 0.3933
+      },
+      {
+        "sentence": "Figure 12 – Some of the variables in the script.",
+        "score": 0.5034
+      },
+      {
+        "sentence": "In figure 13, you can see at line 15 a function called xxqneol.",
+        "score": 0.4786
+      },
+      {
+        "sentence": "The variable that we identified as interesting, gunsder, is concatenated with other strings.",
+        "score": 0.4621
+      },
+      {
+        "sentence": "After concatenation, you can see that the returned string is a reference to the fromCharCode() method which converts a Unicode character code into a character.[16] This function is supplied a parameter called etsfhis.",
+        "score": 0.5197
+      },
+      {
+        "sentence": "Before calling fromCharCode, the function checks that the second parameter, vqjpvi, is the character h.",
+        "score": 0.4736
+      },
+      {
+        "sentence": "This function is also referenced 7,540 times, so it’s likely that this function is used in the deobfuscation of the script.",
+        "score": 0.5065
+      },
+      {
+        "sentence": "Now that we understand what the function does, we can give it, its variables and parameters meaningful names (figure 14).",
+        "score": 0.4409
+      },
+      {
+        "sentence": "Figure 13 – Function xxqneol before deobfuscation.",
+        "score": 0.3857
+      },
+      {
+        "sentence": "Analysis of Character Code Calculation Functions Next, we can look at the functions where fromCharCode is referenced to understand how it is used.",
+        "score": 0.5231
+      },
+      {
+        "sentence": "After cleaning up the code in figure 15, you can see that the function uses arithmetic operators to calculate a Unicode character code from the values stored in an array called pkkwrit4.",
+        "score": 0.5258
+      },
+      {
+        "sentence": "The Unicode character code and the character h are then supplied to the fromCharCode function, which returns a Unicode character.",
+        "score": 0.4884
+      },
+      {
+        "sentence": "In this case, the character returned is f.",
+        "score": 0.3786
+      },
+      {
+        "sentence": "Each character in the downloader has its own function to calculate its character code.",
+        "score": 0.5013
+      },
+      {
+        "sentence": "This particular sample has 7,540 functions that are used to calculate all the characters codes.",
+        "score": 0.498
+      },
+      {
+        "sentence": "Figure 15 – One of the many functions used to calculate Unicode character codes.",
+        "score": 0.4566
+      },
+      {
+        "sentence": "Figure 16 – Cleaned up function.",
+        "score": 0.3943
+      },
+      {
+        "sentence": "Writing a Python Script (deobfuscate_ostap.py) to Automate Deobfuscation Since we don’t want to have to manually calculate and decode 7,540 Unicode character codes, let’s write a Python script to do this for us.",
+        "score": 0.5492
+      },
+      {
+        "sentence": "By looking for code similarities we can work out what actions we need the script to perform.",
+        "score": 0.6108
+      },
+      {
+        "sentence": "In the functions that calculate the Unicode character codes, the final character code value is always calculated using the elements at index 0 and 1 of an array.",
+        "score": 0.477
+      },
+      {
+        "sentence": "Some arithmetic is performed on these elements before they are supplied to the fromCharCode function.",
+        "score": 0.5139
+      },
+      {
+        "sentence": "So far we’ve seen addition and subtraction used in Ostap samples in the wild.",
+        "score": 0.4577
+      },
+      {
+        "sentence": "We can use Python’s re module to write regular expressions that match the elements in each array at index 0 and 1 and store them in lists.[17] Next, we’ll clean up the matches using the re.sub() function and then convert them into integers.",
+        "score": 0.5159
+      },
+      {
+        "sentence": "We can then use Python’s zip() function to perform the arithmetic on the values in the index 0 and 1 lists.[18] The script tries subtraction and addition operations to deobfuscate the downloader.",
+        "score": 0.4708
+      },
+      {
+        "sentence": "Finally, the script converts the character codes into Unicode characters, removes line breaks and prints the result.",
+        "score": 0.6082
+      },
+      {
+        "sentence": "The script is available on GitHub to download and can be modified to support automated analysis pipelines.[3] To test the script, a YARA rule was written to detect Ostap and then run against 100 samples from August 2019.",
+        "score": 0.594
+      },
+      {
+        "sentence": "The extracted and deduplicated URLs are at the end of the report.",
+        "score": 0.4462
+      },
+      {
+        "sentence": "Analysis of the Deobfuscated Downloader After running the script, we can examine the deobfuscated strings from the downloader, including the URL where the TrickBot payload is hosted: - hxxps://185.180.199[.]102/angola/mabutu.php?min=14b Figure 17 – Deobfuscated strings of Ostap sample using deobfuscate_ostap.py.",
+        "score": 0.537
+      },
+      {
+        "sentence": "The strings are very similar to older Ostap samples from 2018 onwards, enabling us to make a high confidence assessment that the downloaders used to deliver TrickBot in August 2019 belong to this family of malware.",
+        "score": 0.4577
+      },
+      {
+        "sentence": "Public reporting shows that this malware has been used in campaigns unrelated to TrickBot since 2016, delivering various financial malware families.[19][20] The variety of malware delivered by Ostap suggests that it is commodity malware that is popular among different threat actors, including now TrickBot’s operators.",
+        "score": 0.4285
+      },
+      {
+        "sentence": "Ostap’s aggressive anti-analysis features and low detection rate compared to downloaders that use other interpreted scripting languages make it an attractive choice for malware operators seeking a downloader.",
+        "score": 0.7194
+      },
+      {
+        "sentence": "226, https://www.thaicert.or.th/downloads/files/A_Threat_Actor_Encyclopedia.pdf [6] “Threat Group Cards: A Threat Actor Encyclopedia”, ThaiCERT, p.",
+        "score": 0.4504
+      },
+      {
+        "sentence": "259 [7] “Threat Group Cards: A Threat Actor Encyclopedia”, ThaiCERT, p.",
+        "score": 0.4281
+      }
+    ],
+    "T1193": [
+      {
+        "sentence": "Deobfuscating Ostap: TrickBot’s 34,000 Line JavaScript Downloader Introduction For a malicious actor to compromise a system, they need to avoid being detected at the point of entry into the target’s network.",
+        "score": 0.5631
+      },
+      {
+        "sentence": "Commonly, phishing emails delivering malicious attachments () serve as the initial access vector.[1] Adversaries also need a way to execute code on target computers without tipping off automated tools and the monitoring efforts of security teams.",
+        "score": 0.7884
+      },
+      {
+        "sentence": "One of the most common code execution techniques is to use interpreted scripting languages () that can run on an operating system without additional dependencies.[2] On Windows, popular interpreted languages that are abused by attackers include PowerShell, VBScript, JScript, VBA (Visual Basic for Applications), and commands interpreted by Command shell (cmd.exe).",
+        "score": 0.4616
+      },
+      {
+        "sentence": "Network attackers and defenders are in a constant state of competition to out-do the other to gain an advantage that could determine the outcome of an intrusion attempt.",
+        "score": 0.3063
+      },
+      {
+        "sentence": "Against this background, we regularly see malicious actors change their tooling to increase the chances of a successful intrusion, particularly the downloaders used to initially compromise systems.",
+        "score": 0.5821
+      },
+      {
+        "sentence": "In early August 2019, we noticed that high-volume malicious spam campaigns delivering TrickBot started using Ostap, a commodity JavaScript (or more specifically, JScript) downloader.",
+        "score": 0.644
+      },
+      {
+        "sentence": "Previously, TrickBot campaigns relied on downloaders that used obfuscated Command shell and later PowerShell commands that were triggered by VBA AutoOpen macros to download their payloads.",
+        "score": 0.5048
+      },
+      {
+        "sentence": "In this post, I explain how to deobfuscate Ostap and describe a Python script I wrote (deobfuscate_ostap.py) that automates the deobfuscation of this JScript malware.",
+        "score": 0.4444
+      },
+      {
+        "sentence": "The tool is available to download on GitHub.[3] TrickBot, also known as The Trick, is a modular banking Trojan and dropper thought to be operated by at least three threat actors, tracked in the security community as TA505, Grim Spider and Wizard Spider.[4][5][6][7] While JavaScript-based downloaders aren’t new, TrickBot’s latest downloader is notable for its size, virtual machine detection and anti-analysis measures.",
+        "score": 0.5547
+      },
+      {
+        "sentence": "For example, the Ostap samples analysed in this post generated incomplete traces in two different public sandboxes and neither downloaded their respective TrickBot payloads.[8][9] Moreover, a sample that was uploaded to VirusTotal had a low detection rate of 6/55 (11%) when it was first uploaded, suggesting that Ostap is effective at evading most anti-virus engines.",
+        "score": 0.488
+      },
+      {
+        "sentence": "Figure 1 – VirusTotal detection summary for one of the Ostap samples.",
+        "score": 0.3876
+      },
+      {
+        "sentence": "Ostap, TrickBot’s JScript Downloader Downloaders are a type of malware designed to retrieve and run secondary payloads from one or more remote servers.",
+        "score": 0.3996
+      },
+      {
+        "sentence": "Their simple function means that downloaders are rarely more than several hundred lines of code, even when obfuscated.",
+        "score": 0.4594
+      },
+      {
+        "sentence": "Ostap counters this trend in that it is very large, containing nearly 35,000 lines of obfuscated code once beautified.",
+        "score": 0.4058
+      },
+      {
+        "sentence": "Historical TrickBot campaigns suggest that their operators prefer code obfuscation that is lengthier than most other e-crime actors to bypass detection, as seen, for example in campaigns in August 2018.[10] Figure 2 – Line, word and byte count of a sample of Ostap used to deliver TrickBot after being beautified.",
+        "score": 0.5664
+      },
+      {
+        "sentence": "The downloader is 34,757 lines long.",
+        "score": 0.4721
+      },
+      {
+        "sentence": "Macro Analysis The downloader is delivered as a Microsoft Word 2007 macro-enabled document (.DOCM) that contains the two components of the downloader: a VBA macro and the JScript (figure 3).",
+        "score": 0.6595
+      },
+      {
+        "sentence": "The emails and samples analysed were themed as purchase orders, suggesting that the campaigns were likely intended to target businesses rather than individuals.",
+        "score": 0.6148
+      },
+      {
+        "sentence": "Figure 3 – Lure document of the downloader.",
+        "score": 0.553
+      },
+      {
+        "sentence": "The JScript component of the downloader is stored in the body of the document as white text, resulting in a high word and page count.",
+        "score": 0.4408
+      },
+      {
+        "sentence": "Figure 4 – JScript in lure document.",
+        "score": 0.6594
+      },
+      {
+        "sentence": "The VBA macro is saved in a project called “Sorry”.",
+        "score": 0.3387
+      },
+      {
+        "sentence": "When the document is opened, it first copies the JScript to files named 2angola.dot and 2angola.dotu in the user’s default Word template directory (%AppData%\\Microsoft\\Templates).",
+        "score": 0.4367
+      },
+      {
+        "sentence": "The procedure is triggered by a Document.Open event.[11] Figure 5 – Annotated VBA code that runs when the document is opened.",
+        "score": 0.5428
+      },
+      {
+        "sentence": "The rest of the macro only runs if the document is closed, which is achieved by monitoring for a Document.Close event (figure 6).[12] This is an anti-sandbox measure used to defeat behavioural analysis by sandboxes that don’t imitate user activity such as closing documents.",
+        "score": 0.3747
+      },
+      {
+        "sentence": "Figure 6 – Annotated VBA code that runs when the document is closed.",
+        "score": 0.4347
+      },
+      {
+        "sentence": "If the document is closed, the macro renames 2angola.dot to 2angola.Jse and then runs it: - The macro calls the Create method from the Win32_Process WMI class to run a new Explorer.exe process with 2angola.Jse as its command line argument (figure 7).[13] - When a new Explorer.exe process is created where one is already running, the new process is created with the /factory,{75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding command-line arguments (figure 8).",
+        "score": 0.302
+      },
+      {
+        "sentence": "The CLSID corresponds to the ProgID called “CLSID_SeparateMultipleProcessExplorerHost”.[14] - Explorer runs 2angola.Jse using Windows Script Host (WScript.exe), the default file handler for JScript Encoded Files (.JSE), as shown in figure 9.",
+        "score": 0.3997
+      },
+      {
+        "sentence": "The file extension of 2angola.dot is renamed to .Jse ensure that the JScript is opened using WScript.exe.",
+        "score": 0.4215
+      },
+      {
+        "sentence": "Relying on default file associations means that the macro can evade detection by indirectly referencing WScript, a program commonly used for malicious purposes in the context of macros.",
+        "score": 0.3927
+      },
+      {
+        "sentence": "Figure 8 – Sysmon event showing the new Explorer.exe process being created with the arguments /factory,CLSID {75DFF2B7-6936-4C06-A8BB-676A7B00B24B} -Embedding.",
+        "score": 0.3023
+      },
+      {
+        "sentence": "Figure 9 – Sysmon event showing WScript.exe running the JScript file.",
+        "score": 0.3331
+      },
+      {
+        "sentence": "Anti-Analysis Measures Interestingly, the Ostap includes a fake Windows Script Host runtime error that occurs shortly after the script is run.",
+        "score": 0.384
+      },
+      {
+        "sentence": "It’s likely that the fake error was included to discourage manual examination of the downloader.",
+        "score": 0.5069
+      },
+      {
+        "sentence": "Figure 10 – Fake error message displayed early during the runtime of the downloader.",
+        "score": 0.4668
+      },
+      {
+        "sentence": "Figure 11 – Variable storing the fake error message in TrickBot’s downloader.",
+        "score": 0.3932
+      },
+      {
+        "sentence": "Some samples of the downloader contain the characters **/ at the beginning on the JSE file.",
+        "score": 0.426
+      },
+      {
+        "sentence": "This is another anti-analysis measure that is used to trip up automated JavaScript analysis tools which may interpret the rest of the script as being part of a comment block, rather than executable code.",
+        "score": 0.4015
+      },
+      {
+        "sentence": "Once deobfuscated, several other anti-analysis measures are revealed.",
+        "score": 0.3647
+      },
+      {
+        "sentence": "The script also checks for a blacklist of host and user names. - Emily - HANSPETER-PC - HAPUBWS - Hong Lee - IT-ADMIN - JOHN-PC - Johnson - Miller - MUELLER-PC - Peter Wilson - SystemIT | admin - Timmy - WIN7-TRAPS Beautifying the JScript The JScript that is written to disk is one line, making it difficult to analyse manually.",
+        "score": 0.3466
+      },
+      {
+        "sentence": "To make it more readable, you can reformat and add indentations to the code using Einar Lielmanis’s JS Beautifier tool, which also works for JScript because they share a similar syntax.[15] js-beautify 2angola.Jse > 2angola.Jse.beautified Identifying Code Structure, Key Variables and Functions Now that the code is readable, we can begin analysing the script’s structure, variables and functions.",
+        "score": 0.4458
+      },
+      {
+        "sentence": "Our aim here is to identify the functions responsible for deobfuscating the downloader.",
+        "score": 0.3867
+      },
+      {
+        "sentence": "For example, in figure 12 you can see some of the variable assignments in the script.",
+        "score": 0.3008
+      },
+      {
+        "sentence": "All of them are junk code, except the variable called gunsder, which looks interesting because it contains the string “from”.",
+        "score": 0.3723
+      },
+      {
+        "sentence": "The variable that we identified as interesting, gunsder, is concatenated with other strings.",
+        "score": 0.3011
+      },
+      {
+        "sentence": "After concatenation, you can see that the returned string is a reference to the fromCharCode() method which converts a Unicode character code into a character.[16] This function is supplied a parameter called etsfhis.",
+        "score": 0.3571
+      },
+      {
+        "sentence": "Before calling fromCharCode, the function checks that the second parameter, vqjpvi, is the character h.",
+        "score": 0.3316
+      },
+      {
+        "sentence": "This function is also referenced 7,540 times, so it’s likely that this function is used in the deobfuscation of the script.",
+        "score": 0.361
+      },
+      {
+        "sentence": "Now that we understand what the function does, we can give it, its variables and parameters meaningful names (figure 14).",
+        "score": 0.3154
+      },
+      {
+        "sentence": "Analysis of Character Code Calculation Functions Next, we can look at the functions where fromCharCode is referenced to understand how it is used.",
+        "score": 0.3206
+      },
+      {
+        "sentence": "After cleaning up the code in figure 15, you can see that the function uses arithmetic operators to calculate a Unicode character code from the values stored in an array called pkkwrit4.",
+        "score": 0.3992
+      },
+      {
+        "sentence": "The Unicode character code and the character h are then supplied to the fromCharCode function, which returns a Unicode character.",
+        "score": 0.3418
+      },
+      {
+        "sentence": "In this case, the character returned is f.",
+        "score": 0.3259
+      },
+      {
+        "sentence": "Each character in the downloader has its own function to calculate its character code.",
+        "score": 0.3735
+      },
+      {
+        "sentence": "This particular sample has 7,540 functions that are used to calculate all the characters codes.",
+        "score": 0.3457
+      },
+      {
+        "sentence": "Figure 15 – One of the many functions used to calculate Unicode character codes.",
+        "score": 0.3277
+      },
+      {
+        "sentence": "Writing a Python Script (deobfuscate_ostap.py) to Automate Deobfuscation Since we don’t want to have to manually calculate and decode 7,540 Unicode character codes, let’s write a Python script to do this for us.",
+        "score": 0.424
+      },
+      {
+        "sentence": "By looking for code similarities we can work out what actions we need the script to perform.",
+        "score": 0.3094
+      },
+      {
+        "sentence": "In the functions that calculate the Unicode character codes, the final character code value is always calculated using the elements at index 0 and 1 of an array.",
+        "score": 0.3603
+      },
+      {
+        "sentence": "Some arithmetic is performed on these elements before they are supplied to the fromCharCode function.",
+        "score": 0.3709
+      },
+      {
+        "sentence": "So far we’ve seen addition and subtraction used in Ostap samples in the wild.",
+        "score": 0.3055
+      },
+      {
+        "sentence": "We can use Python’s re module to write regular expressions that match the elements in each array at index 0 and 1 and store them in lists.[17] Next, we’ll clean up the matches using the re.sub() function and then convert them into integers.",
+        "score": 0.314
+      },
+      {
+        "sentence": "We can then use Python’s zip() function to perform the arithmetic on the values in the index 0 and 1 lists.[18] The script tries subtraction and addition operations to deobfuscate the downloader.",
+        "score": 0.4097
+      },
+      {
+        "sentence": "Finally, the script converts the character codes into Unicode characters, removes line breaks and prints the result.",
+        "score": 0.3646
+      },
+      {
+        "sentence": "The script is available on GitHub to download and can be modified to support automated analysis pipelines.[3] To test the script, a YARA rule was written to detect Ostap and then run against 100 samples from August 2019.",
+        "score": 0.3877
+      },
+      {
+        "sentence": "The extracted and deduplicated URLs are at the end of the report.",
+        "score": 0.3588
+      },
+      {
+        "sentence": "Analysis of the Deobfuscated Downloader After running the script, we can examine the deobfuscated strings from the downloader, including the URL where the TrickBot payload is hosted: - hxxps://185.180.199[.]102/angola/mabutu.php?min=14b Figure 17 – Deobfuscated strings of Ostap sample using deobfuscate_ostap.py.",
+        "score": 0.4738
+      },
+      {
+        "sentence": "The strings are very similar to older Ostap samples from 2018 onwards, enabling us to make a high confidence assessment that the downloaders used to deliver TrickBot in August 2019 belong to this family of malware.",
+        "score": 0.5418
+      },
+      {
+        "sentence": "Public reporting shows that this malware has been used in campaigns unrelated to TrickBot since 2016, delivering various financial malware families.[19][20] The variety of malware delivered by Ostap suggests that it is commodity malware that is popular among different threat actors, including now TrickBot’s operators.",
+        "score": 0.4832
+      },
+      {
+        "sentence": "Ostap’s aggressive anti-analysis features and low detection rate compared to downloaders that use other interpreted scripting languages make it an attractive choice for malware operators seeking a downloader.",
+        "score": 0.5082
+      },
+      {
+        "sentence": "226, https://www.thaicert.or.th/downloads/files/A_Threat_Actor_Encyclopedia.pdf [6] “Threat Group Cards: A Threat Actor Encyclopedia”, ThaiCERT, p.",
+        "score": 0.4072
+      },
+      {
+        "sentence": "259 [7] “Threat Group Cards: A Threat Actor Encyclopedia”, ThaiCERT, p.",
+        "score": 0.3653
+      }
+    ]
+  }
+}

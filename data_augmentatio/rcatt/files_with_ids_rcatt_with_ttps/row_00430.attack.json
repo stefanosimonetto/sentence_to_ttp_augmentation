@@ -1,0 +1,121 @@
+{
+  "original_txt": "Bypassing UAC using App Paths | enigma0x3 Red Teamer and Security Addict enigma0x3 Post navigation \\xc2\\xab Lateral Movement via DCOM: Round\\xc2 2 \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Bypass using\\xc2 sdclt.exe \\xc2\\xbb Bypassing UAC using App\\xc2 Paths March 14, 2017 by enigma0x3 Over the past several months, I\\xe2\\x80\\x99ve taken an interest in Microsoft\\xe2\\x80\\x99s User Account Control (UAC) feature in Windows. While Microsoft doesn\\xe2\\x80\\x99t define UAC as a security boundary, bypassing this protection is still something attackers frequently need to do. The recent Vault7 leak confirms that bypassing UAC is operationally interesting, even to nation states, as several UAC bypasses/notes were detailed in the dump. On the purposefully public side, check out the UACME project by @hfiref0x for a great collection of existing techniques. Microsoft seems to have a renewed interest in UAC, finally fixing many of the issues highlighted by publicly disclosed bypasses. While these fixes are only in newer versions of Windows, the active response from Microsoft drives me to continue searching for UAC bypasses. I\\xe2\\x80\\x99ve previously blogged about two different bypass techniques, and this post will highlight an alternative method that also doesn\\xe2\\x80\\x99t rely on the IFileOperation/DLL hijacking approach. This technique works on Windows 10 build\\xc2 15031, where the vast majority of public bypasses have been patched. As some of you may know, there are some Microsoft signed binaries that auto-elevate due to their manifest. You can read more about these binaries and their manifests here. While searching for more of these auto-elevating binaries by using the SysInternals tool \\xe2\\x80\\x9csigcheck\\xe2\\x80\\x9c, I came across \\xe2\\x80\\x9csdclt.exe\\xe2\\x80\\x9d and verified that it auto-elevates due to its manifest: *Note: This only works on Windows 10. The manifest for sdclt.exe in Windows 7 has the requestedExecutionLevel set to \\xe2\\x80\\x9cAsInvoker\\xe2\\x80\\x9d, preventing auto-elevation when started from medium integrity. When observing the execution flow of sdclt.exe, it becomes apparent that this binary starts control.exe in order to open up a Control Panel item in high-integrity context: I became curious how sdclt.exe obtains the path to control.exe. Looking again at the execution flow, sdclt.exe queries the App Path key for control.exe within the HKEY_CURRENT_USER hive. Calls to HKEY_CURRENT_USER (or HKCU) from a high integrity process are particularly interesting. This often means that an elevated process is interacting with a registry location that a medium integrity process can tamper with. In this case, I saw that \\xe2\\x80\\x9csdclt.exe\\xe2\\x80\\x9d was querying HKCU:\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\App Paths\\\\control.exe. If you aren\\xe2\\x80\\x99t familiar with App Paths in Windows, you can read more about the topic here. As it stands, sdclt.exe looks for the App Path of control.exe in the HKCU hive. Essentially, this binary is asking \\xe2\\x80\\x9cwhat is the full path of control.exe?\\xe2\\x80\\x9d. If that key isn\\xe2\\x80\\x99t found, it continues the typical Windows search order. Since it is searching in a place that can be modified, we can populate the key. Guess what happens once sdclt.exe is started again? You guessed it. Sdclt.exe queried our newly created App Paths key for control.exe, resulting in cmd.exe getting returned. Looking at Process Explorer (or whoami /groups), I was able to confirm that cmd.exe is indeed high integrity: It is important to note that this technique does not allow for parameters, meaning it requires your payload to be placed on disk someplace. If you try to give the binary any parameters (e.g, C:\\\\Windows\\\\System32\\\\cmd.exe /c calc.exe), it will interpret the entire string as the lpFile value to the ShellExecuteInfo structure, which is then passed over to ShellExecuteEx. Since that value doesn\\xe2\\x80\\x99t exist, it will not execute. To demonstrate this technique, you can find a script here:\\xc2 https://raw.githubusercontent.com/enigma0x3/Misc-PowerShell-Stuff/master/Invoke-AppPathBypass.ps1 The script takes a full path to your payload. C:\\\\Windows\\\\System32\\\\cmd.exe is a good one to validate. It will automatically add the keys, start sdclt.exe and then cleanup. This particular technique can be remediated or fixed by setting the UAC level to \\xe2\\x80\\x9cAlways Notify\\xe2\\x80\\x9d or by removing the current user from the Local Administrators group. Further, if you would like to monitor for this attack, you could utilize methods/signatures to look for and alert on new registry entries in HKCU\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\App Paths\\\\Control.exe. Cheers, Matt Share this: Twitter Facebook Like this: Like Loading... Related Bookmark the permalink. 3 thoughts on \\xe2\\x80\\x9cBypassing UAC using App\\xc2 Paths\\xe2\\x80\\x9d Wesley Borges says: March 15, 2017 at 1:36 am Congratulations on the article. Wesley Borges Country Brazil Reply Pingback: Windows 10 UAC Loophole Can Be Used to Infect Systems with Malware - Windows Mode Pingback: \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Bypass using sdclt.exe | enigma0x3 Leave a Reply Cancel reply Enter your comment here... Fill in your details below or click an icon to log in: Email (required) (Address never made public) Name (required) Website You are commenting using your WordPress.com account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Google account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Twitter account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Facebook account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) Cancel Connecting to %s Notify me of new comments via email. Notify me of new posts via email. Search for: Recent Posts Avira Optimizer Local Privilege\\xc2 Escalation CVE-2019-13382: Local Privilege Escalation in\\xc2 SnagIt CVE-2019-13142: Razer Surround 1.1.63.0\\xc2 EoP Avira VPN (2.15.2.28160) Elevation of Privilege through Insecure Update\\xc2 location Avira VPN 2.15.2.28160 Elevation of\\xc2 Privilege Recent Comments Ron on CVE-2019-13382: Local Privileg\\xe2\\x80\\xa6 enigma0x3 on CVE-2019-13382: Local Privileg\\xe2\\x80\\xa6 Ron on CVE-2019-13382: Local Privileg\\xe2\\x80\\xa6 Soc on Defeating Device Guard: A look\\xe2\\x80\\xa6 \\xe2\\x80\\x9cFileless\\xe2\\x80\\xa6 on \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Byp\\xe2\\x80\\xa6 Archives August 2019 July 2019 March 2019 January 2019 October 2018 June 2018 January 2018 November 2017 October 2017 September 2017 August 2017 July 2017 April 2017 March 2017 January 2017 November 2016 August 2016 July 2016 May 2016 March 2016 February 2016 January 2016 October 2015 August 2015 April 2015 March 2015 January 2015 October 2014 July 2014 June 2014 March 2014 January 2014 Categories Uncategorized Meta Register Log in Entries RSS Comments RSS WordPress.com Blog at WordPress.com. Post to Cancel %d bloggers like this:",
+  "sanitized_txt": "Bypassing UAC using App Paths | enigma0x3 Red Teamer and Security Addict enigma0x3 Post navigation \\xc2\\xab Lateral Movement via DCOM: Round\\xc2 2 \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Bypass using\\xc2 sdclt.exe \\xc2\\xbb Bypassing UAC using App\\xc2 Paths March 14, 2017 by enigma0x3 Over the past several months, I\\xe2\\x80\\x99ve taken an interest in Microsoft\\xe2\\x80\\x99s User Account Control (UAC) feature in Windows. While Microsoft doesn\\xe2\\x80\\x99t define UAC as a security boundary, bypassing this protection is still something attackers frequently need to do. The recent Vault7 leak confirms that bypassing UAC is operationally interesting, even to nation states, as several UAC bypasses/notes were detailed in the dump. On the purposefully public side, check out the UACME project by @hfiref0x for a great collection of existing techniques. Microsoft seems to have a renewed interest in UAC, finally fixing many of the issues highlighted by publicly disclosed bypasses. While these fixes are only in newer versions of Windows, the active response from Microsoft drives me to continue searching for UAC bypasses. I\\xe2\\x80\\x99ve previously blogged about two different bypass techniques, and this post will highlight an alternative method that also doesn\\xe2\\x80\\x99t rely on the IFileOperation/DLL hijacking approach. This technique works on Windows 10 build\\xc2 15031, where the vast majority of public bypasses have been patched. As some of you may know, there are some Microsoft signed binaries that auto-elevate due to their manifest. You can read more about these binaries and their manifests here. While searching for more of these auto-elevating binaries by using the SysInternals tool \\xe2\\x80\\x9csigcheck\\xe2\\x80\\x9c, I came across \\xe2\\x80\\x9csdclt.exe\\xe2\\x80\\x9d and verified that it auto-elevates due to its manifest: *Note: This only works on Windows 10. The manifest for sdclt.exe in Windows 7 has the requestedExecutionLevel set to \\xe2\\x80\\x9cAsInvoker\\xe2\\x80\\x9d, preventing auto-elevation when started from medium integrity. When observing the execution flow of sdclt.exe, it becomes apparent that this binary starts control.exe in order to open up a Control Panel item in high-integrity context: I became curious how sdclt.exe obtains the path to control.exe. Looking again at the execution flow, sdclt.exe queries the App Path key for control.exe within the HKEY_CURRENT_USER hive. Calls to HKEY_CURRENT_USER (or HKCU) from a high integrity process are particularly interesting. This often means that an elevated process is interacting with a registry location that a medium integrity process can tamper with. In this case, I saw that \\xe2\\x80\\x9csdclt.exe\\xe2\\x80\\x9d was querying HKCU:\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\App Paths\\\\control.exe. If you aren\\xe2\\x80\\x99t familiar with App Paths in Windows, you can read more about the topic here. As it stands, sdclt.exe looks for the App Path of control.exe in the HKCU hive. Essentially, this binary is asking \\xe2\\x80\\x9cwhat is the full path of control.exe?\\xe2\\x80\\x9d. If that key isn\\xe2\\x80\\x99t found, it continues the typical Windows search order. Since it is searching in a place that can be modified, we can populate the key. Guess what happens once sdclt.exe is started again? You guessed it. Sdclt.exe queried our newly created App Paths key for control.exe, resulting in cmd.exe getting returned. Looking at Process Explorer (or whoami /groups), I was able to confirm that cmd.exe is indeed high integrity: It is important to note that this technique does not allow for parameters, meaning it requires your payload to be placed on disk someplace. If you try to give the binary any parameters (e.g, C:\\\\Windows\\\\System32\\\\cmd.exe /c calc.exe), it will interpret the entire string as the lpFile value to the ShellExecuteInfo structure, which is then passed over to ShellExecuteEx. Since that value doesn\\xe2\\x80\\x99t exist, it will not execute. To demonstrate this technique, you can find a script here:\\xc2 https://raw.githubusercontent.com/enigma0x3/Misc-PowerShell-Stuff/master/Invoke-AppPathBypass.ps1 The script takes a full path to your payload. C:\\\\Windows\\\\System32\\\\cmd.exe is a good one to validate. It will automatically add the keys, start sdclt.exe and then cleanup. This particular technique can be remediated or fixed by setting the UAC level to \\xe2\\x80\\x9cAlways Notify\\xe2\\x80\\x9d or by removing the current user from the Local Administrators group. Further, if you would like to monitor for this attack, you could utilize methods/signatures to look for and alert on new registry entries in HKCU\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\App Paths\\\\Control.exe. Cheers, Matt Share this: Twitter Facebook Like this: Like Loading... Related Bookmark the permalink. 3 thoughts on \\xe2\\x80\\x9cBypassing UAC using App\\xc2 Paths\\xe2\\x80\\x9d Wesley Borges says: March 15, 2017 at 1:36 am Congratulations on the article. Wesley Borges Country Brazil Reply Pingback: Windows 10 UAC Loophole Can Be Used to Infect Systems with Malware - Windows Mode Pingback: \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Bypass using sdclt.exe | enigma0x3 Leave a Reply Cancel reply Enter your comment here... Fill in your details below or click an icon to log in: Email (required) (Address never made public) Name (required) Website You are commenting using your WordPress.com account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Google account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Twitter account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) You are commenting using your Facebook account. (\\xc2 Log\\xc2 Out\\xc2 /\\xc2 Change\\xc2 ) Cancel Connecting to %s Notify me of new comments via email. Notify me of new posts via email. Search for: Recent Posts Avira Optimizer Local Privilege\\xc2 Escalation CVE-2019-13382: Local Privilege Escalation in\\xc2 SnagIt CVE-2019-13142: Razer Surround 1.1.63.0\\xc2 EoP Avira VPN (2.15.2.28160) Elevation of Privilege through Insecure Update\\xc2 location Avira VPN 2.15.2.28160 Elevation of\\xc2 Privilege Recent Comments Ron on CVE-2019-13382: Local Privileg\\xe2\\x80\\xa6 enigma0x3 on CVE-2019-13382: Local Privileg\\xe2\\x80\\xa6 Ron on CVE-2019-13382: Local Privileg\\xe2\\x80\\xa6 Soc on Defeating Device Guard: A look\\xe2\\x80\\xa6 \\xe2\\x80\\x9cFileless\\xe2\\x80\\xa6 on \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Byp\\xe2\\x80\\xa6 Archives August 2019 July 2019 March 2019 January 2019 October 2018 June 2018 January 2018 November 2017 October 2017 September 2017 August 2017 July 2017 April 2017 March 2017 January 2017 November 2016 August 2016 July 2016 May 2016 March 2016 February 2016 January 2016 October 2015 August 2015 April 2015 March 2015 January 2015 October 2014 July 2014 June 2014 March 2014 January 2014 Categories Uncategorized Meta Register Log in Entries RSS Comments RSS WordPress.com Blog at WordPress.com. Post to Cancel %d bloggers like this:",
+  "ID_list": [
+    "T1088",
+    "TA0004",
+    "TA0005"
+  ],
+  "Name_list": [
+    "At",
+    "Tool"
+  ],
+  "TTP_sentences": {
+    "T1088": [
+      {
+        "sentence": "Bypassing UAC using App Paths | enigma0x3 Red Teamer and Security Addict enigma0x3 Post navigation \\xc2\\xab Lateral Movement via DCOM: Round\\xc2 2 \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Bypass using\\xc2 sdclt.exe \\xc2\\xbb Bypassing UAC using App\\xc2 Paths March 14, 2017 by enigma0x3 Over the past several months, I\\xe2\\x80\\x99ve taken an interest in Microsoft\\xe2\\x80\\x99s User Account Control (UAC) feature in Windows.",
+        "score": 0.7808
+      },
+      {
+        "sentence": "While Microsoft doesn\\xe2\\x80\\x99t define UAC as a security boundary, bypassing this protection is still something attackers frequently need to do.",
+        "score": 0.7421
+      },
+      {
+        "sentence": "The recent Vault7 leak confirms that bypassing UAC is operationally interesting, even to nation states, as several UAC bypasses/notes were detailed in the dump.",
+        "score": 0.7012
+      },
+      {
+        "sentence": "On the purposefully public side, check out the UACME project by @hfiref0x for a great collection of existing techniques.",
+        "score": 0.6557
+      },
+      {
+        "sentence": "Microsoft seems to have a renewed interest in UAC, finally fixing many of the issues highlighted by publicly disclosed bypasses.",
+        "score": 0.5772
+      },
+      {
+        "sentence": "While these fixes are only in newer versions of Windows, the active response from Microsoft drives me to continue searching for UAC bypasses.",
+        "score": 0.6846
+      },
+      {
+        "sentence": "I\\xe2\\x80\\x99ve previously blogged about two different bypass techniques, and this post will highlight an alternative method that also doesn\\xe2\\x80\\x99t rely on the IFileOperation/DLL hijacking approach.",
+        "score": 0.4481
+      },
+      {
+        "sentence": "This technique works on Windows 10 build\\xc2 15031, where the vast majority of public bypasses have been patched.",
+        "score": 0.4571
+      },
+      {
+        "sentence": "As some of you may know, there are some Microsoft signed binaries that auto-elevate due to their manifest.",
+        "score": 0.3365
+      },
+      {
+        "sentence": "You can read more about these binaries and their manifests here.",
+        "score": 0.3639
+      },
+      {
+        "sentence": "While searching for more of these auto-elevating binaries by using the SysInternals tool \\xe2\\x80\\x9csigcheck\\xe2\\x80\\x9c, I came across \\xe2\\x80\\x9csdclt.exe\\xe2\\x80\\x9d and verified that it auto-elevates due to its manifest: *Note: This only works on Windows 10.",
+        "score": 0.4037
+      },
+      {
+        "sentence": "The manifest for sdclt.exe in Windows 7 has the requestedExecutionLevel set to \\xe2\\x80\\x9cAsInvoker\\xe2\\x80\\x9d, preventing auto-elevation when started from medium integrity.",
+        "score": 0.5801
+      },
+      {
+        "sentence": "When observing the execution flow of sdclt.exe, it becomes apparent that this binary starts control.exe in order to open up a Control Panel item in high-integrity context: I became curious how sdclt.exe obtains the path to control.exe.",
+        "score": 0.5663
+      },
+      {
+        "sentence": "Looking again at the execution flow, sdclt.exe queries the App Path key for control.exe within the HKEY_CURRENT_USER hive.",
+        "score": 0.3052
+      },
+      {
+        "sentence": "Calls to HKEY_CURRENT_USER (or HKCU) from a high integrity process are particularly interesting.",
+        "score": 0.4601
+      },
+      {
+        "sentence": "This often means that an elevated process is interacting with a registry location that a medium integrity process can tamper with.",
+        "score": 0.3478
+      },
+      {
+        "sentence": "In this case, I saw that \\xe2\\x80\\x9csdclt.exe\\xe2\\x80\\x9d was querying HKCU:\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\App Paths\\\\control.exe.",
+        "score": 0.3638
+      },
+      {
+        "sentence": "Looking at Process Explorer (or whoami /groups), I was able to confirm that cmd.exe is indeed high integrity: It is important to note that this technique does not allow for parameters, meaning it requires your payload to be placed on disk someplace.",
+        "score": 0.4191
+      },
+      {
+        "sentence": "If you try to give the binary any parameters (e.g, C:\\\\Windows\\\\System32\\\\cmd.exe /c calc.exe), it will interpret the entire string as the lpFile value to the ShellExecuteInfo structure, which is then passed over to ShellExecuteEx.",
+        "score": 0.4622
+      },
+      {
+        "sentence": "Since that value doesn\\xe2\\x80\\x99t exist, it will not execute.",
+        "score": 0.3855
+      },
+      {
+        "sentence": "It will automatically add the keys, start sdclt.exe and then cleanup.",
+        "score": 0.4333
+      },
+      {
+        "sentence": "This particular technique can be remediated or fixed by setting the UAC level to \\xe2\\x80\\x9cAlways Notify\\xe2\\x80\\x9d or by removing the current user from the Local Administrators group.",
+        "score": 0.7772
+      },
+      {
+        "sentence": "Further, if you would like to monitor for this attack, you could utilize methods/signatures to look for and alert on new registry entries in HKCU\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\App Paths\\\\Control.exe.",
+        "score": 0.3487
+      },
+      {
+        "sentence": "3 thoughts on \\xe2\\x80\\x9cBypassing UAC using App\\xc2 Paths\\xe2\\x80\\x9d Wesley Borges says: March 15, 2017 at 1:36 am Congratulations on the article.",
+        "score": 0.6982
+      },
+      {
+        "sentence": "Wesley Borges Country Brazil Reply Pingback: Windows 10 UAC Loophole Can Be Used to Infect Systems with Malware - Windows Mode Pingback: \\xe2\\x80\\x9cFileless\\xe2\\x80\\x9d UAC Bypass using sdclt.exe | enigma0x3 Leave a Reply Cancel reply Enter your comment here...",
+        "score": 0.7228
+      },
+      {
+        "sentence": "Post to Cancel %d bloggers like this:",
+        "score": 0.3179
+      }
+    ]
+  }
+}

