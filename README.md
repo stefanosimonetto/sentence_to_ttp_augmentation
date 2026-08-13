@@ -9,7 +9,7 @@ The paper focuses on sentence-level mapping from CTI text to MITRE ATT&CK techni
 The paper introduces two complementary augmentation strategies:
 
 - `Label-space recovery`: reuse ATT&CK-derived supervision that would otherwise be discarded because benchmark label spaces are narrower than the full ATT&CK ontology.
-- `TTP-SiamAlign`: a Siamese bi-encoder retrieval method that grounds document-level CTI labels to candidate evidence sentences, turning weak report-level supervision into sentence-level training pairs.
+- `TTP-Transfer`: a Siamese bi-encoder retrieval method that grounds document-level CTI labels to candidate evidence sentences, turning weak report-level supervision into sentence-level training pairs.
 
 Across the two benchmark datasets used in the paper, `TRAM` and `AnnoCTR`, the combined augmentation strategy reports improvements of `3.9%` to `12.1%`.
 
@@ -60,15 +60,12 @@ If you want to reproduce the experiments, the best starting point is:
 
 1. Read the workflow notes in [`classification/README.md`](./classification/README.md).
 2. Inspect the datasets available in [`classification/datasets/`](./classification/datasets/).
-3. Review the augmentation assets and retrieval notebooks in [`data_augmentatio/`](./data_augmentatio/).
+3. Review the augmentation assets and retrieval notebooks in [`data_augmentation/`](./data_augmentatio/).
 4. Recreate the environment from [`classification/requirements.txt`](./classification/requirements.txt) in a fresh virtual environment rather than using the bundled local environment folders.
 
 ## Notes On The Current State Of The Repo
 
 - The repository reflects active research code and includes exploratory notebooks, generated outputs, and dataset snapshots.
-- Some directory names and scripts still reflect development-time naming choices, for example `data_augmentatio/`.
+- Some directory names and scripts still reflect development-time naming choices, for example `data_augmentation/`.
 - The current root README is intended to explain the paper-to-code mapping clearly; the lower-level execution details are still mostly documented inside [`classification/README.md`](./classification/README.md).
 
-## Citation
-
-If you use this repository, please cite the accompanying paper in [`sentence_to_ttp.pdf`](./sentence_to_ttp.pdf). A BibTeX entry can be added once the final publication metadata is available.

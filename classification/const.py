@@ -48,6 +48,10 @@ class ExpDataset(enum.Enum):
     BOSCH_EDA = "bosch_eda"
     TRAM_ARTIFICIAL = "tram_artificial"
     BOSCH_ARTIFICIAL = "bosch_artificial"
+    TRAM_CAPEC_TEST = "tram_capec_test"
+    BOSCH_CAPEC_TEST = "bosch_capec_test"
+    CVE_TTP = "cve_ttp"
+    CVE_TTP_augmented = "cve_ttp_augmented"
 MODELS = [
     "bert-base-uncased",
     "bert-base-cased",
@@ -548,6 +552,50 @@ BOSCH_TECHNIQUES_LABELS = [
 ]
 
  
+CVE_TTP_TECHNIQUES_LABELS = [
+    "T1003",
+    "T1005",
+    "T1016",
+    "T1018",
+    "T1021",
+    "T1027",
+    "T1033",
+    "T1036",
+    "T1036.005",
+    "T1037",
+    "T1046",
+    "T1049",
+    "T1055",
+    "T1056",
+    "T1070",
+    "T1078",
+    "T1082",
+    "T1083",
+    "T1087",
+    "T1110",
+    "T1112",
+    "T1119",
+    "T1134",
+    "T1185",
+    "T1211",
+    "T1217",
+    "T1499",
+    "T1528",
+    "T1539",
+    "T1543",
+    "T1547",
+    "T1547.001",
+    "T1548",
+    "T1552.001",
+    "T1555",
+    "T1556",
+    "T1557",
+    "T1563",
+    "T1566",
+    "T1566.001",
+    "T1592",
+    "T1595",
+    ]
 
 TRAM_TECHNIQUES_LABELS = [
     "T1003.001",
